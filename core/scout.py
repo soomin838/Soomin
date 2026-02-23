@@ -72,45 +72,39 @@ class SourceScout:
         "new feature",
     ]
     _MAINSTREAM_TERMS = [
-        "excel",
-        "spreadsheet",
-        "resume",
-        "job",
-        "office",
-        "meeting",
-        "email",
-        "calendar",
-        "budget",
-        "template",
-        "free ai",
-        "chatgpt",
-        "copilot",
-        "productivity",
-        "time saving",
-        "workflow",
-        "automation",
-        "side hustle",
-        "small business",
+        "not working",
+        "fix",
+        "troubleshoot",
+        "error",
+        "error code",
+        "windows",
+        "mac",
+        "iphone",
+        "galaxy",
+        "android",
+        "wifi",
+        "bluetooth",
+        "internet",
+        "audio",
+        "sound",
+        "mic",
+        "speaker",
+        "battery",
+        "charging",
+        "update",
+        "stuck",
+        "crash",
+        "slow",
+        "lag",
+        "freeze",
+        "driver",
+        "reset",
+        "reinstall",
+        "recovery",
         "beginner",
-        "no-code",
-        "tutorial",
+        "step by step",
         "how to",
-        "apple",
-        "tesla",
-        "google",
-        "microsoft",
-        "amazon",
-        "netflix",
-        "productivity secret",
-        "innovation culture",
-        "team habits",
-        "work method",
-        "anthropic",
-        "perplexity",
-        "openai",
-        "mistral",
-        "startup",
-        "rising star",
+        "checklist",
     ]
     _NERD_HEAVY_TERMS = [
         "cuda",
@@ -558,7 +552,7 @@ class SourceScout:
 
     def _fetch_reddit_headlines(self, limit_per_sub: int = 25) -> list[dict]:
         out: list[dict] = []
-        subs = ["technology", "artificial", "MachineLearning", "OpenAI", "Futurology"]
+        subs = ["techsupport", "WindowsHelp", "mac", "iphone", "androidapps", "sysadmin"]
         headers = {"User-Agent": "RezeroAgent/2.5 (trend scout)"}
         for sub in subs:
             try:
@@ -735,29 +729,29 @@ class SourceScout:
             short = re.sub(r"\s+", " ", short).strip(" -")
             if not short:
                 continue
-            _push(f"How {entity} {short} for office workflows")
-            _push(f"Why is {entity} {short} trending today")
-            _push(f"What does {entity} {short} mean for team productivity")
+            _push(f"How to fix {entity} {short}")
+            _push(f"Why {entity} {short} is not working")
+            _push(f"{entity} {short} troubleshooting steps")
             if len(questions) >= 6:
                 break
 
         if len(questions) < 3:
             fallback = [
-                f"How {entity} improves everyday office productivity",
-                f"Why everyone is talking about {entity} workflow updates",
-                f"What {entity} changes mean for non-technical teams",
-                f"How to apply {entity} ideas to small business operations",
-                f"What happened with {entity} this week for normal teams",
-                f"How {entity} helps save time in routine office tasks",
+                f"{entity} not working fix guide",
+                f"How to fix common {entity} setup errors",
+                f"{entity} update problems and solutions",
+                f"{entity} connectivity troubleshooting steps",
+                f"{entity} app crash fix for beginners",
+                f"{entity} performance issue checklist",
             ]
             for q in fallback:
                 _push(q)
 
         if len(questions) < 5:
             fill = [
-                f"How I used {entity} ideas to simplify a weekly workflow",
-                f"Why {entity} is becoming a practical office productivity topic",
-                f"What to copy from {entity} without technical jargon",
+                f"{entity} recovery steps after failed update",
+                f"{entity} no sound or mic issue fix",
+                f"{entity} reset and prevention checklist",
             ]
             for q in fill:
                 _push(q)

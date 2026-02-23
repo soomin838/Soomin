@@ -15,115 +15,76 @@ class WritingPattern:
 
 
 PATTERNS: dict[str, WritingPattern] = {
-    "pattern_1_authority_announcement": WritingPattern(
-        key="pattern_1_authority_announcement",
-        domain="office_experiment",
-        stage="decision",
-        objective="Leverage official credibility signals and convert high-intent readers.",
+    "pattern_troubleshoot_quickfix": WritingPattern(
+        key="pattern_troubleshoot_quickfix",
+        domain="tech_troubleshoot",
+        stage="fix",
+        objective="Deliver a fast troubleshooting path for mainstream users.",
         outline=[
-            "State official recognition or qualification clearly.",
-            "Explain why it matters to the reader's risk.",
-            "Show concrete proof assets (numbers, docs, references).",
-            "Give practical next-step process and timeline.",
-            "Close with one clear CTA.",
+            "Quick Answer with plain-language root cause.",
+            "Explain why the issue happens in normal usage.",
+            "Provide Fix 1-3 from safest to strongest.",
+            "Add one advanced fix and one hardware sanity check.",
+            "Close with prevention checklist and next-step CTA.",
         ],
     ),
-    "pattern_3_cost_objection": WritingPattern(
-        key="pattern_3_cost_objection",
-        domain="office_experiment",
-        stage="comparison",
-        objective="Handle price objections with value and failure-cost framing.",
+    "pattern_troubleshoot_update_break": WritingPattern(
+        key="pattern_troubleshoot_update_break",
+        domain="tech_troubleshoot",
+        stage="fix",
+        objective="Resolve post-update breakages without risky deep system steps.",
         outline=[
-            "Break down what drives real cost.",
-            "Show hidden risk of choosing only by lowest price.",
-            "Provide a checklist to compare options fairly.",
-            "Present a practical budget range by scenario.",
-            "End with a consult CTA and required prep items.",
+            "Describe the symptom users see right after update.",
+            "List update-specific checks and rollback-safe actions.",
+            "Show what worked in a first-person test sequence.",
+            "Provide prevention steps for the next update cycle.",
+            "End with a concise checklist users can reuse.",
         ],
     ),
-    "pattern_5_failure_prevention": WritingPattern(
-        key="pattern_5_failure_prevention",
-        domain="office_experiment",
-        stage="awareness",
-        objective="Use failure patterns to reduce uncertainty and increase trust.",
+    "pattern_troubleshoot_connectivity": WritingPattern(
+        key="pattern_troubleshoot_connectivity",
+        domain="tech_troubleshoot",
+        stage="fix",
+        objective="Fix Wi-Fi/Bluetooth/network reliability issues quickly.",
         outline=[
-            "Describe common failure symptoms.",
-            "Explain structural root causes.",
-            "Provide prevention checklist.",
-            "Share safer implementation path.",
-            "Conclude with a risk-reduction CTA.",
+            "Clarify if problem is device-side or network-side.",
+            "Run Fix 1-3 in strict order to avoid side effects.",
+            "Call out one anti-pattern that makes issue worse.",
+            "Provide advanced fix only after basic checks pass.",
+            "Finish with prevention routine and escalation rule.",
         ],
     ),
-    "pattern_6_process_open": WritingPattern(
-        key="pattern_6_process_open",
-        domain="office_experiment",
-        stage="decision",
-        objective="Reduce anxiety by exposing transparent process and milestones.",
+    "pattern_troubleshoot_audio": WritingPattern(
+        key="pattern_troubleshoot_audio",
+        domain="tech_troubleshoot",
+        stage="fix",
+        objective="Restore sound/mic behavior with minimal friction.",
         outline=[
-            "Explain each project phase and owner.",
-            "List deliverables and checkpoints.",
-            "Show quality controls and revision scope.",
-            "Add timeline and communication rules.",
-            "Close with onboarding CTA.",
+            "Identify exact audio symptom and affected app/device.",
+            "Apply safe baseline checks before changing settings.",
+            "Provide tested fixes with expected outcomes.",
+            "Add hardware port/cable/device sanity checks.",
+            "Close with prevention habits for daily use.",
         ],
     ),
-    "pattern_8_case_study": WritingPattern(
-        key="pattern_8_case_study",
-        domain="office_experiment",
-        stage="comparison",
-        objective="Prove repeatable results through problem-strategy-outcome structure.",
+    "pattern_troubleshoot_performance": WritingPattern(
+        key="pattern_troubleshoot_performance",
+        domain="tech_troubleshoot",
+        stage="fix",
+        objective="Recover sluggish, freezing, or crashing device behavior.",
         outline=[
-            "State client context and initial problem.",
-            "Show strategy and decision logic.",
-            "Quantify measurable outcomes.",
-            "Extract reusable lessons.",
-            "Offer next action CTA with expected scope.",
-        ],
-    ),
-    "pattern_10_vendor_selection": WritingPattern(
-        key="pattern_10_vendor_selection",
-        domain="office_experiment",
-        stage="comparison",
-        objective="Educate readers to choose vendors using decision questions.",
-        outline=[
-            "List critical vendor-screening questions.",
-            "Explain why each question matters.",
-            "Provide red-flag answers to avoid.",
-            "Suggest scoring rubric.",
-            "End with consultation CTA.",
-        ],
-    ),
-    "pattern_11_benchmark": WritingPattern(
-        key="pattern_11_benchmark",
-        domain="office_experiment",
-        stage="awareness",
-        objective="Build authority with benchmark and trend analysis.",
-        outline=[
-            "Present baseline benchmark values.",
-            "Compare realistic ranges by segment.",
-            "Interpret implications for decision-making.",
-            "Provide action checklist.",
-            "Close with strategy CTA.",
-        ],
-    ),
-    "pattern_12_schedule_to": WritingPattern(
-        key="pattern_12_schedule_to",
-        domain="office_experiment",
-        stage="decision",
-        objective="Use schedule and capacity clarity to trigger timely action.",
-        outline=[
-            "Disclose current timeline and capacity.",
-            "Explain lead-time risks.",
-            "Provide preparation checklist before inquiry.",
-            "Clarify what happens after submission.",
-            "End with urgent but factual CTA.",
+            "Define symptom and trigger pattern clearly.",
+            "Prioritize fastest high-impact fixes first.",
+            "Compare two rejected approaches and why they failed.",
+            "Provide one advanced fix with caution boundary.",
+            "Finish with a repeatable health-check checklist.",
         ],
     ),
     "pattern_13_ai_prompt_guide": WritingPattern(
         key="pattern_13_ai_prompt_guide",
         domain="ai_prompt_guide",
         stage="tutorial",
-        objective="Teach practical prompt usage with copy-ready examples for normal office users.",
+        objective="Teach practical prompt usage with copy-ready examples for mainstream users.",
         outline=[
             "Explain the real task context in plain language.",
             "Show one good prompt example and why it works.",
@@ -157,23 +118,12 @@ class PatternEngine:
         ):
             return PATTERNS["pattern_13_ai_prompt_guide"]
 
-        if any(k in text for k in ["cost", "price", "budget", "pricing", "견적", "비용"]):
-            return PATTERNS["pattern_3_cost_objection"]
-        if any(k in text for k in ["fail", "mistake", "broken", "pitfall", "실패", "문제"]):
-            return PATTERNS["pattern_5_failure_prevention"]
-        if any(k in text for k in ["process", "workflow", "pipeline", "프로세스", "절차"]):
-            return PATTERNS["pattern_6_process_open"]
-        if any(k in text for k in ["case study", "results", "conversion", "성과", "사례"]):
-            return PATTERNS["pattern_8_case_study"]
-        if any(k in text for k in ["select", "choose", "vendor", "agency", "업체", "선택"]):
-            return PATTERNS["pattern_10_vendor_selection"]
-        if any(k in text for k in ["benchmark", "trend", "report", "통계", "지표"]):
-            return PATTERNS["pattern_11_benchmark"]
-        if any(k in text for k in ["deadline", "launch", "schedule", "일정", "마감"]):
-            return PATTERNS["pattern_12_schedule_to"]
-
-        if candidate.source == "github":
-            return PATTERNS["pattern_6_process_open"]
-        if candidate.source == "hackernews":
-            return PATTERNS["pattern_11_benchmark"]
-        return PATTERNS["pattern_10_vendor_selection"]
+        if any(k in text for k in ["wifi", "bluetooth", "network", "internet", "dns", "router"]):
+            return PATTERNS["pattern_troubleshoot_connectivity"]
+        if any(k in text for k in ["audio", "sound", "mic", "speaker", "headset"]):
+            return PATTERNS["pattern_troubleshoot_audio"]
+        if any(k in text for k in ["slow", "lag", "freeze", "crash", "performance"]):
+            return PATTERNS["pattern_troubleshoot_performance"]
+        if any(k in text for k in ["update", "patch", "upgrade", "version", "after update"]):
+            return PATTERNS["pattern_troubleshoot_update_break"]
+        return PATTERNS["pattern_troubleshoot_quickfix"]

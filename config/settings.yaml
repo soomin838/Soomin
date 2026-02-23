@@ -41,6 +41,7 @@ publish:
   quiet_hours_end: "07:00"
   buffer_target_days: 5
   buffer_min_days: 3
+  schedule_horizon_days: 14
 quality:
   enabled: true
   strict_mode: true
@@ -83,6 +84,17 @@ quality:
     - "latency budget"
     - "on-call"
     - "incident severity"
+  disallowed_terms_tech_troubleshoot:
+    - "why everyone is talking"
+    - "productivity breakthrough"
+    - "innovation culture"
+    - "team morale"
+    - "office influencer"
+    - "viral trend"
+    - "executive context"
+    - "authority snapshot"
+    - "action framework"
+    - "decision criteria"
   require_story_block: true
   require_story_block_min_count: 1
   prompt_example_section_titles:
@@ -90,7 +102,7 @@ quality:
     - "Prompt examples"
     - "Example prompt"
     - "Try this"
-    - "프롬프트 예시"
+    - "Prompt snippets"
   meta_block_start: "[[META]]"
   meta_block_end: "[[/META]]"
   partial_fix_enabled: true
@@ -118,6 +130,17 @@ qa:
       - "latency budget"
       - "on-call"
       - "incident severity"
+    tech_troubleshoot:
+      - "why everyone is talking"
+      - "productivity breakthrough"
+      - "innovation culture"
+      - "team morale"
+      - "office influencer"
+      - "viral trend"
+      - "executive context"
+      - "authority snapshot"
+      - "action framework"
+      - "decision criteria"
   require_story_block:
     enabled: true
     min_count: 1
@@ -159,8 +182,8 @@ sources:
   stackexchange_site: "superuser"
   stackexchange_tagged: "windows-11;macos;iphone;android;audio;drivers;networking"
   stackexchange_min_score: 5
-  hn_min_score: 40
-  github_repos: ["microsoft/PowerToys", "apple/swift", "AntennaPod/AntennaPod"]
+  hn_min_score: 30
+  github_repos: []
   github_min_reactions: 2
   github_token: ""
   max_candidates: 20

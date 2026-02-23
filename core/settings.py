@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -109,6 +109,7 @@ class PublishSettings:
     quiet_hours_end: str = "07:00"
     buffer_target_days: int = 5
     buffer_min_days: int = 3
+    schedule_horizon_days: int = 14
 
 
 @dataclass
@@ -164,6 +165,20 @@ class QualitySettings:
             "incident severity",
         ]
     )
+    disallowed_terms_tech_troubleshoot: list[str] = field(
+        default_factory=lambda: [
+            "why everyone is talking",
+            "productivity breakthrough",
+            "innovation culture",
+            "team morale",
+            "office influencer",
+            "viral trend",
+            "executive context",
+            "authority snapshot",
+            "action framework",
+            "decision criteria",
+        ]
+    )
     require_story_block: bool = True
     require_story_block_min_count: int = 1
     prompt_example_section_titles: list[str] = field(
@@ -172,7 +187,7 @@ class QualitySettings:
             "prompt examples",
             "example prompt",
             "try this",
-            "프롬프트 예시",
+            "prompt snippets",
         ]
     )
     meta_block_start: str = "[[META]]"
@@ -378,6 +393,8 @@ def load_settings(path: Path) -> AppSettings:
         disallowed = qa_raw.get("disallowed_terms", {}) or {}
         if isinstance(disallowed, dict) and "office_experiment" in disallowed:
             quality_raw["disallowed_terms_office_experiment"] = disallowed.get("office_experiment", [])
+        if isinstance(disallowed, dict) and "tech_troubleshoot" in disallowed:
+            quality_raw["disallowed_terms_tech_troubleshoot"] = disallowed.get("tech_troubleshoot", [])
         story = qa_raw.get("require_story_block", {}) or {}
         if isinstance(story, dict):
             if "enabled" in story:
@@ -438,7 +455,9 @@ def load_settings(path: Path) -> AppSettings:
         bdays = int(publishing_raw.get("buffer_target_days", 5))
         raw["publish"]["buffer_target_days"] = bdays
         raw["publish"]["buffer_min_days"] = int(publishing_raw.get("buffer_min_days", 3))
-        raw["publish"]["queue_horizon_hours"] = max(24, bdays * 24)
+        horizon_days = int(publishing_raw.get("schedule_horizon_days", max(14, bdays)))
+        raw["publish"]["schedule_horizon_days"] = max(1, horizon_days)
+        raw["publish"]["queue_horizon_hours"] = max(24, int(raw["publish"]["schedule_horizon_days"]) * 24)
         raw["publish"]["target_queue_size"] = max(1, int(raw["publish"]["daily_publish_cap"]) * max(1, bdays))
         raw["publish"]["time_window_start"] = str(publishing_raw.get("time_window_start", "09:00"))
         raw["publish"]["time_window_end"] = str(publishing_raw.get("time_window_end", "23:00"))
@@ -488,3 +507,4 @@ def load_settings(path: Path) -> AppSettings:
         authority_links=raw.get("authority_links", []),
         windows=raw.get("windows", {"use_task_scheduler": True}),
     )
+

@@ -147,6 +147,7 @@ class AgentWorkflow:
         payload.setdefault("latency_ms", 0)
         payload.setdefault("success", event not in {"ollama_prompt_plan_failed", "ollama_qa_review_failed"})
         payload.setdefault("fallback_used", not payload.get("success", True))
+        payload.setdefault("ok", bool(payload.get("success", False)))
         row = {
             "ts_utc": datetime.now(timezone.utc).isoformat(),
             "event": str(event or "").strip(),
@@ -210,8 +211,8 @@ class AgentWorkflow:
             ),
             "alt_suggestions": [
                 "Concept image representing a practical troubleshooting workflow.",
-                "Visual summary of a step-by-step productivity improvement flow.",
-                "Illustration of a structured process used to solve recurring office issues.",
+                "Visual summary of a step-by-step troubleshooting flow.",
+                "Illustration of a structured process used to solve recurring device issues.",
             ],
             "style_tags": ["realistic", "editorial", "clean"],
             "source": "fallback",
@@ -689,11 +690,11 @@ class AgentWorkflow:
         if diversity_note:
             generation_degraded_note = self._append_note(generation_degraded_note, diversity_note)
         collect_checkpoint_html = (
-            "<h2>Workflow Checkpoint</h2>"
-            "<p><strong>Stage:</strong> collect_done</p>"
-            f"<p><strong>Selected topic:</strong> {escape(str(getattr(selected, 'title', '') or 'Untitled Topic'))}</p>"
+            "<h2>Collection Snapshot</h2>"
+            "<p><strong>Pipeline stage:</strong> collect_done</p>"
+            f"<p><strong>Topic:</strong> {escape(str(getattr(selected, 'title', '') or 'Untitled Topic'))}</p>"
             f"<p><strong>Source:</strong> {escape(str(getattr(selected, 'source', '') or 'unknown'))}</p>"
-            f"<p><strong>Selection score:</strong> {int(score)}</p>"
+            f"<p><strong>Score:</strong> {int(score)}</p>"
             f"<p><strong>Reason:</strong> {escape(str(reason or 'n/a')[:300])}</p>"
         )
         selected_url = str(getattr(selected, "url", "") or "").strip()
@@ -725,7 +726,7 @@ class AgentWorkflow:
             draft = self.brain.generate_post_free(selected, self.settings.authority_links)
         else:
             pattern = self.patterns.choose(selected)
-            current_domain = str(getattr(pattern, "domain", "office_experiment") or "office_experiment")
+            current_domain = str(getattr(pattern, "domain", "tech_troubleshoot") or "tech_troubleshoot")
             pattern_instruction = (
                 f"Pattern key: {pattern.key}\n"
                 f"Domain: {current_domain}\n"
@@ -1128,6 +1129,7 @@ class AgentWorkflow:
         final_html += self._build_image_rights_block(images, draft.source_url)
         final_html = self._sanitize_publish_html(final_html, domain=current_domain)
         final_html = self._double_unescape(final_html)
+        final_html = self._canonicalize_html_payload(final_html)
         local_qa_review = self._run_local_llm_qa_review(
             title=draft.title,
             html=final_html,
@@ -1138,6 +1140,8 @@ class AgentWorkflow:
             if not tok:
                 continue
             final_html = re.sub(tok, "", final_html, flags=re.IGNORECASE)
+        final_html = self._sanitize_publish_html(final_html, domain=current_domain)
+        final_html = self._canonicalize_html_payload(final_html)
         if isinstance(local_qa_review, dict):
             issue_count = len(list(local_qa_review.get("issues", []) or []))
             if issue_count > 0:
@@ -1507,7 +1511,7 @@ class AgentWorkflow:
             ]
         ):
             return "ai_prompt_guide"
-        return "office_experiment"
+        return "tech_troubleshoot"
 
     def _is_temporary_rate_limit_error(self, message: str) -> bool:
         msg = (message or "").lower()
@@ -1758,7 +1762,7 @@ class AgentWorkflow:
             push(tok)
 
         if not labels:
-            labels = ["ai-productivity", "office-tools"]
+            labels = ["tech-fix", "troubleshooting"]
         return labels[: max(1, int(max_labels))]
 
     def _set_image_pipeline_state(self, status: str, passed: int, target: int, message: str) -> None:
@@ -1836,7 +1840,7 @@ class AgentWorkflow:
         candidate = TopicCandidate(
             source="resume",
             title=(title or "Recovered Topic"),
-            body=(plain or "Recovered topic from previous workflow checkpoint."),
+            body=(plain or "Recovered topic from previous collection snapshot."),
             score=80,
             url=source_url,
         )
@@ -1883,7 +1887,7 @@ class AgentWorkflow:
         title = self._strip_wip_title_prefix(str(row.get("title", "") or "").strip())
         html_body = self._strip_wip_checkpoint_banner(str(row.get("content", "") or ""))
         labels = self._normalize_resume_labels(row.get("labels", []))
-        if not labels or labels == ["ai-productivity", "office-tools"]:
+        if not labels or labels == ["tech-fix", "troubleshooting"]:
             labels = self._build_public_labels(
                 title=title,
                 candidate=None,
@@ -2040,6 +2044,7 @@ class AgentWorkflow:
         final_html = draft.html + self._build_image_rights_block(images, draft.source_url)
         final_html = self._sanitize_publish_html(final_html, domain=resume_domain)
         final_html = self._double_unescape(final_html)
+        final_html = self._canonicalize_html_payload(final_html)
         local_qa_review = self._run_local_llm_qa_review(
             title=title,
             html=final_html,
@@ -2050,6 +2055,8 @@ class AgentWorkflow:
             if not tok:
                 continue
             final_html = re.sub(tok, "", final_html, flags=re.IGNORECASE)
+        final_html = self._sanitize_publish_html(final_html, domain=resume_domain)
+        final_html = self._canonicalize_html_payload(final_html)
         go_live_errors, go_live_warnings = self._go_live_gate_checklist(
             title=title,
             final_html=final_html,
@@ -2164,7 +2171,7 @@ class AgentWorkflow:
             seen.add(norm)
             out.append(norm)
         if not out:
-            out = ["ai-productivity", "office-tools"]
+            out = ["tech-fix", "troubleshooting"]
         return out[:10]
 
     def _extract_first_href(self, html: str) -> str:
@@ -2219,10 +2226,12 @@ class AgentWorkflow:
         )
         return (html or "") + block
 
-    def _draft_fatal_issues(self, html: str, domain: str = "office_experiment") -> list[str]:
+    def _draft_fatal_issues(self, html: str, domain: str = "tech_troubleshoot") -> list[str]:
         out: list[str] = []
         if not html or "<h2" not in html.lower() or "<p" not in html.lower():
             out.append("invalid_html_structure")
+        if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", str(html or "")):
+            out.append("markdown_heading_leak")
         lower = html.lower()
         if "this draft did not include valid html sections" in lower:
             out.append("template_fallback_text")
@@ -2238,9 +2247,14 @@ class AgentWorkflow:
                 out.append("quick_take_template_leak")
         if re.search(r"\b(section context visual|concept visual|supporting chart)\s*\d+\b", lower):
             out.append("visual_placeholder_leak")
-        if str(domain or "").strip().lower() == "office_experiment":
+        if str(domain or "").strip().lower() in {"office_experiment", "tech_troubleshoot"}:
             severe_hits = 0
-            for term in (getattr(self.settings.quality, "disallowed_terms_office_experiment", []) or []):
+            disallowed_terms = (
+                getattr(self.settings.quality, "disallowed_terms_tech_troubleshoot", [])
+                if str(domain or "").strip().lower() == "tech_troubleshoot"
+                else getattr(self.settings.quality, "disallowed_terms_office_experiment", [])
+            )
+            for term in (disallowed_terms or []):
                 t = str(term or "").strip().lower()
                 if not t:
                     continue
@@ -2331,7 +2345,7 @@ class AgentWorkflow:
         safe_title = re.sub(r"\s+", " ", str(title or "")).strip() or "this topic"
         return (
             f"This guide gives the fastest practical answer about {safe_title}.",
-            "Start with one small workflow change, then scale after you verify time saved.",
+            "Start with one safe troubleshooting step, then scale only after you verify the result.",
         )
 
     def _optimize_thumbnail_alt(self, images: list[ImageAsset], candidate: TopicCandidate) -> None:
@@ -2348,7 +2362,7 @@ class AgentWorkflow:
             base = re.sub(r"[?]+$", "", long_tails[0]).strip()
             base = re.sub(r"^(how|why|what)\s+", "", base, flags=re.IGNORECASE)
             base = re.sub(
-                r"\b(for office workflows|trending today|mean for team productivity)\b",
+                r"\b(trending today|mean for (?:team|daily) productivity|why everyone is talking|for office workflows?)\b",
                 "",
                 base,
                 flags=re.IGNORECASE,
@@ -2401,12 +2415,45 @@ class AgentWorkflow:
     ) -> tuple[list[str], list[str]]:
         errors: list[str] = []
         warnings: list[str] = []
-        merged = f"{title}\n{final_html}".lower()
-        if re.search(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", f"{title}\n{final_html}"):
+        merged_raw = f"{title}\n{final_html}"
+        merged = merged_raw.lower()
+        if re.search(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", merged_raw):
             errors.append("english_only_violation_hangul")
+
+        if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", str(final_html or "")):
+            errors.append("markdown_heading_detected")
+        if "## " in str(final_html or "") or "### " in str(final_html or ""):
+            errors.append("markdown_tokens_detected")
 
         if re.search(r"(&#x27;|&#39;|x27\?)", merged, flags=re.IGNORECASE):
             errors.append("encoding_fragment_detected")
+
+        if re.search(r"(https?://(?:www\.)?google\.com(?:/search)?[^\s\"<]*)", merged, flags=re.IGNORECASE):
+            errors.append("forbidden_google_link_detected")
+        if "<figcaption" in merged:
+            errors.append("forbidden_figcaption_detected")
+
+        banned_tokens = list(getattr(self.settings.quality, "banned_debug_patterns", []) or [])
+        if not banned_tokens:
+            banned_tokens = [
+                "workflow checkpoint stage",
+                "av reference context",
+                "jobtitle",
+                "sameas",
+                "selected topic",
+                "source trending_entities",
+            ]
+        for token in banned_tokens:
+            t = str(token or "").strip().lower()
+            if not t:
+                continue
+            if t in merged:
+                errors.append(f"debug_token_leak:{t}")
+                break
+        if "[[meta]]" in merged or "[[/meta]]" in merged:
+            errors.append("meta_block_leak")
+        if re.search(r"\billustration\s+showing\b", merged):
+            errors.append("illustration_placeholder_leak")
 
         if not images:
             errors.append("images_missing")
@@ -2439,6 +2486,9 @@ class AgentWorkflow:
             if intro_alt_fail:
                 errors.append("intro_alt_similarity_high")
                 warnings.append(intro_alt_detail)
+        html_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", str(final_html or ""), flags=re.IGNORECASE))
+        if html_img_count < 2:
+            errors.append(f"insufficient_html_images({html_img_count}/2)")
 
         # Narrative title quality check: company + hot issue tone recommended.
         title_lower = str(title or "").lower()
@@ -2504,20 +2554,108 @@ class AgentWorkflow:
             key = re.sub(r"\s+", " ", str(kw or "")).strip()
             if not key:
                 continue
-            _push(f"how to use {key} in everyday work")
-            _push(f"{key} productivity workflow for office teams")
+            _push(f"how to fix {key}")
+            _push(f"{key} troubleshooting checklist")
 
         if len(out) < 5:
-            _push(f"how {subject} improves daily workflow")
-            _push(f"{subject} productivity tips for office teams")
-            _push(f"best way to use {subject} for time saving")
-            _push(f"{subject} use cases for beginners")
-            _push(f"{subject} workflow checklist")
-            _push(f"{subject} setup guide for non technical users")
+            _push(f"how to fix {subject} not working")
+            _push(f"{subject} update issue recovery steps")
+            _push(f"{subject} connectivity troubleshooting")
+            _push(f"{subject} beginner safe fixes")
+            _push(f"{subject} troubleshooting checklist")
+            _push(f"{subject} setup error fix guide")
 
         candidate.long_tail_keywords = out[:8]
 
-    def _sanitize_publish_html(self, html: str, domain: str = "office_experiment") -> str:
+    def _canonicalize_html_payload(self, html: str) -> str:
+        out = str(html or "").strip()
+        if not out:
+            return out
+
+        has_markdown_heading = bool(re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", out))
+        has_html_structure = bool(re.search(r"<h2\b|<p\b", out, flags=re.IGNORECASE))
+        if not has_markdown_heading and has_html_structure:
+            return out
+
+        converted = self._convert_markdown_like_to_html(out)
+        converted = re.sub(r"(?m)^\s*#{1,6}\s+(.+)$", "", converted)
+        converted = re.sub(r"\n{3,}", "\n\n", converted)
+        return converted.strip()
+
+    def _convert_markdown_like_to_html(self, text: str) -> str:
+        src = str(text or "")
+        try:
+            import markdown as md  # type: ignore
+
+            html_out = md.markdown(
+                src,
+                extensions=["extra", "sane_lists"],
+                output_format="html5",
+            )
+            if html_out:
+                return html_out
+        except Exception:
+            pass
+
+        lines = src.splitlines()
+        blocks: list[str] = []
+        in_ul = False
+        in_ol = False
+        for raw in lines:
+            line = re.sub(r"\s+", " ", str(raw or "")).strip()
+            if not line:
+                if in_ul:
+                    blocks.append("</ul>")
+                    in_ul = False
+                if in_ol:
+                    blocks.append("</ol>")
+                    in_ol = False
+                continue
+            m_h = re.match(r"^\s*#{2,3}\s+(.+)$", raw)
+            if m_h:
+                if in_ul:
+                    blocks.append("</ul>")
+                    in_ul = False
+                if in_ol:
+                    blocks.append("</ol>")
+                    in_ol = False
+                level = 2 if raw.lstrip().startswith("##") else 3
+                blocks.append(f"<h{level}>{escape(m_h.group(1).strip())}</h{level}>")
+                continue
+            m_li = re.match(r"^\s*[-*]\s+(.+)$", raw)
+            if m_li:
+                if in_ol:
+                    blocks.append("</ol>")
+                    in_ol = False
+                if not in_ul:
+                    blocks.append("<ul>")
+                    in_ul = True
+                blocks.append(f"<li>{escape(m_li.group(1).strip())}</li>")
+                continue
+            m_oli = re.match(r"^\s*\d+\.\s+(.+)$", raw)
+            if m_oli:
+                if in_ul:
+                    blocks.append("</ul>")
+                    in_ul = False
+                if not in_ol:
+                    blocks.append("<ol>")
+                    in_ol = True
+                blocks.append(f"<li>{escape(m_oli.group(1).strip())}</li>")
+                continue
+            if in_ul:
+                blocks.append("</ul>")
+                in_ul = False
+            if in_ol:
+                blocks.append("</ol>")
+                in_ol = False
+            blocks.append(f"<p>{escape(line)}</p>")
+        if in_ul:
+            blocks.append("</ul>")
+        if in_ol:
+            blocks.append("</ol>")
+        return "\n".join(blocks)
+
+    def _sanitize_publish_html(self, html: str, domain: str = "tech_troubleshoot") -> str:
         out = html or ""
         if not out:
             return out
@@ -2598,6 +2736,12 @@ class AgentWorkflow:
         )
         out = re.sub(
             r"https?://(?:www\.)?google\.com/search\?[^\"\s<]+",
+            "",
+            out,
+            flags=re.IGNORECASE,
+        )
+        out = re.sub(
+            r"https?://(?:www\.)?google\.com/[^\s\"<]*",
             "",
             out,
             flags=re.IGNORECASE,
@@ -2885,7 +3029,8 @@ class AgentWorkflow:
         scheduled = snapshot.get("scheduled_items", []) or []
         times: list[datetime] = []
         day_count: dict[str, int] = {}
-        today_key = now.date().isoformat()
+        tz = self._publish_tz()
+        today_key = now.astimezone(tz).date().isoformat()
         try:
             today_posts = int(snapshot.get("today_posts", 0))
         except Exception:
@@ -2901,7 +3046,7 @@ class AgentWorkflow:
                 continue
             dt = dt.replace(microsecond=0)
             times.append(dt)
-            dkey = dt.date().isoformat()
+            dkey = dt.astimezone(tz).date().isoformat()
             day_count[dkey] = day_count.get(dkey, 0) + 1
         times.sort()
         return times, day_count
@@ -3015,26 +3160,28 @@ class AgentWorkflow:
         times: list[datetime] | None = None,
     ) -> datetime | None:
         base = cand
+        tz = self._publish_tz()
         for day_offset in range(0, 730):
-            day = (base + timedelta(days=day_offset)).date()
+            day = ((base if base.tzinfo else base.replace(tzinfo=timezone.utc)).astimezone(tz) + timedelta(days=day_offset)).date()
             dkey = day.isoformat()
             if day_count.get(dkey, 0) < daily_cap:
                 if day_offset == 0:
                     return base
                 # Overflow rule: move to the next day with capacity at the first available slot.
-                candidate = datetime(
+                candidate_local = datetime(
                     year=day.year,
                     month=day.month,
                     day=day.day,
                     hour=0,
                     minute=5,
                     second=random.randint(0, 59),
-                    tzinfo=timezone.utc,
+                    tzinfo=tz,
                 )
+                candidate = candidate_local.astimezone(timezone.utc)
                 same_day = sorted(
                     [
                         t for t in (times or [])
-                        if t.date().isoformat() == dkey
+                        if (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(tz).date().isoformat() == dkey
                     ]
                 )
                 for t in same_day:
@@ -3044,7 +3191,7 @@ class AgentWorkflow:
                         candidate = (t + timedelta(minutes=4)).replace(microsecond=0)
                         if candidate.date() != day:
                             break
-                if candidate.date() == day:
+                if candidate.astimezone(tz).date() == day:
                     return candidate
                 return datetime(
                     year=day.year,
@@ -3053,8 +3200,8 @@ class AgentWorkflow:
                     hour=0,
                     minute=30,
                     second=random.randint(0, 59),
-                    tzinfo=timezone.utc,
-                )
+                    tzinfo=tz,
+                ).astimezone(timezone.utc)
         return None
 
     def _queue_state(self, snapshot: dict | None = None) -> dict:
@@ -3087,6 +3234,7 @@ class AgentWorkflow:
             "today_runs": int(data.get("today_runs", 0)),
             "today_scheduled": today_reserved,
             "scheduled_72h": int(data.get("scheduled", 0)),
+            "scheduled_horizon": int(data.get("scheduled", 0)),
             "source": str(data.get("source", "local")),
             "today_written": today_written,
             "today_reserved": today_reserved,
@@ -3107,6 +3255,8 @@ class AgentWorkflow:
             "image_pipeline_passed": int((self._image_pipeline_state or {}).get("passed", 0) or 0),
             "image_pipeline_target": int((self._image_pipeline_state or {}).get("target", 0) or 0),
             "image_pipeline_message": str((self._image_pipeline_state or {}).get("message", "") or ""),
+            "publish_timezone": str(getattr(self.settings, "timezone", "America/New_York") or "America/New_York"),
+            "buffer_target_days": int(getattr(self.settings.publish, "buffer_target_days", 5) or 5),
         }
 
     def get_today_global_keywords(self) -> list[str]:
@@ -3198,7 +3348,11 @@ class AgentWorkflow:
             if (now - ts).total_seconds() < self._blog_cache_ttl_seconds:
                 return cached
 
-        horizon_h = max(24, int(self.settings.publish.queue_horizon_hours))
+        horizon_h = max(
+            24,
+            int(self.settings.publish.queue_horizon_hours),
+            max(1, int(getattr(self.settings.publish, "schedule_horizon_days", 14) or 14)) * 24,
+        )
         end = now + timedelta(hours=horizon_h)
         end_iso = end.isoformat()
         fallback_error = ""
@@ -3518,7 +3672,7 @@ class AgentWorkflow:
                 anchor = self._clean_anchor_text(str((row or {}).get("title", "") or "Related post"))
                 url = str((row or {}).get("url", "") or "").strip()
                 lis.append(f'<li><a href="{url}" rel="noopener">{escape(anchor)}</a></li>')
-            block_parts.append("<h2>More Experiments You Might Like</h2><ul>" + "".join(lis) + "</ul>")
+            block_parts.append("<h2>More Fix Guides You Might Like</h2><ul>" + "".join(lis) + "</ul>")
         return "".join(block_parts)
 
     def _clean_anchor_text(self, title: str) -> str:
@@ -3543,7 +3697,7 @@ class AgentWorkflow:
         if len(seed) < 120:
             seed = (
                 seed
-                + " This post explains what worked, what failed, and what office workers can apply immediately."
+                + " This post explains what worked, what failed, and what everyday users can apply immediately."
             )
         seed = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]+", " ", seed)
         seed = re.sub(r"\s+", " ", seed).strip()
@@ -3671,11 +3825,11 @@ class AgentWorkflow:
                     push(" ".join(words[i : i + n]))
             if words:
                 head = " ".join(words[:2])
-                push(f"{head} productivity")
-                push(f"{head} workflow")
-                push(f"how to use {head}")
-                push(f"{head} for office work")
-                push(f"{head} setup tips")
+                push(f"{head} troubleshooting")
+                push(f"{head} fix")
+                push(f"how to fix {head}")
+                push(f"{head} not working")
+                push(f"{head} setup error fix")
             if len(out) >= limit:
                 break
         return out[:limit]

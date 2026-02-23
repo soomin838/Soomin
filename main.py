@@ -666,6 +666,9 @@ class AgentController:
             source = str(usage.get("source", "local"))
             resume_exists = bool(usage.get("resume_exists", False))
             resume_stage = str(usage.get("resume_stage", "") or "")
+            local_llm_ready = bool(usage.get("local_llm_ready", False))
+            local_llm_used = bool(usage.get("local_llm_used_last_run", False))
+            local_llm_reason = str(usage.get("local_llm_reason", "") or "")
             keywords = self.workflow.get_today_global_keywords()
         except Exception:
             calls = 0
@@ -676,6 +679,9 @@ class AgentController:
             source = "local"
             resume_exists = False
             resume_stage = ""
+            local_llm_ready = False
+            local_llm_used = False
+            local_llm_reason = "unknown"
             keywords = []
         call_cap = int(self.settings.budget.daily_gemini_call_limit)
         post_cap = int(self.settings.budget.daily_post_limit)
@@ -687,12 +693,15 @@ class AgentController:
         resume_line = "없음"
         if resume_exists:
             resume_line = f"있음({resume_stage or 'unknown'})"
+        llm_state = "used" if local_llm_used else ("ready" if local_llm_ready else "fallback")
+        llm_reason = (local_llm_reason or "-")[:42]
         return (
             f"모델: {self.settings.gemini.model}\n"
             f"API: {calls}/{call_cap} (권장 {rec_cap})\n"
             f"게시(일캡)/예약(일캡): {posts}/{publish_cap} | {today_scheduled}/{post_cap}\n"
             f"{int(self.settings.publish.queue_horizon_hours)}h 큐: {queue_72h}/{queue_cap} ({source_label})\n"
             f"로컬성공: {runs} | 재개: {resume_line}\n"
+            f"Local LLM: {llm_state} ({llm_reason})\n"
             f"키워드: {kw_line}"
         )
 

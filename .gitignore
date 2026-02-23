@@ -21,6 +21,8 @@ storage/logs/
 storage/sessions/
 storage/temp_images/
 storage/ui/
+storage/*.sqlite
+storage/*.sqlite-journal
 
 # Local secrets/tokens
 config/client_secrets.json
@@ -34,4 +36,3 @@ config/*.secrets.json
 Thumbs.db
 .idea/
 .vscode/
-

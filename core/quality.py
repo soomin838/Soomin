@@ -52,7 +52,7 @@ class ContentQAGate:
         self.authority_links = authority_links
         self.qa_runtime_path = qa_runtime_path
 
-    def evaluate(self, html: str, title: str = "", domain: str = "office_experiment") -> QAResult:
+    def evaluate(self, html: str, title: str = "", domain: str = "tech_troubleshoot") -> QAResult:
         checks: list[QACheck] = []
         text = self._to_text(html)
         words = len(re.findall(r"[A-Za-z0-9']+", text))
@@ -583,7 +583,13 @@ class ContentQAGate:
                 flags=re.IGNORECASE,
             )
         if (not targeted or "domain_drift" in failed):
-            for term in (self.settings.disallowed_terms_office_experiment or []):
+            lower_domain = str((qa_result.domain if qa_result else "") or "").strip().lower()
+            disallowed_terms = (
+                self.settings.disallowed_terms_tech_troubleshoot
+                if lower_domain == "tech_troubleshoot"
+                else self.settings.disallowed_terms_office_experiment
+            )
+            for term in (disallowed_terms or []):
                 t = str(term or "").strip()
                 if not t:
                     continue
@@ -811,6 +817,11 @@ class ContentQAGate:
 
     def _detect_forbidden_phrase_or_format(self, text: str, html: str) -> tuple[bool, str]:
         lower = str(text or "").lower()
+        raw_html = str(html or "")
+        if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", raw_html):
+            return True, "forbidden_markup:markdown_heading"
+        if "## " in raw_html or "### " in raw_html:
+            return True, "forbidden_markup:markdown_token"
         defaults = [
             "workflow checkpoint stage",
             "av reference context",
@@ -831,11 +842,15 @@ class ContentQAGate:
             t = str(token or "").strip().lower()
             if t and t in lower:
                 return True, f"ban_phrase:{t}"
-        raw_html = str(html or "").lower()
+        raw_html = raw_html.lower()
         if "www.google.com" in raw_html or "google.com/search" in raw_html:
+            return True, "forbidden_reference_link:google.com"
+        if re.search(r"https?://(?:www\.)?google\.com/[^\s\"<]*", raw_html):
             return True, "forbidden_reference_link:google.com"
         if "<figcaption" in raw_html:
             return True, "forbidden_markup:figcaption"
+        if "[[meta]]" in raw_html or "[[/meta]]" in raw_html:
+            return True, "forbidden_meta_block_leak"
         if re.search(r"\billustration\s+showing\b", raw_html):
             return True, "forbidden_image_caption_phrase:illustration_showing"
         for fmt in (self.settings.ban_formats or []):
@@ -929,11 +944,17 @@ class ContentQAGate:
         out = re.sub(r"\n{3,}", "\n\n", out)
         return out.strip()
     def _detect_domain_drift(self, text: str, domain: str) -> tuple[bool, str]:
-        if str(domain or "").strip().lower() != "office_experiment":
+        lower_domain = str(domain or "").strip().lower()
+        if lower_domain not in {"office_experiment", "tech_troubleshoot"}:
             return False, ""
         lower = str(text or "").lower()
         hits: list[str] = []
-        for term in (self.settings.disallowed_terms_office_experiment or []):
+        disallowed_terms = (
+            self.settings.disallowed_terms_tech_troubleshoot
+            if lower_domain == "tech_troubleshoot"
+            else self.settings.disallowed_terms_office_experiment
+        )
+        for term in (disallowed_terms or []):
             t = str(term or "").strip().lower()
             if not t:
                 continue
@@ -946,8 +967,8 @@ class ContentQAGate:
     def _detect_missing_story_block(self, text: str, domain: str) -> tuple[bool, str]:
         if not bool(getattr(self.settings, "require_story_block", True)):
             return False, ""
-        # Apply for narrative office and prompt-guide domains.
-        if str(domain or "").strip().lower() not in {"office_experiment", "ai_prompt_guide"}:
+        # Apply for narrative domains.
+        if str(domain or "").strip().lower() not in {"office_experiment", "tech_troubleshoot", "ai_prompt_guide"}:
             return False, ""
         lower = str(text or "").lower()
         story_markers = [

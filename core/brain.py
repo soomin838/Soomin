@@ -58,17 +58,15 @@ class GeminiBrain:
             for idx, item in enumerate(top)
         )
         prompt = (
-            "Pick the single best topic for a practical English blog post for US/UK/global non-technical office workers. "
+            "Pick the single best topic for a practical English troubleshooting blog post for US readers. "
             "Output language must be American English only. Never output Korean.\n"
             "Return strict JSON: {\"index\": int, \"score\": int, \"reason\": string}.\n"
             "Score must be 0-100.\n"
             "Maximize potential CTR and practical value while staying accurate.\n"
             "Prioritize topics that can be explained in plain language without deep engineering jargon.\n"
-            "Prefer themes like work productivity, Excel/document workflows, free AI helpers, and everyday digital life.\n"
-            "Strongly prefer mainstream 'global giant' business stories (Apple/Tesla/Google/Microsoft/Amazon/NVIDIA) "
-            "when they can produce practical productivity takeaways for ordinary workers.\n"
-            "Also include rising stars when currently hot (Perplexity, Anthropic, OpenAI, Mistral, Cursor, Notion).\n"
-            "Avoid attack/accusation framing; focus on positive success lessons and innovation culture.\n"
+            "Prefer mainstream troubleshooting intents: device not working, update issues, connectivity, audio, performance, app crashes.\n"
+            "Prefer device families: Windows, Mac, iPhone, Galaxy/Android.\n"
+            "Reject 'why everyone is talking' trend framing and generic business culture topics.\n"
             "Prefer topics aligned with dynamic target keywords when relevant.\n"
             "Avoid topics that duplicate recent history URLs/titles unless no alternative exists.\n"
             "If multiple topics are similar, prioritize the one that offers a fresh perspective not covered in recent history.\n"
@@ -145,9 +143,9 @@ class GeminiBrain:
         packed = "\n\n".join(lines)
         prompt = (
             "From the candidate signals below, generate exactly 5 high-potential English keywords "
-            "for today's US/UK/global audience. Focus on AI productivity, life hacks, and beginner-friendly tech news. "
+            "for today's US troubleshooting audience. Focus on practical device and app fixes. "
             "Language policy: American English only. Never output Korean.\n"
-            "Favor mainstream global company productivity stories (Apple/Tesla/Google/Microsoft/Amazon/NVIDIA) when relevant. "
+            "Keyword intent must be troubleshooting-first: not working, fix, reset, crash, update, connectivity, sound, battery.\n"
             "Estimate keywords likely to have strong CTR and advertiser value.\n"
             "Return strict JSON only: {\"keywords\": [\"...\", \"...\", \"...\", \"...\", \"...\"]}\n"
             "Keywords must be short, natural search phrases (2-5 words), no hashtags, no duplicates.\n"
@@ -258,7 +256,7 @@ class GeminiBrain:
         authority_links: list[str],
         pattern_instruction: str,
         reference_guidance: str,
-        domain: str = "office_experiment",
+        domain: str = "tech_troubleshoot",
     ) -> DraftPost:
         main_keyword = self._resolve_main_keyword(candidate)
         long_tail_keywords = [str(x).strip() for x in (getattr(candidate, "long_tail_keywords", []) or []) if str(x).strip()]
@@ -269,10 +267,10 @@ class GeminiBrain:
             body=candidate.body,
         )
         effective_system_instruction = (self.settings.editor_persona or "").strip()
-        if str(domain or "").strip().lower() == "office_experiment":
+        if str(domain or "").strip().lower() in {"office_experiment", "tech_troubleshoot"}:
             effective_system_instruction = (
                 effective_system_instruction
-                + "\nAudience constraint: non-technical office workers. "
+                + "\nAudience constraint: non-technical everyday users. "
                 "Do not include DevOps/SRE/deployment/staging/prod/on-call/incident terminology."
             ).strip()
         elif str(domain or "").strip().lower() == "ai_prompt_guide":
@@ -284,7 +282,7 @@ class GeminiBrain:
         prompt = (
             "Write a 1300-1800 word English blog post in valid HTML body fragment only. "
             "Language policy: 100% American English only. Do not output Korean or mixed-language text. "
-            "Target reader: non-technical office worker and general internet user in US/UK/global markets. "
+            "Target reader: non-technical everyday user in US markets. "
             "Topic scope: practical tech troubleshooting only. "
             "Do not cover medical, finance/investing, or politics. "
             "Structure: Narrative Flow. "
@@ -296,8 +294,7 @@ class GeminiBrain:
             "Use <h2>, <h3>, <p>, <strong>, <ul>, <li>. Avoid markdown.\n"
             "Use plain English first. If a technical term is unavoidable, explain it in one short everyday phrase.\n"
             "Avoid deep engineer-only jargon unless you immediately translate it for beginners.\n"
-            "When the topic is about a global company, prioritize practical lessons from success stories: "
-            "productivity habits, execution style, innovation culture, and workflow ideas for normal office workers.\n"
+            "Keep every section focused on resolving concrete device/app issues with real steps normal users can perform.\n"
             "Keep legal safety: avoid allegations, defamation, and unverified criticism.\n"
             "Do NOT copy source text verbatim. Rewrite as analysis/comparison/guide style.\n"
             "Do NOT reproduce long original sentences from the source.\n"
@@ -356,10 +353,10 @@ class GeminiBrain:
             f"Source body: {candidate.body[:4000]}\n"
             f"Source URL: {candidate.url}\n"
         )
-        if str(domain or "").strip().lower() == "office_experiment":
+        if str(domain or "").strip().lower() in {"office_experiment", "tech_troubleshoot"}:
             prompt += (
-                "Domain safety rule (office_experiment): do not include DevOps/SRE/deployment/staging/prod/on-call/incident terminology. "
-                "Use plain office workflow language only.\n"
+                "Domain safety rule (tech troubleshooting): do not include DevOps/SRE/deployment/staging/prod/on-call/incident terminology. "
+                "Use plain end-user troubleshooting language only.\n"
             )
         elif str(domain or "").strip().lower() == "ai_prompt_guide":
             prompt += (
@@ -397,10 +394,12 @@ class GeminiBrain:
         candidate: TopicCandidate,
         authority_links: list[str],
     ) -> DraftPost:
-        title = candidate.title.strip() or "A Practical AI Productivity Tip I Tested"
+        title = candidate.title.strip() or "A Practical Device Troubleshooting Routine I Tested"
         body = re.sub(r"\s+", " ", candidate.body or "").strip()
         key_points = self._extract_key_points(body)
         source_url = candidate.url.strip()
+        if re.search(r"^https?://(?:www\.)?google\.com", source_url, flags=re.IGNORECASE):
+            source_url = ""
 
         links_html = "".join(
             f'<li><a href="{escape(link)}" rel="nofollow noopener" target="_blank">{escape(link)}</a></li>'
@@ -413,19 +412,19 @@ class GeminiBrain:
             )
 
         takeaway_items = key_points[:5] or [
-            "The first attempt failed because I used too many tools at once.",
-            "A small checklist made the workflow stable and easier to repeat.",
-            "The biggest benefit was saving time during normal office work.",
+            "The first attempt failed because I changed too many settings at once.",
+            "A short checklist made troubleshooting stable and repeatable.",
+            "The biggest benefit was getting the device back to normal quickly.",
         ]
         takeaway_html = "".join(f"<li>{escape(self._short_rewrite(p))}</li>" for p in takeaway_items)
 
         html = (
             "<h2>Quick Take</h2>"
-            f"<p>If you are curious about <strong>{escape(title)}</strong>, this is the short answer: focus on one repeatable habit and measure weekly time saved. "
-            "In my test, the practical workflow mattered more than technical complexity.</p>"
+            f"<p>If you are dealing with <strong>{escape(title)}</strong>, this is the short answer: run simple checks first, then apply fixes in order. "
+            "In my test, disciplined troubleshooting mattered more than complex tweaks.</p>"
             "<h2>Why I Tried This</h2>"
-            f"<p>I was frustrated because <strong>{escape(title)}</strong> sounded helpful, but every explanation I found felt too technical.</p>"
-            "<p>So I tested a simpler version myself and kept only the steps that a regular office worker can repeat without stress.</p>"
+            f"<p>I was frustrated because <strong>{escape(title)}</strong> kept breaking my routine and most explanations were too technical.</p>"
+            "<p>So I tested a simpler path and kept only the steps an everyday user can repeat without stress.</p>"
             "<h2>What Failed First</h2>"
             "<p>My first tries were messy. I copied advanced advice too quickly and spent more time fixing mistakes than getting results.</p>"
             "<ul>"
@@ -434,29 +433,33 @@ class GeminiBrain:
             "<li>I focused on optimization before basic stability.</li>"
             "</ul>"
             "<h2>What Finally Worked</h2>"
-            "<p>I switched to one clear goal, one tool, and one daily checkpoint. That changed everything and made the workflow reliable.</p>"
+            "<p>I switched to one clear goal, one fix sequence, and one validation step. That changed everything and made the result reliable.</p>"
             "<ul>"
-            "<li><strong>Step 1:</strong> Pick one repetitive task.</li>"
-            "<li><strong>Step 2:</strong> Apply one AI helper only to that task.</li>"
-            "<li><strong>Step 3:</strong> Measure saved time for one week.</li>"
+            "<li><strong>Step 1:</strong> Confirm the exact symptom.</li>"
+            "<li><strong>Step 2:</strong> Apply one fix at a time in order.</li>"
+            "<li><strong>Step 3:</strong> Validate and log what changed.</li>"
             "</ul>"
             "<h2>Quick Notes For Beginners</h2>"
             f"<ul>{takeaway_html}</ul>"
             "<h2>When This Is Not Ideal</h2>"
-            "<p>If your environment requires strict engineering controls, this simplified method may be too light. Use it as a starter, then harden it step by step.</p>"
+            "<p>If your environment requires strict engineering controls, this simplified method may be too light. Use it as a starter, then hand off to advanced support.</p>"
             "<h2>My Final Take</h2>"
-            "<p>If technical AI guides overwhelm you, start smaller than you think. A simple routine you can keep is better than a perfect setup you cannot maintain.</p>"
+            "<p>If technical guides overwhelm you, start smaller than you think. A simple routine you can keep is better than a perfect setup you cannot maintain.</p>"
             "<h3>References</h3>"
             f"<ul>{links_html}</ul>"
         )
         html = self._remove_ai_markers(html)
 
-        extracted = [u for u in [source_url, *authority_links[:4]] if u]
+        extracted = [
+            u
+            for u in [source_url, *authority_links[:4]]
+            if u and not re.search(r"^https?://(?:www\.)?google\.com", u, flags=re.IGNORECASE)
+        ]
         return DraftPost(
             title=title,
             alt_titles=[title, f"{title} - Quick Guide", f"{title} - Practical Fixes"],
             html=html,
-            summary="First-person practical rewrite for non-technical office readers.",
+            summary="First-person practical rewrite for non-technical troubleshooting readers.",
             score=80,
             source_url=source_url,
             extracted_urls=extracted[:8],
@@ -602,11 +605,12 @@ class GeminiBrain:
             "worked",
             "learned",
             "lesson",
-            "today",
-            "talking about",
+            "fix",
+            "fixed",
+            "repair",
+            "troubleshoot",
             "what changed",
             "what i learned",
-            "breakthrough",
         )
         pw_hits = sum(1 for w in power_words if w in lower)
         score += min(20.0, float(pw_hits) * 6.0)
@@ -620,10 +624,10 @@ class GeminiBrain:
             score += 8.0
         if re.search(r"\bi\b|\bmy\b", lower):
             score += 5.0
-        if re.search(r"^the secret of .+ productivity", lower):
-            score -= 6.0
-        if re.search(r"\bapple|tesla|google|microsoft|amazon|nvidia|netflix\b", lower):
-            score += 6.0
+        if re.search(r"^the secret of .+", lower):
+            score -= 8.0
+        if re.search(r"\b(fix|fixed|repair|troubleshoot|not working|error code)\b", lower):
+            score += 8.0
         if re.search(r"\b(scam|fraud|lawsuit|illegal|failing|disaster|shocking)\b", lower):
             score -= 14.0
 
@@ -1132,7 +1136,7 @@ class GeminiBrain:
         except json.JSONDecodeError:
             return {}
 
-    def _remove_ai_markers(self, html: str, domain: str = "office_experiment") -> str:
+    def _remove_ai_markers(self, html: str, domain: str = "tech_troubleshoot") -> str:
         replacements = {
             "delve": "look closely",
             "comprehensive": "practical",
@@ -1229,10 +1233,10 @@ class GeminiBrain:
             return entity
         title = re.sub(r"\s+", " ", str(candidate.title or "")).strip()
         if not title:
-            return "productivity workflow"
+            return "device troubleshooting"
         words = [w for w in re.findall(r"[A-Za-z0-9]+", title) if len(w) >= 3]
         if not words:
-            return "productivity workflow"
+            return "device troubleshooting"
         return " ".join(words[:3])
 
     def _build_lsi_terms(
@@ -1252,14 +1256,14 @@ class GeminiBrain:
         freq = Counter(t for t in tokens if t not in stop)
 
         fixed = [
-            "productivity strategy",
-            "workflow optimization",
-            "team adoption",
-            "real-world example",
-            "time-saving routine",
-            "implementation checklist",
-            "common mistakes",
-            "beginner-friendly setup",
+            "troubleshooting checklist",
+            "root cause analysis",
+            "step by step fix",
+            "beginner friendly setup",
+            "update recovery",
+            "connectivity repair",
+            "performance recovery",
+            "prevention routine",
         ]
         out: list[str] = []
         seen: set[str] = set()
@@ -1273,8 +1277,8 @@ class GeminiBrain:
 
         if main_keyword:
             push(main_keyword)
-            push(f"{main_keyword} productivity")
-            push(f"{main_keyword} workflow")
+            push(f"{main_keyword} troubleshooting")
+            push(f"{main_keyword} fix")
 
         for kw in long_tail_keywords:
             w = re.sub(r"\?$", "", str(kw or "")).strip().lower()
@@ -1322,8 +1326,8 @@ class GeminiBrain:
     def _audience_accessibility_score(self, title: str, body: str) -> float:
         text = f"{title} {body}".lower()
         mainstream = [
-            "excel", "email", "meeting", "office", "productivity", "free ai", "chatgpt",
-            "resume", "template", "beginner", "how to", "time saving", "workflow",
+            "not working", "fix", "error", "update", "windows", "mac", "iphone", "galaxy",
+            "bluetooth", "wifi", "audio", "sound", "battery", "crash", "slow", "beginner", "how to",
         ]
         nerd = [
             "cuda", "kernel", "llvm", "compiler", "webassembly", "microarchitecture",

@@ -417,6 +417,23 @@ class Publisher:
             out,
             flags=re.IGNORECASE,
         )
+        out = re.sub(
+            r"<p[^>]*>\s*illustration\s+showing[^<]*</p>",
+            "",
+            out,
+            flags=re.IGNORECASE,
+        )
+        out = re.sub(
+            r"https?://(?:www\.)?google\.com/[^\s\"<]*",
+            "",
+            out,
+            flags=re.IGNORECASE,
+        )
+        out = re.sub(
+            r"(?m)^\s*#{1,6}\s+(.+)$",
+            "",
+            out,
+        )
         out = re.sub(r"\n{3,}", "\n\n", out)
         return out.strip()
 
@@ -517,11 +534,19 @@ class Publisher:
                 inline.alt = self._regen_alt_if_too_similar(inline.alt, intro_text)
                 inline_block = self._image_block(inline_src, inline.alt)
                 html = self._insert_inline_between_fix2_fix3(html, inline_block)
+        else:
+            inline_fallback_src = self._fallback_asset_data_uri(role="inline")
+            if inline_fallback_src:
+                inline_alt = self._regen_alt_if_too_similar("Troubleshooting process diagram.", intro_text)
+                html = self._insert_inline_between_fix2_fix3(
+                    html,
+                    self._image_block(inline_fallback_src, inline_alt),
+                )
 
         img_count = len(re.findall(r"<img\b[^>]*\bsrc=", html, flags=re.IGNORECASE))
-        if img_count < 1:
-            raise RuntimeError(f"publish failed - missing images before submit ({img_count}/1)")
-        self._assert_html_image_integrity(html, min_images=1, require_no_figcaption=True, strict_intro_alt=True)
+        if img_count < 2:
+            raise RuntimeError(f"publish failed - missing images before submit ({img_count}/2)")
+        self._assert_html_image_integrity(html, min_images=2, require_no_figcaption=True, strict_intro_alt=True)
         return html
 
     def _recover_thumbnail_blogger_src(
@@ -874,7 +899,7 @@ class Publisher:
             s for s in src_values
             if str(s).strip().lower().startswith("data:image/")
         ]
-        if len(valid_http_src) < 1 and len(valid_data_src) < 1:
+        if len(valid_http_src) + len(valid_data_src) < 2:
             self._log_upload_event(
                 {
                     "event": "publish_missing_images",
@@ -889,7 +914,7 @@ class Publisher:
             raise RuntimeError("publish failed - missing images")
         self._assert_html_image_integrity(
             content,
-            min_images=1,
+            min_images=2,
             require_no_figcaption=True,
             strict_intro_alt=True,
         )
@@ -935,13 +960,13 @@ class Publisher:
             "Practical workflow diagram for the section topic.",
             "Clean process diagram showing a simplified fix sequence.",
             "Concept diagram highlighting a repeatable troubleshooting pattern.",
-            "Visual summary of a time-saving office routine.",
+            "Visual summary of a practical device fix routine.",
             "Diagram for a real-world implementation scenario.",
             "Simple process diagram focused on practical execution.",
             "Structured problem-solving flow diagram.",
             "Infographic-style process for operational decision clarity.",
             "Implementation-order diagram for beginner-friendly fixes.",
-            "Lightweight office automation flow diagram.",
+            "Lightweight troubleshooting flow diagram.",
             "Troubleshooting process visual for non-technical readers.",
         ]
 
@@ -1234,7 +1259,7 @@ class Publisher:
         # Normalize related heading to a stable SEO-friendly section title.
         out = re.sub(
             r"<h3[^>]*>\s*Related Reading\s*</h3>",
-            "<h2>More Experiments You Might Like</h2>",
+            "<h2>More Fix Guides You Might Like</h2>",
             out,
             flags=re.IGNORECASE,
         )
@@ -1282,7 +1307,7 @@ class Publisher:
                 section_id = f"{base_id}-{suffix}"
                 suffix += 1
             used_ids.add(section_id)
-            is_related = bool(re.search(r"more experiments you might like|related posts", title_txt, flags=re.IGNORECASE))
+            is_related = bool(re.search(r"more fix guides you might like|more experiments you might like|related posts", title_txt, flags=re.IGNORECASE))
             section_class = "rz-related" if is_related else "rz-section"
             marker = section_id.upper().replace("-", "_")
             article_parts.append(f"<!-- RZ-SECTION:{marker}-START -->")
@@ -1314,6 +1339,8 @@ class Publisher:
         strict_intro_alt: bool = True,
     ) -> None:
         content = str(html or "")
+        if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", content):
+            raise RuntimeError("publish failed - markdown_heading_detected")
         src_values = re.findall(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", content, flags=re.IGNORECASE)
         valid_src = [
             s for s in src_values

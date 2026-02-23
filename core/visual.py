@@ -223,7 +223,7 @@ class VisualPipeline:
         paragraphs = self._extract_paragraphs(draft.html)
         seed_contexts = paragraphs if paragraphs else [draft.summary or draft.title]
         if not seed_contexts:
-            seed_contexts = [draft.title or "tech productivity"]
+            seed_contexts = [draft.title or "device troubleshooting"]
 
         cursor = 0
         no_progress = 0
@@ -754,7 +754,7 @@ class VisualPipeline:
         role: str = "section",
     ) -> str:
         keywords = self._extract_local_visual_keywords(paragraph, title, max_keywords=6)
-        keyword_block = ", ".join(keywords) if keywords else "technology, productivity, workflow, strategy"
+        keyword_block = ", ".join(keywords) if keywords else "device, troubleshooting, fix, reliability"
         context_hint = self._context_snippet(paragraph)[:260]
         base = (
             "Create one realistic photo-style image based on this article context. "
@@ -1127,7 +1127,7 @@ class VisualPipeline:
         addons: list[str] = [
             "Use one clear focal subject in a clean realistic environment.",
             "Avoid complex hand poses and avoid crowded interactions.",
-            "Prefer simple office objects and natural composition.",
+            "Prefer simple real-world objects and natural composition.",
             "No text, no watermark, no logo.",
         ]
         if str(role or "").lower() == "thumbnail":
@@ -1570,13 +1570,13 @@ class VisualPipeline:
             "Practical workflow diagram aligned with this section.",
             "Clean process diagram showing a simplified fix sequence.",
             "Concept diagram highlighting a repeatable troubleshooting pattern.",
-            "Visual summary of a time-saving office routine.",
+            "Visual summary of a practical device fix routine.",
             "Diagram for a real-world implementation scenario.",
             "Simple process diagram focused on practical workflow execution.",
             "Structured problem-solving flow diagram.",
             "Infographic-style process for operational decision clarity.",
             "Implementation-order diagram for beginner-friendly fixes.",
-            "Lightweight office automation flow diagram.",
+            "Lightweight troubleshooting flow diagram.",
             f"Troubleshooting process visual related to {s}.",
         ]
         pick = random.choice(templates)
