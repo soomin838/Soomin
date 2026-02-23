@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -19,13 +22,14 @@ class ImagePromptPlan:
 
 
 class OllamaClient:
-    def __init__(self, settings: LocalLLMSettings) -> None:
+    def __init__(self, settings: LocalLLMSettings, log_path: Path | None = None) -> None:
         self.settings = settings
         self.base_url = str(getattr(settings, "base_url", "http://127.0.0.1:11434") or "http://127.0.0.1:11434").rstrip("/")
         self.model = str(getattr(settings, "model", "qwen2.5:3b") or "qwen2.5:3b").strip()
         self.timeout = max(10, int(getattr(settings, "request_timeout_sec", 60) or 60))
         self.num_ctx = max(1024, int(getattr(settings, "num_ctx", 2048) or 2048))
         self.num_thread = max(1, int(getattr(settings, "num_thread", 2) or 2))
+        self.log_path = log_path
 
     def _extract_json(self, raw: str) -> dict[str, Any]:
         text = str(raw or "").strip()
@@ -58,7 +62,35 @@ class OllamaClient:
                 continue
         return False
 
-    def generate_json(self, system_prompt: str, user_payload: dict) -> dict:
+    def _log_call(
+        self,
+        *,
+        purpose: str,
+        latency_ms: int,
+        ok: bool,
+        error: str = "",
+        fallback_used: bool = False,
+    ) -> None:
+        if self.log_path is None:
+            return
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "purpose": str(purpose or "generic"),
+            "model": self.model,
+            "endpoint": "/api/generate",
+            "latency_ms": int(latency_ms),
+            "ok": bool(ok),
+            "error": str(error or "")[:400],
+            "fallback_used": bool(fallback_used),
+        }
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def generate_json(self, system_prompt: str, user_payload: dict, purpose: str = "generic") -> dict:
         endpoint = f"{self.base_url}/api/generate"
         user_text = json.dumps(user_payload or {}, ensure_ascii=False, indent=2)
         prompt = (
@@ -80,6 +112,7 @@ class OllamaClient:
             },
         }
         last_err: Exception | None = None
+        started = time.perf_counter()
         for _ in range(2):
             try:
                 r = requests.post(endpoint, json=payload, timeout=self.timeout)
@@ -88,9 +121,25 @@ class OllamaClient:
                 content = str(data.get("response", "") or "").strip()
                 parsed = self._extract_json(content)
                 if parsed:
+                    latency_ms = int((time.perf_counter() - started) * 1000)
+                    self._log_call(
+                        purpose=purpose,
+                        latency_ms=latency_ms,
+                        ok=True,
+                        error="",
+                        fallback_used=False,
+                    )
                     return parsed
             except Exception as exc:
                 last_err = exc
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        self._log_call(
+            purpose=purpose,
+            latency_ms=latency_ms,
+            ok=False,
+            error=str(last_err or "ollama_generate_failed"),
+            fallback_used=True,
+        )
         if last_err is not None:
             raise last_err
         return {}
@@ -133,7 +182,11 @@ class OllamaClient:
                 "style_tags": ["string"],
             },
         }
-        data = self.generate_json(system_prompt=system_prompt, user_payload=user_payload)
+        data = self.generate_json(
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            purpose="image_plan",
+        )
         banner = re.sub(r"\s+", " ", str(data.get("banner_prompt", "") or "")).strip()
         inline = re.sub(r"\s+", " ", str(data.get("inline_prompt", "") or "")).strip()
         alt_raw = data.get("alt_suggestions", [])
@@ -212,7 +265,11 @@ class OllamaClient:
                 "max_remove_phrases": 8,
             },
         }
-        data = self.generate_json(system_prompt=system_prompt, user_payload=user_payload)
+        data = self.generate_json(
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            purpose="qa_review",
+        )
         issues: list[str] = []
         remove_phrases: list[str] = []
         for v in (data.get("issues", []) if isinstance(data, dict) else []):

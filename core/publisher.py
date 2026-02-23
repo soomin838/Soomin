@@ -1562,17 +1562,10 @@ class Publisher:
         return f"https://storage.googleapis.com/{self.gcs_bucket_name}/{quote(blob_name)}"
 
     def _author_schema(self) -> str:
-        return (
-            '<script type="application/ld+json">'
-            '{'
-            '"@context":"https://schema.org",'
-            '"@type":"Person",'
-            '"name":"Senior Tech Editor",'
-            '"jobTitle":"Technology Analyst",'
-            '"sameAs":["https://stackoverflow.com/","https://news.ycombinator.com/"]'
-            '}'
-            "</script>"
-        )
+        # Disabled by policy:
+        # - Hard QA gate forbids internal/debug-like tokens such as jobTitle/sameAs leakage.
+        # - Keep publish payload minimal and deterministic.
+        return ""
 
     def fetch_live_snapshot(
         self,

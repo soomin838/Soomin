@@ -54,6 +54,7 @@ class ContentQAGate:
 
     def evaluate(self, html: str, title: str = "", domain: str = "tech_troubleshoot") -> QAResult:
         checks: list[QACheck] = []
+        req_authority_links, req_external_links = self._link_requirements(domain)
         text = self._to_text(html)
         words = len(re.findall(r"[A-Za-z0-9']+", text))
         h2_count = len(re.findall(r"<h2\b", html, flags=re.IGNORECASE))
@@ -90,24 +91,25 @@ class ContentQAGate:
         checks.append(
             QACheck(
                 key="authority_links",
-                passed=len(allowed_links) >= self.settings.min_authority_links,
-                detail=f"authority_links {len(allowed_links)}/{self.settings.min_authority_links}",
+                passed=len(allowed_links) >= req_authority_links,
+                detail=f"authority_links {len(allowed_links)}/{req_authority_links}",
                 weight=12,
             )
         )
         checks.append(
             QACheck(
                 key="external_links",
-                passed=len(ext_links) >= self.settings.min_external_links,
-                detail=f"external_links {len(ext_links)}/{self.settings.min_external_links}",
+                passed=len(ext_links) >= req_external_links,
+                detail=f"external_links {len(ext_links)}/{req_external_links}",
                 weight=10,
             )
         )
+        attribution_required = 0 if str(domain or "").strip().lower() == "tech_troubleshoot" else 1
         checks.append(
             QACheck(
                 key="source_attribution",
-                passed=len(ext_links) >= 1,
-                detail=f"attribution_links {len(ext_links)}/1",
+                passed=len(ext_links) >= attribution_required,
+                detail=f"attribution_links {len(ext_links)}/{attribution_required}",
                 weight=16,
             )
         )
@@ -410,9 +412,9 @@ class ContentQAGate:
                 "Treat context validation as a first-class requirement, not an afterthought.</p>"
             )
 
-        if self.authority_links and len(allowed_links) < self.settings.min_authority_links:
+        if self.authority_links and len(allowed_links) < req_authority_links:
             existing = set(ext_links)
-            need_auth = self.settings.min_authority_links - len(allowed_links)
+            need_auth = req_authority_links - len(allowed_links)
             auth_add = [u for u in self.authority_links if u not in existing][:need_auth]
             if auth_add:
                 out += "<h3>Verified References</h3><ul>" + "".join(
@@ -420,16 +422,16 @@ class ContentQAGate:
                 ) + "</ul>"
                 ext_links.extend(auth_add)
 
-        if len(ext_links) < self.settings.min_external_links and self.authority_links:
+        if len(ext_links) < req_external_links and self.authority_links:
             existing2 = set(ext_links)
-            need_ext = self.settings.min_external_links - len(ext_links)
+            need_ext = req_external_links - len(ext_links)
             ext_add = [u for u in self.authority_links if u not in existing2][:need_ext]
             if ext_add:
                 out += "<h3>Additional Sources</h3><ul>" + "".join(
                     f"<li>{self._link_context(u)}</li>" for u in ext_add
                 ) + "</ul>"
 
-        if len(ext_links) < 1 and self.authority_links:
+        if req_external_links >= 1 and len(ext_links) < 1 and self.authority_links:
             fallback_src = self.authority_links[0]
             out += (
                 "<h3>References</h3>"
@@ -469,8 +471,9 @@ class ContentQAGate:
                 "This prevents ambiguity under pressure and improves decision speed.</p>"
             )
 
-        if self.authority_links and len(allowed_links) <= self.settings.min_authority_links:
-            missing = self.settings.min_authority_links + 1 - len(allowed_links)
+        req_authority_links, req_external_links = self._link_requirements(getattr(qa_result, "domain", ""))
+        if self.authority_links and len(allowed_links) <= req_authority_links:
+            missing = req_authority_links + 1 - len(allowed_links)
             if missing > 0:
                 existing = set(ext_links)
                 extra = [u for u in self.authority_links if u not in existing][:missing]
@@ -547,19 +550,20 @@ class ContentQAGate:
                 "</ul>"
             )
         if (not targeted or "authority_links" in failed or "external_links" in failed):
+            req_authority_links, req_external_links = self._link_requirements(getattr(qa_result, "domain", ""))
             links_now = re.findall(r'href="([^"]+)"', out, flags=re.IGNORECASE)
             ext_now = [u for u in links_now if u.startswith("http://") or u.startswith("https://")]
             allowed_now = [u for u in ext_now if any(u.startswith(a) for a in self.authority_links)]
             existing_set = set(ext_now)
             add_list: list[str] = []
             if self.authority_links:
-                missing_auth = max(0, self.settings.min_authority_links - len(allowed_now))
+                missing_auth = max(0, req_authority_links - len(allowed_now))
                 if missing_auth > 0:
                     add_list.extend([u for u in self.authority_links if u not in existing_set][:missing_auth])
                     existing_set.update(add_list)
                 # External links minimum may still be short even after authority fill.
                 current_ext_after = len(ext_now) + len(add_list)
-                missing_ext = max(0, self.settings.min_external_links - current_ext_after)
+                missing_ext = max(0, req_external_links - current_ext_after)
                 if missing_ext > 0:
                     add_list.extend([u for u in self.authority_links if u not in existing_set][:missing_ext])
             if add_list:
@@ -612,6 +616,31 @@ class ContentQAGate:
         if qa_result and qa_result.has_hard_failure:
             out = self._repair_hard_humanity_failures(out, qa_result.hard_failures)
         return out
+
+    def _link_requirements(self, domain: str) -> tuple[int, int]:
+        lower_domain = str(domain or "").strip().lower()
+        if lower_domain == "tech_troubleshoot":
+            auth_req = int(
+                getattr(
+                    self.settings,
+                    "min_authority_links_tech_troubleshoot",
+                    min(1, int(getattr(self.settings, "min_authority_links", 0) or 0)),
+                )
+                or 0
+            )
+            ext_req = int(
+                getattr(
+                    self.settings,
+                    "min_external_links_tech_troubleshoot",
+                    min(1, int(getattr(self.settings, "min_external_links", 0) or 0)),
+                )
+                or 0
+            )
+            return max(0, auth_req), max(0, ext_req)
+        return (
+            max(0, int(getattr(self.settings, "min_authority_links", 0) or 0)),
+            max(0, int(getattr(self.settings, "min_external_links", 0) or 0)),
+        )
 
     def _evaluate_humanity_50(self, text: str, html: str) -> tuple[list[QACheck], int, list[str]]:
         plain = re.sub(r"\s+", " ", text or "").strip()

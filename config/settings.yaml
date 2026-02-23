@@ -57,6 +57,8 @@ quality:
   min_list_items: 6
   min_external_links: 2
   min_authority_links: 2
+  min_external_links_tech_troubleshoot: 1
+  min_authority_links_tech_troubleshoot: 1
   banned_markers:
     - "delve"
     - "comprehensive"

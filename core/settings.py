@@ -129,6 +129,8 @@ class QualitySettings:
     min_list_items: int = 6
     min_external_links: int = 2
     min_authority_links: int = 2
+    min_external_links_tech_troubleshoot: int = 1
+    min_authority_links_tech_troubleshoot: int = 1
     banned_markers: list[str] = field(
         default_factory=lambda: [
             "delve",

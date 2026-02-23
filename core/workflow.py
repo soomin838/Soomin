@@ -83,7 +83,10 @@ class AgentWorkflow:
             settings=settings.local_llm,
             log_path=root / "storage" / "logs" / "ollama_manager.jsonl",
         )
-        self.ollama_client = OllamaClient(settings.local_llm)
+        self.ollama_client = OllamaClient(
+            settings.local_llm,
+            log_path=root / "storage" / "logs" / "ollama_calls.jsonl",
+        )
         self.topic_grower = TopicGrower(
             root=root,
             seeds_path=root / settings.sources.seeds_path,
@@ -857,6 +860,7 @@ class AgentWorkflow:
                 "search_links_injected",
             )
             base_html = linked_html
+        base_html = self._canonicalize_html_payload(base_html)
         self._progress("qa", "품질 게이트 점검/개선", 58)
         qa_result = self.qa.evaluate(base_html, title=draft.title, domain=current_domain)
         final_html = base_html
@@ -899,7 +903,7 @@ class AgentWorkflow:
                         break
                 else:
                     qa_no_progress_streak = 0
-                final_html = improved
+                final_html = self._canonicalize_html_payload(improved)
                 qa_result = self.qa.evaluate(final_html, title=draft.title, domain=current_domain)
 
         if (
@@ -913,7 +917,7 @@ class AgentWorkflow:
             completed = self.qa.satisfy_requirements(final_html, qa_result)
             if completed != final_html:
                 qa_retry_count += 1
-                final_html = completed
+                final_html = self._canonicalize_html_payload(completed)
                 qa_result = self.qa.evaluate(final_html, title=draft.title, domain=current_domain)
 
         if (
@@ -939,6 +943,7 @@ class AgentWorkflow:
             baseline_score = qa_result.score
             polished = self.qa.polish_if_possible(final_html, qa_result)
             if polished != final_html:
+                polished = self._canonicalize_html_payload(polished)
                 polished_result = self.qa.evaluate(polished, title=draft.title, domain=current_domain)
                 # If polish reduced score, develop the polished draft instead of discarding.
                 if polished_result.score < baseline_score:
