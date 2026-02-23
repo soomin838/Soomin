@@ -70,6 +70,8 @@ class OllamaClient:
         ok: bool,
         error: str = "",
         fallback_used: bool = False,
+        prompt_len: int = 0,
+        response_len: int = 0,
     ) -> None:
         if self.log_path is None:
             return
@@ -82,6 +84,8 @@ class OllamaClient:
             "ok": bool(ok),
             "error": str(error or "")[:400],
             "fallback_used": bool(fallback_used),
+            "prompt_len": int(max(0, prompt_len)),
+            "response_len": int(max(0, response_len)),
         }
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +132,8 @@ class OllamaClient:
                         ok=True,
                         error="",
                         fallback_used=False,
+                        prompt_len=len(prompt),
+                        response_len=len(content),
                     )
                     return parsed
             except Exception as exc:
@@ -139,6 +145,8 @@ class OllamaClient:
             ok=False,
             error=str(last_err or "ollama_generate_failed"),
             fallback_used=True,
+            prompt_len=len(prompt),
+            response_len=0,
         )
         if last_err is not None:
             raise last_err

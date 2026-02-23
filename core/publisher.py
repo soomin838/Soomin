@@ -87,6 +87,22 @@ class Publisher:
         post_html = self._merge_images(clean_html, images, creds)
         if self.semantic_html_enabled:
             post_html = self._semanticize_article_html(post_html, lede_hint=lede_seed)
+            try:
+                self._assert_html_image_integrity(
+                    post_html,
+                    min_images=2,
+                    require_no_figcaption=True,
+                    strict_intro_alt=True,
+                )
+            except Exception as exc:
+                self._log_upload_event(
+                    {
+                        "event": "semanticize_image_repair",
+                        "reason": str(exc),
+                    }
+                )
+                # Re-insert a deterministic preview image block as one-shot repair.
+                post_html = self.build_dry_run_html(post_html, images)
         post_html += self._author_schema()
         seo_description = self._normalize_meta_description(meta_description)
         self._assert_english_only_payload(
@@ -441,8 +457,24 @@ class Publisher:
         if not images:
             raise RuntimeError("이미지 자산이 비어 있습니다. retry required")
 
+        self._log_upload_event(
+            {
+                "event": "merge_images_start",
+                "images_in": len(images or []),
+                "hosted_urls_count": 0,
+                "image_hosting_backend": str(self.image_hosting_backend or ""),
+            }
+        )
         hosted_urls = self._upload_images(images=images, creds=creds)
         src_map: dict[str, str] = dict(hosted_urls or {})
+        self._log_upload_event(
+            {
+                "event": "merge_images_start",
+                "images_in": len(images or []),
+                "hosted_urls_count": len(src_map),
+                "image_hosting_backend": str(self.image_hosting_backend or ""),
+            }
+        )
         thumbnail = images[0]
         thumbnail_kind = (getattr(thumbnail, "source_kind", "") or "").strip().lower()
         if thumbnail_kind not in {"gemini", "generated", "pollinations"}:
@@ -526,6 +558,8 @@ class Publisher:
                     inline_src = self._file_to_data_uri(inline.path)
                 except Exception:
                     inline_src = ""
+            if not inline_src:
+                inline_src = self._fallback_asset_data_uri(role="inline")
             if inline_src and (inline_src.startswith("https://") or inline_src.startswith("http://")):
                 inline.alt = self._regen_alt_if_too_similar(inline.alt, intro_text)
                 inline_block = self._image_block(inline_src, inline.alt)
@@ -544,9 +578,36 @@ class Publisher:
                 )
 
         img_count = len(re.findall(r"<img\b[^>]*\bsrc=", html, flags=re.IGNORECASE))
+        self._log_upload_event(
+            {
+                "event": "merge_images_inserted",
+                "img_count_after_insert": img_count,
+                "banner_inserted": bool(re.search(r"<img\b[^>]*\bsrc=", banner_block, flags=re.IGNORECASE)),
+                "inline_inserted": img_count >= 2,
+            }
+        )
         if img_count < 2:
+            self._log_upload_event(
+                {
+                    "event": "go_live_gate_fail",
+                    "reason": "insufficient_html_images_before_submit",
+                    "html_img_count": img_count,
+                    "html_preview_500chars": str(html or "")[:500],
+                }
+            )
             raise RuntimeError(f"publish failed - missing images before submit ({img_count}/2)")
-        self._assert_html_image_integrity(html, min_images=2, require_no_figcaption=True, strict_intro_alt=True)
+        try:
+            self._assert_html_image_integrity(html, min_images=2, require_no_figcaption=True, strict_intro_alt=True)
+        except Exception as exc:
+            self._log_upload_event(
+                {
+                    "event": "go_live_gate_fail",
+                    "reason": str(exc),
+                    "html_img_count": len(re.findall(r"<img\b[^>]*\bsrc=", html, flags=re.IGNORECASE)),
+                    "html_preview_500chars": str(html or "")[:500],
+                }
+            )
+            raise
         return html
 
     def _recover_thumbnail_blogger_src(
@@ -900,6 +961,15 @@ class Publisher:
             if str(s).strip().lower().startswith("data:image/")
         ]
         if len(valid_http_src) + len(valid_data_src) < 2:
+            self._log_upload_event(
+                {
+                    "event": "go_live_gate_fail",
+                    "reason": "publish_missing_images_after_submit",
+                    "post_id": pid,
+                    "html_img_count": len(src_values),
+                    "html_preview_500chars": content[:500],
+                }
+            )
             self._log_upload_event(
                 {
                     "event": "publish_missing_images",

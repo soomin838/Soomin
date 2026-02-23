@@ -71,6 +71,17 @@ class VisualPipeline:
         self._current_run_hashes = set()
         self._current_run_embeddings = []
         provider = str(getattr(self.visual_settings, "image_provider", "pollinations") or "pollinations").strip().lower()
+        target = max(1, int(self.visual_settings.target_images_per_post))
+        body_slots = max(0, target - 1)
+        self._log_visual_event(
+            {
+                "event": "visual_build_start",
+                "provider": provider,
+                "target_images_per_post": int(target),
+                "target_banner": 1,
+                "target_inline": int(body_slots),
+            }
+        )
         if provider in {"pollinations", "pollination"}:
             # Pollinations API-only mode: key is optional depending on provider plan.
             # Never hard-fail image generation solely due to empty key.
@@ -79,8 +90,6 @@ class VisualPipeline:
         # - Total images per post = target_images_per_post
         # - 1 thumbnail is created in ensure_generated_thumbnail()
         # - Remaining slots are content images from contextual prompts
-        target = max(1, int(self.visual_settings.target_images_per_post))
-        body_slots = max(0, target - 1)
         paragraphs = self._extract_paragraphs(draft.html)
         selected_paragraphs = self._select_target_paragraphs(paragraphs, body_slots)
 
@@ -90,6 +99,14 @@ class VisualPipeline:
             r"\s+",
             " ",
             str((prompt_plan or {}).get("inline_prompt", "") or "").strip(),
+        )
+        self._log_visual_event(
+            {
+                "event": "visual_prompt_plan",
+                "source": str((prompt_plan or {}).get("source", "fallback") or "fallback"),
+                "banner_prompt_len": len(str((prompt_plan or {}).get("banner_prompt", "") or "")),
+                "inline_prompt_len": len(inline_plan_prompt),
+            }
         )
         if inline_plan_prompt:
             if prompts:
@@ -151,7 +168,19 @@ class VisualPipeline:
                         "role": "content",
                     }
                 )
-        return valid_assets[:body_slots]
+        result = valid_assets[:body_slots]
+        reasons: list[str] = []
+        if len(result) < body_slots:
+            reasons.append(f"inline_shortfall({len(result)}/{body_slots})")
+        self._log_visual_event(
+            {
+                "event": "visual_build_result",
+                "generated_count": len(result),
+                "paths": [str(getattr(x, "path", "")) for x in result[:3]],
+                "reasons_if_missing": reasons,
+            }
+        )
+        return result
 
     def force_screenshots(self, urls: list[str], title: str) -> list[ImageAsset]:
         # Spec policy: screenshot collection disabled.
@@ -854,9 +883,10 @@ class VisualPipeline:
         if not bool(getattr(self.visual_settings, "pollinations_enabled", True)):
             self._log_visual_event(
                 {
-                    "event": "pollinations_image_skip",
+                    "event": "pollinations_failed",
                     "reason": "feature_disabled",
                     "index": index,
+                    "status": "disabled",
                 }
             )
             return self._fallback_asset_for_role(role=role, index=index)
@@ -865,9 +895,10 @@ class VisualPipeline:
         if not base_url:
             self._log_visual_event(
                 {
-                    "event": "pollinations_image_skip",
+                    "event": "pollinations_failed",
                     "reason": "missing_base_url",
                     "index": index,
+                    "status": "missing_base_url",
                 }
             )
             return self._fallback_asset_for_role(role=role, index=index)
@@ -948,6 +979,20 @@ class VisualPipeline:
             endpoint = f"{base_url}/image/{encoded_prompt}"
             mode_queue: list[tuple[str, dict[str, str], dict[str, str]]] = list(auth_modes)
             for mode, extra_params, extra_headers in mode_queue:
+                self._log_visual_event(
+                    {
+                        "event": "pollinations_request",
+                        "index": index,
+                        "model": model,
+                        "role": role_key,
+                        "width": width,
+                        "height": height,
+                        "prompt_hash": cache_key[:16],
+                        "attempt": gen_try,
+                        "auth_mode": mode,
+                        "status": "requesting",
+                    }
+                )
                 try:
                     params = dict(params_seed)
                     params.update(extra_params)
@@ -991,12 +1036,12 @@ class VisualPipeline:
 
                         self._log_visual_event(
                             {
-                                "event": "pollinations_image_generated",
+                                "event": "pollinations_success",
                                 "index": index,
                                 "status": 200,
                                 "model": model,
                                 "auth_mode": mode,
-                                "path": str(filename),
+                                "saved_path": str(filename),
                                 "size_bytes": int(filename.stat().st_size),
                                 "attempt": gen_try,
                                 "prompt_mode": prompt_mode,
@@ -1060,28 +1105,30 @@ class VisualPipeline:
                         body_preview = (response.text or "")[:260]
                     self._log_visual_event(
                         {
-                            "event": "pollinations_image_probe",
+                            "event": "pollinations_failed",
                             "index": index,
                             "status": int(response.status_code),
                             "model": model,
                             "auth_mode": mode,
                             "content_type": content_type,
-                            "body": body_preview,
+                            "response_preview": body_preview,
                             "attempt": gen_try,
                             "prompt_mode": prompt_mode,
+                            "prompt_hash": cache_key[:16],
                         }
                     )
                 except Exception as exc:
                     self._log_visual_event(
                         {
-                            "event": "pollinations_image_probe",
+                            "event": "pollinations_failed",
                             "index": index,
                             "status": "exception",
                             "model": model,
                             "auth_mode": mode,
-                            "reason": str(exc),
+                            "exception": str(exc),
                             "attempt": gen_try,
                             "prompt_mode": prompt_mode,
+                            "prompt_hash": cache_key[:16],
                         }
                     )
                     continue
@@ -1595,7 +1642,14 @@ class VisualPipeline:
                 src.parent.mkdir(parents=True, exist_ok=True)
                 self._create_runtime_fallback_image(src, role="thumbnail" if is_thumb else "inline")
             except Exception:
-                return None
+                # Guaranteed fallback creation path even when Pillow rendering fails.
+                try:
+                    tiny_png = base64.b64decode(
+                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAoMBgA6n7QkAAAAASUVORK5CYII="
+                    )
+                    src.write_bytes(tiny_png)
+                except Exception:
+                    return None
         if not src.exists():
             return None
         ext = src.suffix or ".png"

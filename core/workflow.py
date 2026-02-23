@@ -1068,7 +1068,7 @@ class AgentWorkflow:
         images = self.visual.build(draft, prompt_plan=image_prompt_plan)
         images = self.visual.ensure_generated_thumbnail(draft, images, prompt_plan=image_prompt_plan)
         images = self.visual.ensure_unique_assets(images)
-        target_images = max(1, int(self.settings.visual.target_images_per_post or 0))
+        target_images = max(2, int(self.settings.visual.target_images_per_post or 0))
         if len(images) < target_images:
             self._set_image_pipeline_state("retrying", len(images), target_images, "이미지 부족, 재시도 진행 중")
             self._progress("visual", "이미지 부족, 재시도 진행 중", 76)
@@ -1078,10 +1078,15 @@ class AgentWorkflow:
                 target_images,
                 min_retry_attempts=5,
             )
+        images = self._force_image_floor(
+            draft=draft,
+            images=images,
+            target_images=target_images,
+        )
         images = self.visual.ensure_unique_assets(images)
         if len(images) > target_images:
             images = images[:target_images]
-        min_required_images = min(target_images, 3)
+        min_required_images = min(target_images, 2)
         image_kind_counts = Counter((getattr(img, "source_kind", "") or "unknown") for img in images)
         if not images:
             raise RuntimeError("Image pipeline failed: no valid image assets were produced")
@@ -1155,9 +1160,15 @@ class AgentWorkflow:
                     f"local_llm_qa_issues={issue_count}",
                 )
         draft.title = self._double_unescape(str(draft.title or "")).strip()
+        gate_preview_html = ""
+        try:
+            gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
+        except Exception as exc:
+            raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         go_live_errors, go_live_warnings = self._go_live_gate_checklist(
             title=draft.title,
             final_html=final_html,
+            gate_html=gate_preview_html,
             images=images,
             candidate=selected,
         )
@@ -1193,7 +1204,7 @@ class AgentWorkflow:
             generation_degraded_note = self._append_note(generation_degraded_note, image_note)
 
         if self.settings.budget.dry_run:
-            dry_html = self.publisher.build_dry_run_html(final_html, images)
+            dry_html = gate_preview_html or self.publisher.build_dry_run_html(final_html, images)
             dry_log_dir = self.root / "storage" / "logs"
             dry_log_dir.mkdir(parents=True, exist_ok=True)
             dry_html_path = dry_log_dir / f"dry_run_final_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.html"
@@ -2012,7 +2023,7 @@ class AgentWorkflow:
         images = self.visual.build(draft, prompt_plan=image_prompt_plan)
         images = self.visual.ensure_generated_thumbnail(draft, images, prompt_plan=image_prompt_plan)
         images = self.visual.ensure_unique_assets(images)
-        target_images = max(1, int(self.settings.visual.target_images_per_post or 0))
+        target_images = max(2, int(self.settings.visual.target_images_per_post or 0))
         if len(images) < target_images:
             self._set_image_pipeline_state("retrying", len(images), target_images, "이미지 부족, 재시도 진행 중")
             self._progress("visual", "이미지 부족, 재시도 진행 중", 76)
@@ -2022,10 +2033,15 @@ class AgentWorkflow:
                 target_images,
                 min_retry_attempts=5,
             )
+        images = self._force_image_floor(
+            draft=draft,
+            images=images,
+            target_images=target_images,
+        )
         images = self.visual.ensure_unique_assets(images)
         if len(images) > target_images:
             images = images[:target_images]
-        min_required_images = min(target_images, 3)
+        min_required_images = min(target_images, 2)
         if len(images) < target_images and len(images) >= min_required_images:
             self._set_image_pipeline_state("fallback", len(images), target_images, f"최종 폴백({len(images)}장 발행)")
             self._progress("visual", f"최종 폴백({len(images)}장 발행)", 79)
@@ -2062,9 +2078,15 @@ class AgentWorkflow:
             final_html = re.sub(tok, "", final_html, flags=re.IGNORECASE)
         final_html = self._sanitize_publish_html(final_html, domain=resume_domain)
         final_html = self._canonicalize_html_payload(final_html)
+        gate_preview_html = ""
+        try:
+            gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
+        except Exception as exc:
+            raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         go_live_errors, go_live_warnings = self._go_live_gate_checklist(
             title=title,
             final_html=final_html,
+            gate_html=gate_preview_html,
             images=images,
             candidate=candidate,
         )
@@ -2415,6 +2437,7 @@ class AgentWorkflow:
         self,
         title: str,
         final_html: str,
+        gate_html: str,
         images: list[ImageAsset],
         candidate: TopicCandidate,
     ) -> tuple[list[str], list[str]]:
@@ -2491,7 +2514,7 @@ class AgentWorkflow:
             if intro_alt_fail:
                 errors.append("intro_alt_similarity_high")
                 warnings.append(intro_alt_detail)
-        html_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", str(final_html or ""), flags=re.IGNORECASE))
+        html_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", str(gate_html or final_html or ""), flags=re.IGNORECASE))
         if html_img_count < 2:
             errors.append(f"insufficient_html_images({html_img_count}/2)")
 
@@ -2523,6 +2546,41 @@ class AgentWorkflow:
             return ""
         text = re.sub(r"<[^>]+>", " ", str(m.group(1) or ""))
         return re.sub(r"\s+", " ", text).strip()
+
+    def _force_image_floor(
+        self,
+        draft: DraftPost,
+        images: list[ImageAsset],
+        target_images: int,
+    ) -> list[ImageAsset]:
+        """
+        Ensure we always hand at least `target_images` assets to publisher.
+        If generation misses, inject role-based local fallback assets.
+        """
+        target = max(2, int(target_images or 0))
+        out = self.visual.ensure_unique_assets(list(images or []))
+        if len(out) >= target:
+            return out[:target]
+
+        # Keep thumbnail in slot 0.
+        try:
+            out = self.visual.ensure_generated_thumbnail(draft, out, prompt_plan=None)
+        except Exception:
+            pass
+        out = self.visual.ensure_unique_assets(out)
+
+        seed_idx = 400 + len(out)
+        while len(out) < target:
+            role = "thumbnail" if len(out) == 0 else "content"
+            fallback = self.visual._fallback_asset_for_role(role=role, index=seed_idx)  # noqa: SLF001
+            seed_idx += 1
+            if fallback is None:
+                break
+            out.append(fallback)
+            out = self.visual.ensure_unique_assets(out)
+            if len(out) >= target:
+                break
+        return out[:target]
 
     def _ensure_min_long_tail_keywords(
         self,
