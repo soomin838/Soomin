@@ -1,0 +1,10 @@
+[
+  {
+    "name": "mascot_idle",
+    "prompt": "Cute minimal mascot character for a macOS widget, soft glow, smooth edges, transparent background, 6-frame idle motion sprite."
+  },
+  {
+    "name": "mascot_pipeline",
+    "prompt": "Progress pipeline animation icons with glowing dots, minimal Apple-style, transparent background, 5-frame sequence."
+  }
+]

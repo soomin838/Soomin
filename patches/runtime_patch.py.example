@@ -1,0 +1,23 @@
+"""
+Runtime hot patch template for RezeroAgent.
+
+Usage:
+1) Copy this file to:
+   %APPDATA%/RezeroAgent/patches/runtime_patch.py
+2) Edit apply(...) with your monkey-patch logic.
+3) Restart RezeroAgent app (no rebuild needed).
+"""
+
+
+def apply(controller, workflow, settings, root):
+    # Example: tune image request gap without reinstall.
+    # settings.visual.image_request_interval_seconds = 20
+    # workflow.settings.visual.image_request_interval_seconds = 20
+    #
+    # Example: monkey-patch a method
+    # original = workflow._append_note
+    # def patched_append_note(base, note):
+    #     return original(base, note)
+    # workflow._append_note = patched_append_note
+    return None
+

@@ -1,0 +1,22 @@
+[
+  {
+    "name": "workflow",
+    "prompt": "Minimal Apple SF Symbol style icon of a workflow pipeline, white color, transparent background, vector-like simplicity."
+  },
+  {
+    "name": "analytics",
+    "prompt": "Minimal Apple SF Symbol style icon of analytics chart, white color, transparent background, vector-like simplicity."
+  },
+  {
+    "name": "document",
+    "prompt": "Minimal Apple SF Symbol style icon of document page, white color, transparent background, vector-like simplicity."
+  },
+  {
+    "name": "image",
+    "prompt": "Minimal Apple SF Symbol style icon of image/photo, white color, transparent background, vector-like simplicity."
+  },
+  {
+    "name": "success",
+    "prompt": "Minimal Apple SF Symbol style icon of checkmark badge, white color, transparent background, vector-like simplicity."
+  }
+]

@@ -1,0 +1,64 @@
+QMainWindow {
+    background: {{WINDOW_BG}};
+}
+
+QDialog {
+    background: {{WINDOW_BG}};
+}
+
+QLabel {
+    color: {{TEXT_PRIMARY}};
+}
+
+QLabel[role="muted"] {
+    color: {{TEXT_MUTED}};
+}
+
+QLineEdit, QComboBox, QTextEdit, QSpinBox {
+    background: {{INPUT_BG}};
+    border: 1px solid {{INPUT_BORDER}};
+    border-radius: 14px;
+    padding: 6px 8px;
+    color: {{TEXT_PRIMARY}};
+}
+
+QPushButton, QToolButton {
+    background: rgba(255,255,255,0.22);
+    border: 1px solid {{GLASS_BORDER}};
+    border-radius: 24px;
+    padding: 9px 16px;
+    color: {{TEXT_PRIMARY}};
+    font-weight: 600;
+}
+
+QPushButton:hover, QToolButton:hover {
+    border: 1px solid rgba(255,255,255,0.52);
+}
+
+QPushButton#PrimaryBtn {
+    background: {{ACTIVE_TINT}};
+}
+
+QPushButton#DangerBtn {
+    background: {{ERROR_TINT}};
+}
+
+QListWidget {
+    background: transparent;
+    border: none;
+    color: {{TEXT_PRIMARY}};
+}
+
+QListWidget::item {
+    border-radius: 12px;
+    padding: 10px 12px;
+}
+
+QListWidget::item:selected {
+    background: {{ACTIVE_TINT}};
+}
+
+QScrollArea {
+    background: transparent;
+    border: none;
+}

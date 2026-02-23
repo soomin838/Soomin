@@ -1,0 +1,58 @@
+QFrame#GlassCard {
+    background: {{GLASS_BG}};
+    border: 1px solid {{GLASS_BORDER}};
+    border-radius: 24px;
+}
+
+QFrame#GlassCard[state="success"] {
+    background: {{SUCCESS_TINT}};
+}
+
+QFrame#GlassCard[state="warning"] {
+    background: {{WARNING_TINT}};
+}
+
+QFrame#GlassCard[state="error"] {
+    background: {{ERROR_TINT}};
+}
+
+QFrame#GlassCard[state="active"] {
+    background: {{ACTIVE_TINT}};
+}
+
+QWidget#TopNav {
+    background: {{GLASS_BG}};
+    border: 1px solid {{GLASS_BORDER}};
+    border-radius: 22px;
+    min-height: 64px;
+}
+
+QLabel#Title {
+    font-size: 24px;
+    font-weight: 700;
+    color: {{TEXT_PRIMARY}};
+}
+
+QLabel#Subtitle {
+    font-size: 12px;
+    color: {{TEXT_MUTED}};
+}
+
+QLabel#Value {
+    font-size: 22px;
+    font-weight: 700;
+    color: {{TEXT_PRIMARY}};
+}
+
+QLabel#ValueSmall {
+    font-size: 13px;
+    font-weight: 600;
+    color: {{TEXT_PRIMARY}};
+}
+
+QLabel#Badge {
+    border-radius: 10px;
+    padding: 4px 8px;
+    background: rgba(255,255,255,0.18);
+    border: 1px solid {{GLASS_BORDER}};
+}

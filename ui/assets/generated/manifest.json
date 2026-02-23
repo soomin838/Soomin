@@ -1,0 +1,12 @@
+{
+  "generated_at_utc": "2026-02-23T00:27:39.832747+00:00",
+  "asset_count": 0,
+  "api_only": true,
+  "provider": "pollinations",
+  "model": "gptimage",
+  "error": {
+    "reason": "missing_api_key",
+    "message": "Pollinations API key is missing. API-only policy blocks local fallback."
+  },
+  "assets": []
+}

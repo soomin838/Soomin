@@ -1,0 +1,37 @@
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+
+# Runtime/generated app data
+storage/logs/
+storage/sessions/
+storage/temp_images/
+storage/ui/
+
+# Local secrets/tokens
+config/client_secrets.json
+config/blogger_token.json
+config/service_account.json
+config/*.token.json
+config/*.secrets.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
