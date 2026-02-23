@@ -145,12 +145,21 @@ class AgentWorkflow:
 
     def _log_ollama_event(self, event: str, payload: dict[str, Any] | None = None) -> None:
         payload = dict(payload or {})
-        payload.setdefault("purpose", "system")
+        purpose = str(payload.get("purpose", "") or "").strip().lower()
+        if purpose not in {"image_plan", "qa_review"}:
+            return
+        payload["purpose"] = purpose
         payload.setdefault("endpoint", "/api/generate")
         payload.setdefault("latency_ms", 0)
+        payload.setdefault("prompt_len", int(payload.get("prompt_len", 0) or 0))
+        payload.setdefault("response_len", int(payload.get("response_len", 0) or 0))
         payload.setdefault("success", event not in {"ollama_prompt_plan_failed", "ollama_qa_review_failed"})
         payload.setdefault("fallback_used", not payload.get("success", True))
         payload.setdefault("ok", bool(payload.get("success", False)))
+        if "error_summary" not in payload:
+            payload["error_summary"] = str(
+                payload.get("error") or payload.get("reason") or ""
+            )[:220]
         row = {
             "ts_utc": datetime.now(timezone.utc).isoformat(),
             "event": str(event or "").strip(),
@@ -178,18 +187,6 @@ class AgentWorkflow:
         self._local_llm_checked = True
         self._local_llm_ready = bool(ready)
         self._local_llm_last_reason = str(reason or "")
-        self._log_ollama_event(
-            "ollama_prepare",
-            {
-                "enabled": bool(getattr(self.settings.local_llm, "enabled", False)),
-                "ready": bool(ready),
-                "reason": str(reason or ""),
-                "model": str(getattr(self.settings.local_llm, "model", "") or ""),
-                "purpose": "system",
-                "success": bool(ready),
-                "fallback_used": (not bool(ready)),
-            },
-        )
         if not ready:
             try:
                 self.settings.local_llm.enabled = False
@@ -241,6 +238,7 @@ class AgentWorkflow:
         keyword = re.sub(r"\s+", " ", str(getattr(selected, "title", "") or draft.title or "").strip())
         device = self._infer_device_type(f"{draft.title}\n{selected.title}")
         cluster = self._infer_cluster_id_from_keyword(" ".join(getattr(selected, "long_tail_keywords", [])[:2]) or keyword)
+        prompt_len_est = len(keyword) + len(device) + len(cluster) + sum(len(str(v or "")) for v in sections.values())
         started = time.perf_counter()
         try:
             plan = self.ollama_client.build_image_prompt_plan(
@@ -260,6 +258,12 @@ class AgentWorkflow:
                     "latency_ms": latency_ms,
                     "success": True,
                     "fallback_used": False,
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": int(
+                        len(str(plan.banner_prompt or ""))
+                        + len(str(plan.inline_prompt or ""))
+                        + sum(len(str(x or "")) for x in (plan.alt_suggestions or []))
+                    ),
                 },
             )
             return {
@@ -283,6 +287,8 @@ class AgentWorkflow:
                     "error": str(exc),
                     "reason": reason,
                     "model": str(getattr(self.settings.local_llm, "model", "") or ""),
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": 0,
                 },
             )
             return self._fallback_image_prompt_plan(draft, selected)
@@ -305,6 +311,7 @@ class AgentWorkflow:
 
         intro = self._extract_intro_text(html)
         alt_values = [str(getattr(img, "alt", "") or "") for img in (images or []) if str(getattr(img, "alt", "") or "").strip()]
+        prompt_len_est = len(str(title or "")) + len(str(html or "")) + len(str(intro or "")) + sum(len(x) for x in alt_values)
         started = time.perf_counter()
         try:
             result = self.ollama_client.review_article_quality(
@@ -325,6 +332,8 @@ class AgentWorkflow:
                     "success": True,
                     "fallback_used": False,
                     "issue_count": len(list((result or {}).get("issues", []) or [])),
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": int(len(json.dumps(result or {}, ensure_ascii=False))),
                 },
             )
             return result if isinstance(result, dict) else {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
@@ -340,6 +349,8 @@ class AgentWorkflow:
                     "fallback_used": True,
                     "reason": reason,
                     "error": str(exc),
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": 0,
                 },
             )
             return {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
@@ -1086,6 +1097,26 @@ class AgentWorkflow:
         images = self.visual.ensure_unique_assets(images)
         if len(images) > target_images:
             images = images[:target_images]
+        policy_ok, policy_reason = self._enforce_image_fallback_publish_policy(images)
+        if not policy_ok:
+            hold_labels = self._build_public_labels(
+                title=draft.title,
+                candidate=selected,
+                global_keywords=global_keywords,
+                max_labels=6,
+            )
+            working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                current_draft_post_id=working_draft_id,
+                stage="hold",
+                title=draft.title,
+                html_body=final_html,
+                labels=hold_labels,
+                reason=policy_reason,
+            )
+            hold_msg = policy_reason
+            if hold_note:
+                hold_msg += f" | {hold_note}"
+            return WorkflowResult("hold", hold_msg)
         min_required_images = min(target_images, 2)
         image_kind_counts = Counter((getattr(img, "source_kind", "") or "unknown") for img in images)
         if not images:
@@ -1152,6 +1183,28 @@ class AgentWorkflow:
             final_html = re.sub(tok, "", final_html, flags=re.IGNORECASE)
         final_html = self._sanitize_publish_html(final_html, domain=current_domain)
         final_html = self._canonicalize_html_payload(final_html)
+        if self._contains_markdown_tokens(final_html):
+            final_html = self._canonicalize_html_payload(final_html)
+            final_html = self._sanitize_publish_html(final_html, domain=current_domain)
+            if self._contains_markdown_tokens(final_html):
+                hold_labels = self._build_public_labels(
+                    title=draft.title,
+                    candidate=selected,
+                    global_keywords=global_keywords,
+                    max_labels=6,
+                )
+                working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                    current_draft_post_id=working_draft_id,
+                    stage="hold",
+                    title=draft.title,
+                    html_body=final_html,
+                    labels=hold_labels,
+                    reason="markdown_canonicalize_failed",
+                )
+                hold_msg = "markdown_canonicalize_failed"
+                if hold_note:
+                    hold_msg += f" | {hold_note}"
+                return WorkflowResult("hold", hold_msg)
         if isinstance(local_qa_review, dict):
             issue_count = len(list(local_qa_review.get("issues", []) or []))
             if issue_count > 0:
@@ -2041,6 +2094,31 @@ class AgentWorkflow:
         images = self.visual.ensure_unique_assets(images)
         if len(images) > target_images:
             images = images[:target_images]
+        policy_ok, policy_reason = self._enforce_image_fallback_publish_policy(images)
+        if not policy_ok:
+            hold_labels = self._normalize_resume_labels(row.get("labels", []))
+            if not hold_labels:
+                hold_labels = self._build_public_labels(
+                    title=title,
+                    candidate=candidate,
+                    global_keywords=self.last_global_keywords,
+                    max_labels=6,
+                )
+            post_id = str(row.get("post_id", "") or "").strip()
+            updated_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                current_draft_post_id=post_id,
+                stage="hold",
+                title=title,
+                html_body=draft.html,
+                labels=hold_labels,
+                reason=policy_reason,
+            )
+            hold_msg = policy_reason
+            if hold_note:
+                hold_msg += f" | {hold_note}"
+            if updated_draft_id:
+                hold_msg += f" | draft_checkpoint={updated_draft_id}"
+            return WorkflowResult("hold", hold_msg)
         min_required_images = min(target_images, 2)
         if len(images) < target_images and len(images) >= min_required_images:
             self._set_image_pipeline_state("fallback", len(images), target_images, f"최종 폴백({len(images)}장 발행)")
@@ -2078,6 +2156,33 @@ class AgentWorkflow:
             final_html = re.sub(tok, "", final_html, flags=re.IGNORECASE)
         final_html = self._sanitize_publish_html(final_html, domain=resume_domain)
         final_html = self._canonicalize_html_payload(final_html)
+        if self._contains_markdown_tokens(final_html):
+            final_html = self._canonicalize_html_payload(final_html)
+            final_html = self._sanitize_publish_html(final_html, domain=resume_domain)
+            if self._contains_markdown_tokens(final_html):
+                hold_labels = self._normalize_resume_labels(row.get("labels", []))
+                if not hold_labels:
+                    hold_labels = self._build_public_labels(
+                        title=title,
+                        candidate=candidate,
+                        global_keywords=self.last_global_keywords,
+                        max_labels=6,
+                    )
+                post_id = str(row.get("post_id", "") or "").strip()
+                updated_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                    current_draft_post_id=post_id,
+                    stage="hold",
+                    title=title,
+                    html_body=final_html,
+                    labels=hold_labels,
+                    reason="markdown_canonicalize_failed",
+                )
+                hold_msg = "markdown_canonicalize_failed"
+                if hold_note:
+                    hold_msg += f" | {hold_note}"
+                if updated_draft_id:
+                    hold_msg += f" | draft_checkpoint={updated_draft_id}"
+                return WorkflowResult("hold", hold_msg)
         gate_preview_html = ""
         try:
             gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
@@ -2546,6 +2651,27 @@ class AgentWorkflow:
             return ""
         text = re.sub(r"<[^>]+>", " ", str(m.group(1) or ""))
         return re.sub(r"\s+", " ", text).strip()
+
+    def _contains_markdown_tokens(self, html: str) -> bool:
+        src = str(html or "")
+        if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", src):
+            return True
+        return ("## " in src) or ("### " in src)
+
+    def _enforce_image_fallback_publish_policy(self, images: list[ImageAsset]) -> tuple[bool, str]:
+        allow_inline = bool(getattr(self.settings.publish, "allow_inline_fallback_publish", False))
+        allow_banner = bool(getattr(self.settings.publish, "allow_banner_fallback_publish", True))
+        if not images:
+            return False, "no_image_assets_available"
+        banner_src = str(getattr(images[0], "source_url", "") or "").strip().lower()
+        if (not allow_banner) and banner_src.startswith("local://fallback"):
+            return False, "banner_image_generation_failed"
+        if len(images) > 1 and (not allow_inline):
+            for image in images[1:]:
+                src = str(getattr(image, "source_url", "") or "").strip().lower()
+                if src.startswith("local://fallback"):
+                    return False, "inline_image_generation_failed"
+        return True, ""
 
     def _force_image_floor(
         self,

@@ -42,6 +42,8 @@ publish:
   buffer_target_days: 5
   buffer_min_days: 3
   schedule_horizon_days: 14
+  allow_inline_fallback_publish: false
+  allow_banner_fallback_publish: true
 quality:
   enabled: true
   strict_mode: true
@@ -219,6 +221,7 @@ visual:
   pollinations_thumbnail_model: "gptimage"
   pollinations_content_model: "gptimage"
   pollinations_timeout_sec: 30
+  prompt_suffix: "no text, no letters, no numbers, no logos, no watermark"
   thumbnail_ocr_verify: false
   screenshot_priority_keywords: []
 

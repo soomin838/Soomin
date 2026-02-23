@@ -913,8 +913,9 @@ class VisualPipeline:
         prompt_text = self._enforce_no_text_rule(prompt_text)
         width, height = (1280, 720) if str(role or "").lower() == "thumbnail" else (1152, 648)
         # Stable cache key policy: sha1(model + size + prompt)
+        prompt_suffix = re.sub(r"\s+", " ", str(getattr(self.visual_settings, "prompt_suffix", "") or "").strip())
         cache_key = hashlib.sha1(
-            f"{model}|{width}x{height}|{prompt_text}".encode("utf-8", errors="ignore")
+            f"{model}|{width}x{height}|{prompt_text}|{prompt_suffix}".encode("utf-8", errors="ignore")
         ).hexdigest()
         cache_path = self.image_cache_dir / f"{cache_key}.png"
         if cache_path.exists():
@@ -966,15 +967,25 @@ class VisualPipeline:
         best_candidate_reason = ""
         best_candidate_metrics: dict[str, float | int | str | bool] = {}
 
-        # Policy: one retry on failure, then fallback.
-        max_generation_attempts = 2
+        # Policy: deterministic three-stage retry.
+        # 1) original prompt
+        # 2) same prompt + different seed
+        # 3) simplified prompt + different seed
+        max_generation_attempts = 3
         for gen_try in range(1, max_generation_attempts + 1):
             # Throttle per generation attempt (not per auth mode).
             self._respect_image_interval()
             params_seed = dict(base_params)
             params_seed["seed"] = str(random.randint(1, 2_000_000_000))
             attempt_prompt = prompt_text
-            prompt_mode = "default"
+            prompt_mode = "original"
+            if gen_try == 2:
+                prompt_mode = "seed_refresh"
+            elif gen_try >= 3:
+                attempt_prompt = self._enforce_no_text_rule(
+                    self._simplify_prompt_for_retry(prompt_text, retry_index=gen_try, role=role_key)
+                )
+                prompt_mode = "simplified"
             encoded_prompt = quote(attempt_prompt, safe="")
             endpoint = f"{base_url}/image/{encoded_prompt}"
             mode_queue: list[tuple[str, dict[str, str], dict[str, str]]] = list(auth_modes)
@@ -1694,11 +1705,34 @@ class VisualPipeline:
             outline=(185, 198, 230),
             width=3,
         )
-        title_font = ImageFont.load_default()
-        body_font = ImageFont.load_default()
-        draw.text((int(width * 0.12), int(height * 0.28)), "Productivity Visual", fill=(42, 61, 102), font=title_font)
-        draw.text((int(width * 0.12), int(height * 0.36)), "Fallback image generated locally", fill=(72, 88, 120), font=body_font)
-        draw.text((int(width * 0.12), int(height * 0.44)), "when remote image API times out.", fill=(72, 88, 120), font=body_font)
+        # Text-free fallback: abstract geometry only.
+        draw.rounded_rectangle(
+            [int(width * 0.17), int(height * 0.30), int(width * 0.83), int(height * 0.40)],
+            radius=16,
+            fill=(205, 223, 246),
+            outline=(178, 198, 226),
+            width=2,
+        )
+        draw.rounded_rectangle(
+            [int(width * 0.17), int(height * 0.46), int(width * 0.73), int(height * 0.56)],
+            radius=16,
+            fill=(214, 232, 251),
+            outline=(184, 205, 231),
+            width=2,
+        )
+        draw.rounded_rectangle(
+            [int(width * 0.17), int(height * 0.62), int(width * 0.79), int(height * 0.72)],
+            radius=16,
+            fill=(223, 238, 253),
+            outline=(191, 212, 238),
+            width=2,
+        )
+        draw.ellipse(
+            [int(width * 0.76), int(height * 0.22), int(width * 0.86), int(height * 0.34)],
+            fill=(195, 216, 245),
+            outline=(173, 197, 230),
+            width=2,
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         img.save(path, format="PNG", optimize=True)
 
@@ -1946,7 +1980,12 @@ class VisualPipeline:
             "Do not render letters, words, numbers, logos, trademarks, watermark, captions, UI labels, or signs. "
             "If any surface could show text, keep it blank or abstract."
         )
-        out = f"{base} {strict}".strip()
+        suffix = re.sub(
+            r"\s+",
+            " ",
+            str(getattr(self.visual_settings, "prompt_suffix", "") or "").strip(),
+        )
+        out = f"{base} {strict} {suffix}".strip()
         return re.sub(r"\s+", " ", out)[:1100]
 
     def _build_canva_thumbnail_prompt(

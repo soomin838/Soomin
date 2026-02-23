@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,7 @@ class VisualSettings:
     cache_dir: str = "storage/image_cache"
     fallback_banner: str = "assets/fallback/banner.png"
     fallback_inline: str = "assets/fallback/inline.png"
+    prompt_suffix: str = "no text, no letters, no numbers, no logos, no watermark"
 
 
 @dataclass
@@ -110,6 +112,8 @@ class PublishSettings:
     buffer_target_days: int = 5
     buffer_min_days: int = 3
     schedule_horizon_days: int = 14
+    allow_inline_fallback_publish: bool = False
+    allow_banner_fallback_publish: bool = True
 
 
 @dataclass
@@ -377,6 +381,7 @@ def _construct_dc(dc_type, data: dict[str, Any] | None):
 
 def load_settings(path: Path) -> AppSettings:
     raw = _load_yaml(path)
+    settings_warnings: list[str] = []
     quality_raw = dict(raw.get("quality", {}) or {})
     qa_raw = raw.get("qa", {}) or {}
     content_raw = dict(raw.get("content", {}) or {})
@@ -430,23 +435,34 @@ def load_settings(path: Path) -> AppSettings:
             raw["visual"]["enable_gemini_image_generation"] = bool(llm_raw.get("enable_image_generation"))
     if images_raw:
         raw.setdefault("visual", {})
+        visual_raw = dict(raw.get("visual", {}) or {})
         banner_count = int(images_raw.get("banner_count", 1))
         inline_count = int(images_raw.get("inline_count", 1))
-        raw["visual"]["target_images_per_post"] = max(1, banner_count + inline_count)
-        raw["visual"]["max_banner_images"] = max(1, banner_count)
-        raw["visual"]["max_inline_images"] = max(0, inline_count)
-        raw["visual"]["cache_dir"] = str(images_raw.get("cache_dir", "storage/image_cache"))
-        raw["visual"]["fallback_banner"] = str(images_raw.get("fallback_banner", "assets/fallback/banner.png"))
-        raw["visual"]["fallback_inline"] = str(images_raw.get("fallback_inline", "assets/fallback/inline.png"))
-        # Strict split: images provider is always pollinations.
-        raw["visual"]["image_provider"] = "pollinations"
+        has_visual_explicit = bool(visual_raw)
+        if has_visual_explicit:
+            settings_warnings.append(
+                "Both visual.* and images.* are present; runtime uses visual.* as source of truth."
+            )
+        raw["visual"].setdefault("target_images_per_post", max(1, banner_count + inline_count))
+        raw["visual"].setdefault("max_banner_images", max(1, banner_count))
+        raw["visual"].setdefault("max_inline_images", max(0, inline_count))
+        raw["visual"].setdefault("cache_dir", str(images_raw.get("cache_dir", "storage/image_cache")))
+        raw["visual"].setdefault("fallback_banner", str(images_raw.get("fallback_banner", "assets/fallback/banner.png")))
+        raw["visual"].setdefault("fallback_inline", str(images_raw.get("fallback_inline", "assets/fallback/inline.png")))
+        raw["visual"].setdefault(
+            "prompt_suffix",
+            str(images_raw.get("prompt_suffix", "no text, no letters, no numbers, no logos, no watermark")),
+        )
+        # Strict split: runtime image provider is always pollinations.
+        raw["visual"].setdefault("image_provider", "pollinations")
         pollinations_raw = dict(images_raw.get("pollinations", {}) or {})
         pollinations_model = str(pollinations_raw.get("model", "gptimage") or "gptimage").strip() or "gptimage"
-        raw["visual"]["pollinations_thumbnail_model"] = "gptimage" if pollinations_model.lower() != "gptimage" else pollinations_model
-        raw["visual"]["pollinations_content_model"] = "gptimage" if pollinations_model.lower() != "gptimage" else pollinations_model
+        forced_model = "gptimage" if pollinations_model.lower() != "gptimage" else pollinations_model
+        raw["visual"].setdefault("pollinations_thumbnail_model", forced_model)
+        raw["visual"].setdefault("pollinations_content_model", forced_model)
         if "timeout_sec" in pollinations_raw:
             try:
-                raw["visual"]["pollinations_timeout_sec"] = max(5, int(pollinations_raw.get("timeout_sec", 30)))
+                raw["visual"].setdefault("pollinations_timeout_sec", max(5, int(pollinations_raw.get("timeout_sec", 30))))
             except Exception:
                 pass
     if publishing_raw:
@@ -471,6 +487,12 @@ def load_settings(path: Path) -> AppSettings:
         raw["publish"]["quiet_hours_enabled"] = bool(publishing_raw.get("quiet_hours_enabled", True))
         raw["publish"]["quiet_hours_start"] = str(publishing_raw.get("quiet_hours_start", "02:00"))
         raw["publish"]["quiet_hours_end"] = str(publishing_raw.get("quiet_hours_end", "07:00"))
+        raw["publish"]["allow_inline_fallback_publish"] = bool(
+            publishing_raw.get("allow_inline_fallback_publish", raw["publish"].get("allow_inline_fallback_publish", False))
+        )
+        raw["publish"]["allow_banner_fallback_publish"] = bool(
+            publishing_raw.get("allow_banner_fallback_publish", raw["publish"].get("allow_banner_fallback_publish", True))
+        )
     if internal_links_raw:
         raw.setdefault("publish", {})
         raw["publish"]["related_posts_min"] = int(internal_links_raw.get("related_link_count", 2))
@@ -479,6 +501,17 @@ def load_settings(path: Path) -> AppSettings:
         raw.setdefault("keyword_pool", {})
         raw["keyword_pool"]["daily_target"] = int(keywords_raw.get("refill_threshold_per_device", 100))
         raw["keyword_pool"]["pick_per_run"] = max(1, int(raw.get("publishing", {}).get("posts_to_publish_per_day", 2)))
+
+    if settings_warnings:
+        try:
+            warn_path = (path.parent.parent / "storage" / "logs" / "settings_warnings.log").resolve()
+            warn_path.parent.mkdir(parents=True, exist_ok=True)
+            with warn_path.open("a", encoding="utf-8") as fh:
+                ts = datetime.now(timezone.utc).isoformat()
+                for msg in settings_warnings[:5]:
+                    fh.write(f"{ts} {msg}\n")
+        except Exception:
+            pass
 
     return AppSettings(
         timezone=raw.get("timezone", "America/New_York"),

@@ -85,8 +85,19 @@ class Publisher:
         clean_html = self._clean_html_tags(clean_html)
         lede_seed = self._first_text_paragraph(clean_html)
         post_html = self._merge_images(clean_html, images, creds)
+        pre_semantic_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", post_html, flags=re.IGNORECASE))
         if self.semantic_html_enabled:
             post_html = self._semanticize_article_html(post_html, lede_hint=lede_seed)
+            post_semantic_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", post_html, flags=re.IGNORECASE))
+            if post_semantic_img_count == 0 or post_semantic_img_count < pre_semantic_img_count:
+                self._log_upload_event(
+                    {
+                        "event": "semanticize_image_repair_count",
+                        "before_img_count": int(pre_semantic_img_count),
+                        "after_img_count": int(post_semantic_img_count),
+                    }
+                )
+                post_html = self.build_dry_run_html(post_html, images)
             try:
                 self._assert_html_image_integrity(
                     post_html,
@@ -1343,11 +1354,21 @@ class Publisher:
             body = chunks[i + 1] if i + 1 < len(chunks) else ""
             sections.append((heading, body))
 
+        quick_take_para = ""
+        for heading, body in sections:
+            heading_txt = self._paragraph_plain_text(heading)
+            if re.search(r"\bquick take\b", heading_txt, flags=re.IGNORECASE):
+                quick_take_para = self._first_text_paragraph(body)
+                break
+
         article_parts: list[str] = ['<article class="rz-post">']
         if preface:
             lede = re.sub(r"\s+", " ", str(lede_hint or "")).strip()[:320]
             if not lede:
                 lede = self._first_text_paragraph(preface)[:320]
+            if lede and quick_take_para and self._jaccard_similarity(lede, quick_take_para) >= 0.75:
+                # Policy: Option A - remove duplicated lede when it overlaps with Quick Take.
+                lede = ""
             if lede:
                 article_parts.append('<header class="rz-post-header">')
                 article_parts.append(f'<p class="rz-lede">{html_lib.escape(lede)}</p>')
