@@ -42,6 +42,59 @@ GEMINI_QUOTA_CONSOLE = "https://console.cloud.google.com/apis/api/generativelang
 GEMINI_USAGE_DASHBOARD = "https://aistudio.google.com/usage"
 
 
+def _read_version_lines(path: Path) -> dict[str, str]:
+    try:
+        if not path.exists():
+            return {}
+        raw = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return {}
+    meta: dict[str, str] = {}
+    for line in str(raw or "").splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        key = str(k or "").strip()
+        val = str(v or "").strip()
+        if key:
+            meta[key] = val
+    return meta
+
+
+def resolve_running_version() -> str:
+    candidates: list[Path] = []
+    try:
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "version.txt")
+    except Exception:
+        pass
+    candidates.extend(
+        [
+            ROOT / "version.txt",
+            BUNDLE_ROOT / "version.txt",
+            Path(__file__).resolve().parent / "version.txt",
+        ]
+    )
+    seen: set[str] = set()
+    for p in candidates:
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        meta = _read_version_lines(p)
+        if not meta:
+            continue
+        commit = str(meta.get("commit", "") or "").strip()
+        build_date = str(meta.get("build_date", "") or "").strip()
+        if commit and build_date:
+            return f"{commit[:7]} ({build_date})"
+        if commit:
+            return commit[:7]
+        if build_date:
+            return build_date
+    return "unknown"
+
+
 def safe_tz(tz_name: str):
     """Return a valid tzinfo even when zone database is missing."""
     try:
@@ -104,6 +157,7 @@ def initialize_runtime_home() -> None:
 
 class AgentController:
     def __init__(self) -> None:
+        self.running_version = resolve_running_version()
         self.settings = load_settings(SETTINGS_PATH)
         self._auto_tune_runtime_limits()
         self.workflow = AgentWorkflow(ROOT, self.settings)
@@ -147,6 +201,15 @@ class AgentController:
                 "free_mode": bool(self.settings.budget.free_mode),
                 "dry_run": bool(self.settings.budget.dry_run),
                 "model": self.settings.gemini.model,
+            },
+        )
+        self.qa.write(
+            "runtime",
+            "running_version",
+            {
+                "version": self.running_version,
+                "frozen": bool(getattr(sys, "frozen", False)),
+                "executable": str(getattr(sys, "executable", "")),
             },
         )
         self._bootstrap_rolling_scheduler()
@@ -1088,6 +1151,7 @@ def _validate_blogger_token_file(path_value: str) -> tuple[bool, str]:
 
 
 def run_cli(force_once: bool) -> None:
+    print(f"Running version: {resolve_running_version()}")
     controller = AgentController()
     if force_once:
         controller.force_run = True
@@ -1103,6 +1167,7 @@ def run_cli(force_once: bool) -> None:
 
 
 def run_qt(force_once: bool, setup_only: bool) -> int:
+    print(f"Running version: {resolve_running_version()}")
     mutex_handle = None
     if platform.system().lower() == "windows":
         try:
@@ -1147,6 +1212,15 @@ def run_qt(force_once: bool, setup_only: bool) -> int:
     )
 
     qa_boot = QALogger(ROOT / "storage" / "logs" / "qa_runtime.jsonl")
+    qa_boot.write(
+        "runtime",
+        "running_version",
+        {
+            "version": resolve_running_version(),
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "executable": str(getattr(sys, "executable", "")),
+        },
+    )
 
     if setup_only:
         dlg = SettingsDialog(context=settings_context, on_saved=None, required_only=False)

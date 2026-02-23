@@ -2,7 +2,8 @@
 AppId={{8C8A0F3A-DC89-4D6D-B9E5-9D8CD5A9D981}
 AppName=RezeroAgent
 AppVersion=1.0.0
-DefaultDirName={autopf}\RezeroAgent
+DefaultDirName={pf}\RezeroAgent
+UsePreviousAppDir=no
 DefaultGroupName=RezeroAgent
 OutputDir=..\..\dist
 OutputBaseFilename=RezeroAgentInstaller
@@ -16,6 +17,11 @@ RestartApplications=no
 
 [Files]
 Source: "..\..\dist\RezeroAgent.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\version.txt"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+Type: files; Name: "{autodesktop}\RezeroAgent.lnk"
+Type: files; Name: "{group}\RezeroAgent.lnk"
 
 [Icons]
 Name: "{group}\RezeroAgent"; Filename: "{app}\RezeroAgent.exe"

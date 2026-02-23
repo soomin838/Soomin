@@ -12,6 +12,8 @@
 참고:
 - 이 경로는 `설치형 인스톨러` 방식입니다(포터블 아님).
 - 앱 실행/설정에 터미널이 필수는 아닙니다.
+- 운영 실행은 반드시 설치된 경로(`C:\Program Files\RezeroAgent\RezeroAgent.exe`)를 사용하세요.
+- `dist\RezeroAgent.exe`는 테스트/검증용 빌드 산출물입니다.
 
 ## 핵심 특징
 
@@ -149,6 +151,15 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1 -NoInstaller
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/build_windows_fast.ps1
+```
+
+빠른 빌드 동작:
+- 기본은 `증분 exe 빌드`입니다(캐시 재사용, clean 생략).
+- 인스톨러는 기본적으로 생성하지 않으며, `installer.iss`가 바뀐 경우에만 자동 재생성됩니다.
+- 강제로 인스톨러까지 만들려면:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows_fast.ps1 -WithInstaller
 ```
 
 설치형 exe 포함 빌드(Inno Setup 필요):
