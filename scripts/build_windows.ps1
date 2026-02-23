@@ -69,6 +69,7 @@ if (-not $NoClean) {
   Write-Host "Skipping clean build cache (--NoClean)."
 }
 & $py @pyInstallerArgs
+Write-Host "NOTE: dist\\RezeroAgent.exe is for build verification. Use the installed app at C:\\Program Files\\RezeroAgent\\RezeroAgent.exe for production runs."
 
 # version.txt (build date + commit hash), best-effort without external git command.
 $commitHash = "nogit"
