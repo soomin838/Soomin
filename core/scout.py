@@ -6,10 +6,11 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import requests
 
-from .settings import SourceSettings
+from .settings import ContentModeSettings, SourceSettings
 
 
 @dataclass
@@ -139,16 +140,51 @@ class SourceScout:
         "fp8",
         "quantization",
     ]
+    _FIX_INTENT_TERMS = [
+        "not working",
+        "fix",
+        "error",
+        "after update",
+        "troubleshoot",
+        "issue",
+        "stuck",
+        "crash",
+        "broken",
+    ]
+    _DEVICE_TOKENS = [
+        "windows",
+        "mac",
+        "macos",
+        "iphone",
+        "ios",
+        "galaxy",
+        "samsung",
+        "android",
+        "wifi",
+        "bluetooth",
+        "microphone",
+        "speaker",
+        "audio",
+        "battery",
+        "charging",
+    ]
 
-    def __init__(self, settings: SourceSettings, root: Path) -> None:
+    def __init__(
+        self,
+        settings: SourceSettings,
+        root: Path,
+        content_mode: ContentModeSettings | None = None,
+    ) -> None:
         self.settings = settings
         self.root = root
+        self.content_mode = content_mode or ContentModeSettings()
         self._longtail_cache: dict[str, tuple[datetime, list[str]]] = {}
         self._longtail_cache_ttl = timedelta(hours=6)
 
     def collect(self) -> list[TopicCandidate]:
         candidates: list[TopicCandidate] = []
         mode = (self.settings.mode or "mixed").lower()
+        strict_mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower() == "tech_troubleshoot_only"
         trend_candidates: list[TopicCandidate] = []
 
         if mode in {"manual_seed", "seed", "manual"}:
@@ -160,15 +196,18 @@ class SourceScout:
             candidates.extend(self._collect_hackernews())
         if mode in {"mixed", "github"}:
             candidates.extend(self._collect_github())
-        if mode in {"mixed", "hackernews", "manual_seed", "seed", "manual"}:
+        if (not strict_mode) and mode in {"mixed", "hackernews", "manual_seed", "seed", "manual"}:
             trend_candidates = self._collect_trending_entity_topics()
             candidates.extend(trend_candidates)
         # Fixed entity pool is now strict fallback only when real-time scouting yields zero.
-        if mode in {"mixed", "manual_seed", "seed", "manual"} and not trend_candidates:
+        if (not strict_mode) and mode in {"mixed", "manual_seed", "seed", "manual"} and not trend_candidates:
             candidates.extend(self._collect_global_giant_topics())
 
         if not candidates:
             candidates.extend(self._collect_seeds())
+
+        if strict_mode:
+            candidates = self._apply_troubleshoot_mode_filter(candidates)
 
         candidates = self._enrich_candidates_with_longtail(candidates)
         candidates = self._filter_mass_market_candidates(candidates)
@@ -177,7 +216,8 @@ class SourceScout:
             c.score = int(max(0, c.score + self._audience_fit_boost(c.title, c.body)))
 
         sorted_items = sorted(candidates, key=lambda x: x.score, reverse=True)
-        sorted_items = self._ensure_global_giant_presence(sorted_items)
+        if not strict_mode:
+            sorted_items = self._ensure_global_giant_presence(sorted_items)
         return sorted_items[: self.settings.max_candidates]
 
     def get_trending_entities(self, within_hours: int = 24, limit: int = 8) -> list[str]:
@@ -380,10 +420,13 @@ class SourceScout:
         if not candidates:
             return candidates
         out: list[TopicCandidate] = []
+        strict_mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower() == "tech_troubleshoot_only"
         for c in candidates:
             title = str(getattr(c, "title", "") or "")
             body = str(getattr(c, "body", "") or "")
             text = f"{title} {body}".lower()
+            if strict_mode and not self._passes_troubleshoot_mode(c):
+                continue
             if any(term in text for term in self._DEEP_TECH_BLOCK_TERMS):
                 continue
 
@@ -399,7 +442,7 @@ class SourceScout:
                 continue
 
             # Keep dynamic trend picks even when entity is not in static pool.
-            if source in {"trending_entities", "global_giants"}:
+            if source in {"trending_entities", "global_giants"} and not strict_mode:
                 out.append(c)
                 continue
 
@@ -410,6 +453,62 @@ class SourceScout:
                 out.append(c)
 
         return out if out else candidates
+
+    def _apply_troubleshoot_mode_filter(self, candidates: list[TopicCandidate]) -> list[TopicCandidate]:
+        out: list[TopicCandidate] = []
+        for c in candidates or []:
+            if not self._passes_troubleshoot_mode(c):
+                continue
+            c.title = self._normalize_troubleshoot_title(c.title, c.main_entity)
+            out.append(c)
+        if out:
+            return out
+        # deterministic fallback pool to avoid empty candidate set
+        fallback_titles = [
+            "Windows 11 audio not working? 5 fixes that actually work",
+            "Mac microphone not working after update: step-by-step fix",
+            "iPhone Bluetooth not working? 4 quick fixes",
+            "Galaxy Wi-Fi not working after update: complete fix guide",
+        ]
+        return [
+            TopicCandidate(
+                source="fallback_troubleshoot",
+                title=t,
+                body="Practical troubleshooting guide focused on normal users and safe step-by-step fixes.",
+                score=120 - idx,
+                url=f"https://duckduckgo.com/?q={quote_plus(t)}",
+                main_entity="",
+                long_tail_keywords=[],
+            )
+            for idx, t in enumerate(fallback_titles, start=1)
+        ]
+
+    def _passes_troubleshoot_mode(self, candidate: TopicCandidate) -> bool:
+        text = f"{getattr(candidate, 'title', '')} {getattr(candidate, 'body', '')}".lower()
+        banned = [str(x or "").strip().lower() for x in (getattr(self.content_mode, "banned_topic_keywords", []) or []) if str(x or "").strip()]
+        if any(token in text for token in banned):
+            return False
+        has_device = any(token in text for token in self._DEVICE_TOKENS)
+        has_fix_intent = any(token in text for token in self._FIX_INTENT_TERMS)
+        return bool(has_device and has_fix_intent)
+
+    def _normalize_troubleshoot_title(self, title: str, entity: str = "") -> str:
+        clean = re.sub(r"\s+", " ", str(title or "")).strip()
+        lower = clean.lower()
+        if any(token in lower for token in ("not working", "fix", "error", "after update")):
+            return clean
+        device_hint = ""
+        for token in ("windows", "mac", "iphone", "galaxy", "android", "samsung"):
+            if token in lower:
+                device_hint = token
+                break
+        if not device_hint:
+            entity_lower = str(entity or "").strip().lower()
+            if entity_lower in {"windows", "mac", "iphone", "galaxy", "android", "samsung"}:
+                device_hint = entity_lower
+        if not device_hint:
+            device_hint = "device"
+        return f"{device_hint.title()} not working? 3 fixes that actually work"
 
     def _collect_seeds(self) -> list[TopicCandidate]:
         seed_path = self.root / self.settings.seeds_path

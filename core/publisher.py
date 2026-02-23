@@ -196,7 +196,7 @@ class Publisher:
         src1 = self._file_to_data_uri(first.path)
         if src1:
             alt1 = self._regen_alt_if_too_similar(first.alt, intro_text)
-            out = self._insert_banner_before_first_h2(out, self._image_block(src1, alt1))
+            out = self._insert_banner_at_top(out, self._image_block(src1, alt1))
         if len(images) > 1:
             second = images[1]
             src2 = self._file_to_data_uri(second.path)
@@ -500,21 +500,14 @@ class Publisher:
             )
         if not thumb_src:
             thumb_src = self._pick_relaxed_thumbnail_src(src_map=src_map, images=images)
-        if not thumb_src:
-            # Final resilient fallback: inline data URI from local thumbnail file.
-            try:
-                thumb_src = self._file_to_data_uri(thumbnail.path)
-            except Exception:
-                thumb_src = ""
-            if not thumb_src:
-                thumb_src = self._fallback_asset_data_uri(role="thumbnail")
-            if thumb_src:
-                self._log_upload_event(
-                    {
-                        "event": "thumbnail_data_uri_fallback",
-                        "path": str(getattr(thumbnail, "path", "") or ""),
-                    }
-                )
+        if thumb_src and str(thumb_src).strip().lower().startswith("data:image/"):
+            self._log_upload_event(
+                {
+                    "event": "thumbnail_data_uri_blocked",
+                    "path": str(getattr(thumbnail, "path", "") or ""),
+                }
+            )
+            thumb_src = ""
         if not thumb_src:
             self._log_upload_event(
                 {
@@ -559,7 +552,7 @@ class Publisher:
         intro_text = self._first_paragraph_text(html)
         thumbnail.alt = self._regen_alt_if_too_similar(thumbnail.alt, intro_text)
         banner_block = self._image_block(thumb_src, thumbnail.alt)
-        html = self._insert_banner_before_first_h2(html, banner_block)
+        html = self._insert_banner_at_top(html, banner_block)
 
         if len(images) > 1:
             inline = images[1]
@@ -654,15 +647,10 @@ class Publisher:
             src = str(src_map.get(str(img.path), "") or "").strip()
             if src and self._is_blogger_media_url(src):
                 return src
-        # 2) Then accept any HTTP(S) uploaded image URL.
-        for img in images:
-            src = str(src_map.get(str(img.path), "") or "").strip()
-            if src.startswith("https://") or src.startswith("http://"):
-                return src
-        # 3) Final pass over map values.
+        # 2) Final pass over map values.
         for src in src_map.values():
             clean = str(src or "").strip()
-            if clean.startswith("https://") or clean.startswith("http://"):
+            if clean and self._is_blogger_media_url(clean):
                 return clean
         return ""
 
@@ -1075,6 +1063,16 @@ class Publisher:
         if not m:
             return block + "\n" + src
         return src[: m.start()] + block + "\n" + src[m.start() :]
+
+    def _insert_banner_at_top(self, html: str, block: str) -> str:
+        src = str(html or "").strip()
+        if not src:
+            return str(block or "")
+        if re.search(r"^\s*<article\b[^>]*>", src, flags=re.IGNORECASE):
+            m = re.search(r"^\s*<article\b[^>]*>", src, flags=re.IGNORECASE)
+            if m:
+                return src[: m.end()] + "\n" + block + "\n" + src[m.end() :]
+        return block + "\n" + src
 
     def _insert_inline_between_fix2_fix3(self, html: str, block: str) -> str:
         src = str(html or "")

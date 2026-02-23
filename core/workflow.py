@@ -47,7 +47,7 @@ class AgentWorkflow:
             json_log_path=root / "storage" / "logs" / "agent_events.jsonl",
         )
         self.guard = BudgetGuard(settings.budget, self.logs)
-        self.scout = SourceScout(settings.sources, root)
+        self.scout = SourceScout(settings.sources, root, settings.content_mode)
         self.patterns = PatternEngine()
         self.references = ReferenceCorpus(
             files=[
@@ -195,26 +195,27 @@ class AgentWorkflow:
         return bool(ready), str(reason or "")
 
     def _fallback_image_prompt_plan(self, draft: DraftPost, selected: TopicCandidate) -> dict[str, Any]:
-        sections = section_bundle_for_llm(draft.html)
+        sections = self._image_plan_sections(draft.html)
         quick = str(sections.get("quick_answer", "") or draft.summary or draft.title).strip()
         fix2 = str(sections.get("fix2", "") or quick).strip()
-        keyword = re.sub(r"\s+", " ", str(getattr(selected, "title", "") or draft.title or "").strip())
+        device = self._infer_device_type(f"{draft.title}\n{selected.title}")
         return {
             "banner_prompt": (
-                f"Realistic conceptual image for: {keyword}. "
-                f"Context: {quick[:260]}. "
-                "No text, no letters, no numbers, no logos, no watermark."
+                f"minimal software troubleshooting flow diagram for {device} issue, "
+                f"key context: {quick[:180]}, pastel vector, rounded boxes, "
+                "no text, no letters, no numbers, no logos, no watermark"
             ),
             "inline_prompt": (
-                f"Realistic process scene for troubleshooting context: {fix2[:260]}. "
-                "No text, no letters, no numbers, no logos, no watermark."
+                f"minimal software troubleshooting checklist diagram for {device}, "
+                f"step focus: {fix2[:180]}, 3 to 7 steps, pastel vector, rounded icons, "
+                "no text, no letters, no numbers, no logos, no watermark"
             ),
             "alt_suggestions": [
-                "Concept image representing a practical troubleshooting workflow.",
-                "Visual summary of a step-by-step troubleshooting flow.",
-                "Illustration of a structured process used to solve recurring device issues.",
+                "Troubleshooting flow diagram for a common software issue.",
+                "Checklist-style visual for a practical software fix path.",
+                "Step-by-step troubleshooting concept image for daily users.",
             ],
-            "style_tags": ["realistic", "editorial", "clean"],
+            "style_tags": ["minimal", "pastel", "rounded", "diagram"],
             "source": "fallback",
         }
 
@@ -234,7 +235,7 @@ class AgentWorkflow:
             )
             return self._fallback_image_prompt_plan(draft, selected)
 
-        sections = section_bundle_for_llm(draft.html)
+        sections = self._image_plan_sections(draft.html)
         keyword = re.sub(r"\s+", " ", str(getattr(selected, "title", "") or draft.title or "").strip())
         device = self._infer_device_type(f"{draft.title}\n{selected.title}")
         cluster = self._infer_cluster_id_from_keyword(" ".join(getattr(selected, "long_tail_keywords", [])[:2]) or keyword)
@@ -250,6 +251,86 @@ class AgentWorkflow:
             self._local_llm_calls_in_post += 1
             self._local_llm_used_last_run = True
             latency_ms = int((time.perf_counter() - started) * 1000)
+            plan_payload = {
+                "banner_prompt": str(plan.banner_prompt or "").strip(),
+                "inline_prompt": str(plan.inline_prompt or "").strip(),
+                "alt_suggestions": list(plan.alt_suggestions or []),
+                "style_tags": list(plan.style_tags or []),
+                "source": "ollama",
+                "ollama_reason": reason,
+            }
+            if self._image_prompt_plan_has_hazard(plan_payload):
+                self._log_ollama_event(
+                    "ollama_prompt_plan_retry_hazard",
+                    {
+                        "purpose": "image_plan",
+                        "endpoint": "/api/generate",
+                        "latency_ms": latency_ms,
+                        "success": False,
+                        "fallback_used": False,
+                        "prompt_len": int(prompt_len_est),
+                        "response_len": int(
+                            len(str(plan.banner_prompt or ""))
+                            + len(str(plan.inline_prompt or ""))
+                            + sum(len(str(x or "")) for x in (plan.alt_suggestions or []))
+                        ),
+                    },
+                )
+                if self._local_llm_calls_in_post < max_calls:
+                    retry_started = time.perf_counter()
+                    retry_plan = self.ollama_client.build_image_prompt_plan(
+                        keyword=keyword,
+                        device_type=device,
+                        cluster_id=cluster,
+                        section_texts=sections,
+                    )
+                    self._local_llm_calls_in_post += 1
+                    retry_latency_ms = int((time.perf_counter() - retry_started) * 1000)
+                    retry_payload = {
+                        "banner_prompt": str(retry_plan.banner_prompt or "").strip(),
+                        "inline_prompt": str(retry_plan.inline_prompt or "").strip(),
+                        "alt_suggestions": list(retry_plan.alt_suggestions or []),
+                        "style_tags": list(retry_plan.style_tags or []),
+                        "source": "ollama_retry",
+                        "ollama_reason": reason,
+                    }
+                    if not self._image_prompt_plan_has_hazard(retry_payload):
+                        plan_payload = retry_payload
+                        self._log_ollama_event(
+                            "ollama_prompt_plan_ok",
+                            {
+                                "purpose": "image_plan",
+                                "endpoint": "/api/generate",
+                                "latency_ms": retry_latency_ms,
+                                "success": True,
+                                "fallback_used": False,
+                                "prompt_len": int(prompt_len_est),
+                                "response_len": int(
+                                    len(str(retry_plan.banner_prompt or ""))
+                                    + len(str(retry_plan.inline_prompt or ""))
+                                    + sum(len(str(x or "")) for x in (retry_plan.alt_suggestions or []))
+                                ),
+                            },
+                        )
+                        return self._normalize_image_prompt_plan(plan_payload, draft, selected)
+                # hard fallback when hazard wording remains
+                fallback = self._fallback_image_prompt_plan(draft, selected)
+                fallback["source"] = "fallback_hazard_guard"
+                self._log_ollama_event(
+                    "ollama_prompt_plan_failed",
+                    {
+                        "purpose": "image_plan",
+                        "endpoint": "/api/generate",
+                        "latency_ms": latency_ms,
+                        "success": False,
+                        "fallback_used": True,
+                        "reason": "hazard_terms_detected",
+                        "prompt_len": int(prompt_len_est),
+                        "response_len": 0,
+                    },
+                )
+                return self._normalize_image_prompt_plan(fallback, draft, selected)
+
             self._log_ollama_event(
                 "ollama_prompt_plan_ok",
                 {
@@ -266,14 +347,7 @@ class AgentWorkflow:
                     ),
                 },
             )
-            return {
-                "banner_prompt": str(plan.banner_prompt or "").strip(),
-                "inline_prompt": str(plan.inline_prompt or "").strip(),
-                "alt_suggestions": list(plan.alt_suggestions or []),
-                "style_tags": list(plan.style_tags or []),
-                "source": "ollama",
-                "ollama_reason": reason,
-            }
+            return self._normalize_image_prompt_plan(plan_payload, draft, selected)
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             self._log_ollama_event(
@@ -291,7 +365,72 @@ class AgentWorkflow:
                     "response_len": 0,
                 },
             )
-            return self._fallback_image_prompt_plan(draft, selected)
+            return self._normalize_image_prompt_plan(self._fallback_image_prompt_plan(draft, selected), draft, selected)
+
+    def _image_plan_sections(self, html: str) -> dict[str, str]:
+        sections = section_bundle_for_llm(html)
+        out: dict[str, str] = {}
+        for key in ("quick_answer", "fix2", "advanced_fix"):
+            text = re.sub(r"\s+", " ", str(sections.get(key, "") or "")).strip()
+            if not text:
+                continue
+            first_sentence = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
+            out[key] = first_sentence[:220]
+        if not out:
+            out = {"quick_answer": "Practical software troubleshooting steps for normal users."}
+        return out
+
+    def _image_prompt_plan_has_hazard(self, plan: dict[str, Any]) -> bool:
+        banned = self._banned_image_words()
+        target = " ".join(
+            [
+                str(plan.get("banner_prompt", "") or ""),
+                str(plan.get("inline_prompt", "") or ""),
+                " ".join(str(x or "") for x in (plan.get("alt_suggestions", []) or [])),
+            ]
+        ).lower()
+        return any(word in target for word in banned)
+
+    def _banned_image_words(self) -> tuple[str, ...]:
+        return (
+            "fire",
+            "smoke",
+            "explosion",
+            "burning",
+            "hazard",
+            "injury",
+            "blood",
+            "damaged",
+            "broken outlet",
+            "electric",
+        )
+
+    def _normalize_image_prompt_plan(
+        self,
+        plan: dict[str, Any],
+        draft: DraftPost,
+        selected: TopicCandidate,
+    ) -> dict[str, Any]:
+        safe = dict(plan or {})
+        device = self._infer_device_type(f"{draft.title}\n{selected.title}")
+        banner = re.sub(r"\s+", " ", str(safe.get("banner_prompt", "") or "")).strip()
+        inline = re.sub(r"\s+", " ", str(safe.get("inline_prompt", "") or "")).strip()
+        if not banner:
+            banner = (
+                f"minimal troubleshooting flow diagram for {device} software issue, "
+                "3 to 5 boxes, pastel vector, no text, no letters, no numbers, no logos, no watermark"
+            )
+        if not inline:
+            inline = (
+                f"minimal checklist diagram for {device} microphone not working, "
+                "3 to 7 steps, pastel vector, no text, no letters, no numbers, no logos, no watermark"
+            )
+        for blocked in self._banned_image_words():
+            banner = re.sub(re.escape(blocked), "software", banner, flags=re.IGNORECASE)
+            inline = re.sub(re.escape(blocked), "software", inline, flags=re.IGNORECASE)
+        safe["banner_prompt"] = re.sub(r"\s+", " ", banner).strip()
+        safe["inline_prompt"] = re.sub(r"\s+", " ", inline).strip()
+        return safe
 
     def _run_local_llm_qa_review(self, title: str, html: str, images: list[ImageAsset]) -> dict[str, Any]:
         max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
@@ -530,6 +669,7 @@ class AgentWorkflow:
         duplicate_recovery_note = preflight_index_note or ""
         for round_idx in range(1, 4):
             latest_candidates = self._collect_candidates_with_retry(max_attempts=3)
+            latest_candidates = [c for c in (latest_candidates or []) if self._candidate_matches_content_mode(c)]
             recent_history_titles = self._get_recent_blogger_titles(limit=240, refresh_api=False)
             recent_urls = []
             recent_titles = list(recent_history_titles)
@@ -582,6 +722,7 @@ class AgentWorkflow:
                     except Exception:
                         pass
                     rec = self._collect_candidates_with_retry(max_attempts=3)
+                    rec = [c for c in (rec or []) if self._candidate_matches_content_mode(c)]
                     # Refresh recent history after each growth round to avoid reusing just-written patterns.
                     recent_history_titles = self._get_recent_blogger_titles(limit=240, refresh_api=False)
                     recent_urls = []
@@ -691,6 +832,27 @@ class AgentWorkflow:
             reason = self._append_note(reason, "fallback_selected_top_candidate")
         if selected is None:
             raise RuntimeError("Topic selection failed after retries")
+
+        if not self._candidate_matches_content_mode(selected):
+            filtered_pool = [c for c in (candidates or []) if self._candidate_matches_content_mode(c)]
+            if filtered_pool:
+                selected = max(filtered_pool, key=lambda x: int(getattr(x, "score", 0)))
+                score = max(score, int(getattr(selected, "score", 70)))
+                reason = self._append_note(reason, "content_mode_fallback_reselect")
+            else:
+                hold_title = str(getattr(selected, "title", "") or "content_mode_filtered")
+                working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                    current_draft_post_id=working_draft_id,
+                    stage="hold",
+                    title=hold_title,
+                    html_body="<h2>Hold</h2><p>All candidates violated content mode filters.</p>",
+                    labels=["tech-fix", "troubleshooting"],
+                    reason="content_mode_no_valid_candidate",
+                )
+                hold_msg = "content_mode_no_valid_candidate"
+                if hold_note:
+                    hold_msg += f" | {hold_note}"
+                return WorkflowResult("hold", hold_msg)
 
         if score < self.settings.gemini.min_publish_score:
             reason = self._append_note(reason, f"score_auto_raised_from_{score}")
@@ -1566,7 +1728,40 @@ class AgentWorkflow:
                 out.add(str(entity))
         return out
 
+    def _candidate_matches_content_mode(self, candidate: TopicCandidate | None) -> bool:
+        if candidate is None:
+            return False
+        mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
+        if mode != "tech_troubleshoot_only":
+            return True
+        text = (
+            f"{str(getattr(candidate, 'title', '') or '')}\n"
+            f"{str(getattr(candidate, 'body', '') or '')}"
+        ).lower()
+        banned = [
+            str(x or "").strip().lower()
+            for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
+            if str(x or "").strip()
+        ]
+        if any(tok in text for tok in banned):
+            return False
+        device_tokens = {
+            "windows", "mac", "macos", "iphone", "ios", "galaxy", "samsung",
+            "android", "wifi", "bluetooth", "audio", "speaker", "microphone",
+            "battery", "charging", "update", "driver",
+        }
+        fix_tokens = {
+            "not working", "fix", "error", "after update", "troubleshoot",
+            "issue", "stuck", "crash", "failed", "broken",
+        }
+        has_device = any(tok in text for tok in device_tokens)
+        has_fix = any(tok in text for tok in fix_tokens)
+        return bool(has_device and has_fix)
+
     def _infer_domain_from_title(self, title: str) -> str:
+        mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
+        if mode == "tech_troubleshoot_only":
+            return "tech_troubleshoot"
         lower = str(title or "").lower()
         if any(
             key in lower
@@ -2522,18 +2717,38 @@ class AgentWorkflow:
         global_keywords: list[str] | None,
     ) -> str:
         raw = re.sub(r"\s+", " ", str(title or "")).strip()
+        base_candidate_title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
         if not raw:
-            raw = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip() or "Workflow Experiment"
-        entity = re.sub(r"\s+", " ", str(getattr(candidate, "main_entity", "") or "")).strip()
-        if not entity:
-            entity = re.sub(r"\s+", " ", str((global_keywords or ["AI workflow"])[0])).strip()
-        if entity and entity.lower() not in raw.lower():
-            raw = f"{entity}: {raw}"
-        if not re.search(r"\b\d+\b", raw):
-            raw = f"{raw} in 7 Days"
-        # Keep CTR-safe punctuation style.
-        raw = raw.replace("  ", " ").strip(" -:")
-        # Force English-ish characters for title safety.
+            raw = base_candidate_title or "Windows issue not working fix guide"
+
+        mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
+        banned = [
+            str(x or "").strip().lower()
+            for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
+            if str(x or "").strip()
+        ]
+        for token in banned:
+            raw = re.sub(re.escape(token), "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s+", " ", raw).strip(" -:")
+
+        device_hint = self._infer_device_type(f"{raw}\n{base_candidate_title}") or "windows"
+        req_tokens = [
+            str(x or "").strip().lower()
+            for x in (getattr(self.settings.content_mode, "required_title_tokens_any", []) or [])
+            if str(x or "").strip()
+        ] or ["not working", "fix", "error", "after update"]
+        lower = raw.lower()
+        if mode == "tech_troubleshoot_only" and not any(tok in lower for tok in req_tokens):
+            if "after update" in lower or "update" in lower:
+                raw = f"{device_hint.title()} not working after update? 5 fixes that actually work (2026)"
+            elif re.search(r"\berror\b", lower):
+                raw = f"{device_hint.title()} error fix: 5 steps that actually work (2026)"
+            else:
+                raw = f"{device_hint.title()} not working? 5 fixes that actually work (2026)"
+            lower = raw.lower()
+
+        if mode == "tech_troubleshoot_only" and not re.search(r"\b(2026|\d+ fixes?)\b", lower):
+            raw = f"{raw} (2026 Fix Guide)"
         raw = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", raw)
         raw = re.sub(r"\s+", " ", raw).strip()
         return raw[:120]
@@ -2623,13 +2838,23 @@ class AgentWorkflow:
         if html_img_count < 2:
             errors.append(f"insufficient_html_images({html_img_count}/2)")
 
-        # Narrative title quality check: company + hot issue tone recommended.
+        # Troubleshooting title quality check.
         title_lower = str(title or "").lower()
-        hot_tokens = ("today", "new", "update", "launch", "why", "how", "i tried", "talking about")
-        has_hot = any(tok in title_lower for tok in hot_tokens)
-        has_entity = bool(self._extract_entities(str(title or "")))
-        if not has_entity or not has_hot:
-            warnings.append("title_not_company_hotissue_style")
+        req_tokens = [
+            str(x or "").strip().lower()
+            for x in (getattr(self.settings.content_mode, "required_title_tokens_any", []) or [])
+            if str(x or "").strip()
+        ] or ["not working", "fix", "error", "after update"]
+        if not any(tok in title_lower for tok in req_tokens):
+            errors.append("title_missing_troubleshoot_token")
+        banned_topic = [
+            str(x or "").strip().lower()
+            for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
+            if str(x or "").strip()
+        ]
+        banned_hit = next((tok for tok in banned_topic if tok in title_lower), "")
+        if banned_hit:
+            errors.append(f"title_banned_topic:{banned_hit}")
 
         # Operator checklist visibility for robots mobile duplicate policy.
         mobile_block = str(
@@ -3936,6 +4161,22 @@ class AgentWorkflow:
             txt = " ".join(words[:8])
         return txt
 
+    def _keyword_allowed_for_content_mode(self, keyword: str) -> bool:
+        mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
+        if mode != "tech_troubleshoot_only":
+            return True
+        lower = str(keyword or "").lower()
+        banned = [
+            str(x or "").strip().lower()
+            for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
+            if str(x or "").strip()
+        ]
+        if any(token in lower for token in banned):
+            return False
+        device_tokens = ("windows", "mac", "iphone", "ios", "galaxy", "samsung", "android")
+        fix_tokens = ("not working", "fix", "error", "after update", "troubleshoot", "issue")
+        return any(t in lower for t in device_tokens) and any(t in lower for t in fix_tokens)
+
     def _load_keyword_pool(self) -> dict[str, Any]:
         today = self._keyword_pool_today_kst()
         out: dict[str, Any] = {
@@ -3989,6 +4230,8 @@ class AgentWorkflow:
         def push(v: str) -> None:
             norm = self._normalize_keyword(v)
             if not norm:
+                return
+            if not self._keyword_allowed_for_content_mode(norm):
                 return
             key = norm.lower()
             if key in seen:

@@ -910,6 +910,7 @@ class VisualPipeline:
         prompt_text = re.sub(r"\s+", " ", str(prompt or "")).strip()
         if not prompt_text:
             prompt_text = self._fallback_prompt(paragraph, keyword, variation_index=index, role=role)
+        prompt_text = self._enforce_software_troubleshoot_prompt(prompt_text)
         prompt_text = self._enforce_no_text_rule(prompt_text)
         width, height = (1280, 720) if str(role or "").lower() == "thumbnail" else (1152, 648)
         # Stable cache key policy: sha1(model + size + prompt)
@@ -982,8 +983,10 @@ class VisualPipeline:
             if gen_try == 2:
                 prompt_mode = "seed_refresh"
             elif gen_try >= 3:
-                attempt_prompt = self._enforce_no_text_rule(
-                    self._simplify_prompt_for_retry(prompt_text, retry_index=gen_try, role=role_key)
+                attempt_prompt = self._enforce_software_troubleshoot_prompt(
+                    self._enforce_no_text_rule(
+                        self._simplify_prompt_for_retry(prompt_text, retry_index=gen_try, role=role_key)
+                    )
                 )
                 prompt_mode = "simplified"
             encoded_prompt = quote(attempt_prompt, safe="")
@@ -1194,6 +1197,27 @@ class VisualPipeline:
             addons.append("If people are present, use one person only with relaxed posture.")
         return re.sub(r"\s+", " ", f"{text} {' '.join(addons)}").strip()[:900]
 
+    def _enforce_software_troubleshoot_prompt(self, prompt: str) -> str:
+        text = re.sub(r"\s+", " ", str(prompt or "")).strip()
+        banned = (
+            "fire",
+            "smoke",
+            "explosion",
+            "burning",
+            "hazard",
+            "injury",
+            "blood",
+            "damaged",
+            "broken outlet",
+            "electric fire",
+        )
+        for token in banned:
+            text = re.sub(re.escape(token), "software", text, flags=re.IGNORECASE)
+        if not re.search(r"\b(software|troubleshooting|checklist|flow|diagram|settings|ui)\b", text, flags=re.IGNORECASE):
+            text = f"{text}. software troubleshooting checklist flow diagram"
+        text += " no physical hazards, no damaged hardware"
+        return re.sub(r"\s+", " ", text).strip()[:900]
+
     def _validate_generated_asset(
         self,
         path: Path,
@@ -1218,6 +1242,14 @@ class VisualPipeline:
         metrics["height"] = int(h)
         if w <= 0 or h <= 0:
             return False, "invalid_image_size", metrics
+        prompt_lower = str(prompt or "").lower()
+        if any(
+            token in prompt_lower
+            for token in ("fire", "smoke", "explosion", "burning", "hazard", "injury", "blood", "damaged hardware")
+        ):
+            return False, "hazard_prompt_forbidden", metrics
+        if self._looks_like_hazard_palette(im):
+            return False, "hazard_palette_suspect", metrics
         # User-requested policy:
         # disable local quality gate checks for
         # - resolution/aspect ratio
@@ -1227,6 +1259,22 @@ class VisualPipeline:
         # - human anatomy (mediapipe)
         # - non-photoreal style prompt guard
         return True, "ok_local_gate_disabled", metrics
+
+    def _looks_like_hazard_palette(self, image: Image.Image) -> bool:
+        try:
+            arr = np.asarray(image.convert("RGB"), dtype=np.float32)
+            if arr.size == 0:
+                return False
+            r = arr[:, :, 0]
+            g = arr[:, :, 1]
+            b = arr[:, :, 2]
+            warm = (r > 170) & (g > 55) & (g < 180) & (b < 100)
+            dark = (r < 95) & (g < 95) & (b < 95)
+            warm_ratio = float(warm.mean())
+            dark_ratio = float(dark.mean())
+            return bool(warm_ratio >= 0.20 and dark_ratio >= 0.18)
+        except Exception:
+            return False
 
     def _min_sharpness_threshold(self, retry_index: int, role: str, source_model: str) -> float:
         # Retry-aware threshold profile:
@@ -1828,7 +1876,7 @@ class VisualPipeline:
             draw.text((x0 + int(bar_width * 0.35), chart_bottom + 12), label, fill=(52, 66, 96), font=body_font)
             draw.text((x0 + int(bar_width * 0.3), y0 - 18), str(val), fill=(40, 54, 86), font=body_font)
 
-        draw.text((margin, h - 56), "Local fallback chart (PIL renderer)", fill=(98, 112, 140), font=body_font)
+        draw.rounded_rectangle([margin, h - 72, w - margin, h - 46], radius=10, outline=(98, 112, 140), width=2)
         img.save(path)
 
         return ImageAsset(

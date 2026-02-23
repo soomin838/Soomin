@@ -160,18 +160,21 @@ class OllamaClient:
         cluster_id: str,
         section_texts: dict[str, str],
     ) -> ImagePromptPlan:
-        sections = {k: re.sub(r"\s+", " ", str(v or "")).strip()[:420] for k, v in (section_texts or {}).items()}
+        sections = {k: re.sub(r"\s+", " ", str(v or "")).strip()[:220] for k, v in (section_texts or {}).items()}
         system_prompt = (
-            "You are an image prompt planner for blog illustrations.\n"
-            "Return JSON only.\n"
-            "Language: English only.\n"
-            "Do not include any explanation text outside JSON.\n"
-            "Rules:\n"
-            "- No text/letters/numbers/logos/watermarks in images.\n"
-            "- Prompts must be diverse in composition, angle, and metaphor.\n"
-            "- No references to screenshots or real UI capture.\n"
+            "You are generating image prompts for a software troubleshooting blog post.\n"
+            "Return JSON only with fields: banner_prompt, inline_prompt, alt_suggestions, style_tags.\n"
+            "Hard rules:\n"
+            "- The images must represent SOFTWARE troubleshooting, UI settings, checklists, or flow diagrams.\n"
+            "- No physical hazards: no fire, no smoke, no explosion, no damaged hardware, no injury, no dangerous scenes.\n"
+            "- No literal before/after disaster metaphors.\n"
+            "- Style: clean minimal vector, pastel, rounded shapes, simple icons.\n"
+            "- No text, no letters, no numbers, no logos, no watermark.\n"
+            "- Banner should be a simple troubleshooting flow diagram (3-5 boxes).\n"
+            "- Inline should be a checklist/step diagram (3-7 steps) relevant to the article.\n"
+            "- Return prompts in US English.\n"
             "JSON schema:\n"
-            "{\"banner_prompt\": str, \"inline_prompt\": str, \"alt_suggestions\": [str,str,str], \"style_tags\": [str,...]}"
+            "{\"banner_prompt\": \"string\", \"inline_prompt\": \"string\", \"alt_suggestions\": [\"string\",\"string\",\"string\"], \"style_tags\": [\"string\", \"string\"]}"
         )
         user_payload = {
             "keyword": keyword,
@@ -179,15 +182,9 @@ class OllamaClient:
             "cluster_id": cluster_id,
             "section_texts": sections,
             "rules": {
-                "banner": "symbolic and concept-rich",
-                "inline": "troubleshooting flow or checklist process",
-                "alt_suggestions": "natural short sentences",
-            },
-            "schema": {
-                "banner_prompt": "string",
-                "inline_prompt": "string",
-                "alt_suggestions": ["string", "string", "string"],
-                "style_tags": ["string"],
+                "banner": "software troubleshooting flow diagram",
+                "inline": "software troubleshooting checklist diagram",
+                "alt_suggestions": "short natural English sentences",
             },
         }
         data = self.generate_json(
@@ -217,17 +214,23 @@ class OllamaClient:
                     break
 
         if not banner:
-            banner = "Realistic conceptual photo of an organized workflow transformation with clean visual hierarchy."
+            banner = (
+                f"minimal software troubleshooting flow diagram for {device_type} issue, "
+                "pastel vector, rounded boxes, no text, no letters, no numbers, no logos, no watermark"
+            )
         if not inline:
-            inline = "Realistic process-oriented scene showing a simple troubleshooting flow with clear before-and-after contrast."
+            inline = (
+                f"minimal checklist diagram for {device_type} not working issue, "
+                "3 to 7 steps, pastel vector, rounded icons, no text, no letters, no numbers, no logos, no watermark"
+            )
         if not alt_suggestions:
             alt_suggestions = [
-                "Concept image representing a practical troubleshooting workflow.",
-                "Illustration of a structured process used to solve recurring office issues.",
-                "Visual summary of a step-by-step productivity improvement flow.",
+                "Troubleshooting flow diagram for the current software issue.",
+                "Checklist-style visual for fixing a common software problem.",
+                "Step-by-step troubleshooting concept image for everyday users.",
             ]
         if not style_tags:
-            style_tags = ["realistic", "clean", "editorial", "diagrammatic"]
+            style_tags = ["minimal", "pastel", "rounded", "diagram"]
 
         return ImagePromptPlan(
             banner_prompt=banner,

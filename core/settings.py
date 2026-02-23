@@ -222,6 +222,14 @@ class QualitySettings:
             "source trending_entities",
         ]
     )
+    required_title_tokens_any: list[str] = field(
+        default_factory=lambda: [
+            "not working",
+            "fix",
+            "error",
+            "after update",
+        ]
+    )
 
 
 @dataclass
@@ -272,6 +280,31 @@ class ContentPolicySettings:
     reading_level: str = "US_G7_G10"
     min_words: int = 1400
     max_words: int = 1900
+
+
+@dataclass
+class ContentModeSettings:
+    mode: str = "tech_troubleshoot_only"
+    allowed_devices: list[str] = field(default_factory=lambda: ["windows", "mac", "iphone", "galaxy"])
+    banned_topic_keywords: list[str] = field(
+        default_factory=lambda: [
+            "anthropic",
+            "openai",
+            "new ai",
+            "this week",
+            "trending",
+            "everyone is talking",
+            "workflow experiment",
+        ]
+    )
+    required_title_tokens_any: list[str] = field(
+        default_factory=lambda: [
+            "not working",
+            "fix",
+            "error",
+            "after update",
+        ]
+    )
 
 
 @dataclass
@@ -357,6 +390,7 @@ class AppSettings:
     blogger: BloggerSettings = field(default_factory=BloggerSettings)
     indexing: IndexingSettings = field(default_factory=IndexingSettings)
     content: ContentPolicySettings = field(default_factory=ContentPolicySettings)
+    content_mode: ContentModeSettings = field(default_factory=ContentModeSettings)
     topics: TopicsPolicySettings = field(default_factory=TopicsPolicySettings)
     llm: LLMPolicySettings = field(default_factory=LLMPolicySettings)
     local_llm: LocalLLMSettings = field(default_factory=LocalLLMSettings)
@@ -385,6 +419,7 @@ def load_settings(path: Path) -> AppSettings:
     quality_raw = dict(raw.get("quality", {}) or {})
     qa_raw = raw.get("qa", {}) or {}
     content_raw = dict(raw.get("content", {}) or {})
+    content_mode_raw = dict(raw.get("content_mode", {}) or {})
     topics_raw = dict(raw.get("topics", {}) or {})
     publishing_raw = dict(raw.get("publishing", {}) or {})
     llm_raw = dict(raw.get("llm", {}) or {})
@@ -422,6 +457,31 @@ def load_settings(path: Path) -> AppSettings:
             quality_raw["banned_debug_patterns"] = [
                 str(x).strip() for x in (qa_raw.get("banned_debug_patterns") or []) if str(x).strip()
             ]
+
+    if content_mode_raw:
+        req_tokens = [
+            str(x).strip().lower()
+            for x in (content_mode_raw.get("required_title_tokens_any") or [])
+            if str(x).strip()
+        ]
+        if req_tokens:
+            quality_raw["required_title_tokens_any"] = req_tokens
+        banned_topics = [
+            str(x).strip().lower()
+            for x in (content_mode_raw.get("banned_topic_keywords") or [])
+            if str(x).strip()
+        ]
+        if banned_topics:
+            existing = [
+                str(x).strip().lower()
+                for x in (quality_raw.get("disallowed_terms_tech_troubleshoot", []) or [])
+                if str(x).strip()
+            ]
+            merged = existing[:]
+            for token in banned_topics:
+                if token not in merged:
+                    merged.append(token)
+            quality_raw["disallowed_terms_tech_troubleshoot"] = merged
 
     # Mirror spec blocks into runtime-compatible legacy settings.
     if content_raw:
@@ -528,6 +588,7 @@ def load_settings(path: Path) -> AppSettings:
         blogger=_construct_dc(BloggerSettings, raw.get("blogger", {})),
         indexing=_construct_dc(IndexingSettings, raw.get("indexing", {})),
         content=_construct_dc(ContentPolicySettings, content_raw),
+        content_mode=_construct_dc(ContentModeSettings, content_mode_raw),
         topics=_construct_dc(TopicsPolicySettings, topics_raw),
         llm=_construct_dc(LLMPolicySettings, llm_raw),
         local_llm=_construct_dc(LocalLLMSettings, local_llm_raw),

@@ -89,6 +89,12 @@ quality:
     - "on-call"
     - "incident severity"
   disallowed_terms_tech_troubleshoot:
+    - "anthropic"
+    - "openai"
+    - "new ai"
+    - "this week"
+    - "trending"
+    - "everyone is talking"
     - "why everyone is talking"
     - "productivity breakthrough"
     - "innovation culture"
@@ -135,6 +141,12 @@ qa:
       - "on-call"
       - "incident severity"
     tech_troubleshoot:
+      - "anthropic"
+      - "openai"
+      - "new ai"
+      - "this week"
+      - "trending"
+      - "everyone is talking"
       - "why everyone is talking"
       - "productivity breakthrough"
       - "innovation culture"
@@ -253,6 +265,23 @@ llm:
   enable_refine_loop: false
   enable_judge_post: false
   enable_image_generation: false
+
+content_mode:
+  mode: "tech_troubleshoot_only"
+  allowed_devices: ["windows", "mac", "iphone", "galaxy"]
+  banned_topic_keywords:
+    - "anthropic"
+    - "openai"
+    - "new ai"
+    - "this week"
+    - "trending"
+    - "everyone is talking"
+    - "workflow experiment"
+  required_title_tokens_any:
+    - "not working"
+    - "fix"
+    - "error"
+    - "after update"
 
 local_llm:
   enabled: true

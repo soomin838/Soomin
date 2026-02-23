@@ -151,6 +151,15 @@ class ContentQAGate:
                 weight=0,
             )
         )
+        title_intent_fail, title_intent_detail = self._detect_title_intent(title=title, domain=domain)
+        checks.append(
+            QACheck(
+                key="title_troubleshoot_intent",
+                passed=(not title_intent_fail),
+                detail=title_intent_detail or "title_intent_ok",
+                weight=0,
+            )
+        )
         story_missing, story_detail = self._detect_missing_story_block(text=text, domain=domain)
         checks.append(
             QACheck(
@@ -242,6 +251,14 @@ class ContentQAGate:
             self._log_qa_reason(
                 reason="domain_drift_detected",
                 detail=domain_drift_detail,
+                title=title,
+                domain=domain,
+            )
+        if title_intent_fail:
+            hard_failures.append("title_intent_missing")
+            self._log_qa_reason(
+                reason="title_intent_missing",
+                detail=title_intent_detail,
                 title=title,
                 domain=domain,
             )
@@ -991,8 +1008,24 @@ class ContentQAGate:
                 continue
             if t in lower:
                 hits.append(t)
-        if len(hits) >= 2:
+        threshold = 1 if lower_domain == "tech_troubleshoot" else 2
+        if len(hits) >= threshold:
             return True, ",".join(sorted(set(hits))[:6])
+        return False, ""
+
+    def _detect_title_intent(self, title: str, domain: str) -> tuple[bool, str]:
+        if str(domain or "").strip().lower() != "tech_troubleshoot":
+            return False, ""
+        raw = re.sub(r"\s+", " ", str(title or "")).strip().lower()
+        if not raw:
+            return True, "title_empty"
+        required = [
+            str(x or "").strip().lower()
+            for x in (getattr(self.settings, "required_title_tokens_any", []) or [])
+            if str(x).strip()
+        ] or ["not working", "fix", "error", "after update"]
+        if not any(token in raw for token in required):
+            return True, "missing_required_troubleshoot_token"
         return False, ""
 
     def _detect_missing_story_block(self, text: str, domain: str) -> tuple[bool, str]:
