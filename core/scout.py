@@ -282,11 +282,11 @@ class SourceScout:
         entities = self.get_trending_entities(within_hours=24, limit=12)
         out: list[TopicCandidate] = []
         title_patterns = [
-            "Why everyone is talking about {entity} today (and what I learned)",
-            "I tried {entity}'s new workflow idea for one week: what actually worked",
-            "{entity}'s latest move and 3 practical productivity lessons",
-            "What {entity}'s execution style can teach a small office team",
-            "I borrowed one {entity} habit to save time this week",
+            "{entity} issue today: 3 troubleshooting fixes that actually work",
+            "How to fix common {entity} setup errors in 2026",
+            "{entity} problems this week: practical fixes for normal users",
+            "I tested 3 ways to solve recent {entity} app/device issues",
+            "{entity} not working? step-by-step fixes for beginners",
         ]
         for idx, entity in enumerate(entities, start=1):
             title = title_patterns[(idx - 1) % len(title_patterns)].format(entity=entity)
@@ -295,11 +295,10 @@ class SourceScout:
                 # Drop weak/noisy trends that cannot provide enough semantic expansion.
                 continue
             body = (
-                f"Real-time trend focus: {entity} is getting strong attention in recent English headlines. "
-                "Write in plain business language for regular office workers. "
-                "Focus on success habits, innovation culture, execution speed, and practical lessons we can copy this week. "
-                "Keep the analysis positive, practical, and legally safe. "
-                "Avoid legal-risk framing and avoid negative allegations."
+                f"{entity} has seen a fresh spike in user reports and discussion in English tech communities. "
+                "Focus this article on practical troubleshooting steps for normal users, "
+                "including what fails first, what to try next, and how to prevent repeat issues. "
+                "Avoid legal-risk framing and avoid unverified allegations."
             )
             out.append(
                 TopicCandidate(
@@ -307,7 +306,7 @@ class SourceScout:
                     title=title,
                     body=body,
                     score=180 - min(60, idx * 3),
-                    url=f"https://www.google.com/search?q={entity.replace(' ', '+')}+news",
+                    url=f"https://duckduckgo.com/?q={entity.replace(' ', '+')}+troubleshooting",
                     main_entity=entity,
                     long_tail_keywords=long_tail[:6],
                 )
@@ -316,32 +315,31 @@ class SourceScout:
 
     def _collect_global_giant_topics(self) -> list[TopicCandidate]:
         templates = [
-            ("Apple", "product design discipline and meeting efficiency"),
-            ("Tesla", "fast iteration and execution rhythm"),
-            ("Google", "team productivity systems and experimentation habits"),
-            ("Microsoft", "enterprise workflow standardization"),
-            ("Amazon", "writing culture and decision speed"),
-            ("OpenAI", "product iteration and practical AI productivity lessons"),
-            ("Anthropic", "safe AI rollout habits for everyday teams"),
-            ("Netflix", "high-trust ownership model"),
+            ("Apple", "iPhone and macOS setup issues"),
+            ("Tesla", "mobile app pairing and update issues"),
+            ("Google", "account, sync, and app reliability issues"),
+            ("Microsoft", "Windows update and Office reliability issues"),
+            ("Amazon", "device setup and account access issues"),
+            ("OpenAI", "assistant app connectivity and workflow issues"),
+            ("Anthropic", "assistant reliability and usage errors"),
+            ("Netflix", "streaming account and playback issues"),
         ]
         out: list[TopicCandidate] = []
         title_patterns = [
-            "I tested one {company} work habit this week. Here is what changed",
-            "Why teams keep studying {company}'s productivity playbook",
-            "{company}'s innovation culture in plain English: practical lessons for office workers",
-            "What I learned from {company}'s execution style (without the jargon)",
-            "How {company}'s team rhythm can improve your weekly workflow",
+            "{company} issue guide: fixes normal users can apply today",
+            "How I solved recurring {company} app/device problems this week",
+            "{company} troubleshooting checklist for beginners",
+            "What actually fixed my {company} workflow and setup issues",
+            "{company} problems in 2026: practical fixes that save time",
         ]
         for company, angle in templates:
             pick = title_patterns[(len(out)) % len(title_patterns)]
             title = pick.format(company=company)
             long_tail = self._derive_long_tail_questions(company, title)
             body = (
-                f"A mainstream business story on how {company} builds {angle}. "
-                "Focus on practical lessons for office workers: meeting habits, documentation style, "
-                "time-saving routines, and team communication rules. "
-                "Avoid legal risk and avoid negative allegations; keep tone educational and positive."
+                f"A practical troubleshooting article about {company} and {angle}. "
+                "Focus on symptoms, likely causes, step-by-step fixes, and prevention tips for everyday users. "
+                "Keep tone educational and avoid unverified claims."
             )
             out.append(
                 TopicCandidate(

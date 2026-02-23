@@ -13,6 +13,7 @@ from html import escape, unescape
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 from .brain import DraftPost, GeminiBrain
 from .budget import BudgetGuard
@@ -120,6 +121,7 @@ class AgentWorkflow:
         self._local_llm_ready = False
         self._local_llm_last_reason = "not_checked"
         self._local_llm_calls_in_post = 0
+        self._local_llm_used_last_run = False
         self._posts_index_bootstrap_started = False
         self._posts_index_bootstrap_done = False
         self._start_posts_index_bootstrap()
@@ -136,15 +138,23 @@ class AgentWorkflow:
 
     def _reset_local_llm_budget(self) -> None:
         self._local_llm_calls_in_post = 0
+        self._local_llm_used_last_run = False
 
     def _log_ollama_event(self, event: str, payload: dict[str, Any] | None = None) -> None:
+        payload = dict(payload or {})
+        payload.setdefault("purpose", "system")
+        payload.setdefault("endpoint", "/api/generate")
+        payload.setdefault("latency_ms", 0)
+        payload.setdefault("success", event not in {"ollama_prompt_plan_failed", "ollama_qa_review_failed"})
+        payload.setdefault("fallback_used", not payload.get("success", True))
         row = {
             "ts_utc": datetime.now(timezone.utc).isoformat(),
             "event": str(event or "").strip(),
+            "model": str(getattr(self.settings.local_llm, "model", "") or ""),
+            "provider": "ollama",
         }
-        if payload:
-            row.update(payload)
-        path = self.root / "storage" / "logs" / "ollama_runtime.jsonl"
+        row.update(payload)
+        path = self.root / "storage" / "logs" / "ollama_calls.jsonl"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as fh:
@@ -171,6 +181,9 @@ class AgentWorkflow:
                 "ready": bool(ready),
                 "reason": str(reason or ""),
                 "model": str(getattr(self.settings.local_llm, "model", "") or ""),
+                "purpose": "system",
+                "success": bool(ready),
+                "fallback_used": (not bool(ready)),
             },
         )
         if not ready:
@@ -207,15 +220,24 @@ class AgentWorkflow:
     def _build_image_prompt_plan_with_local_llm(self, draft: DraftPost, selected: TopicCandidate) -> dict[str, Any]:
         max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
         if self._local_llm_calls_in_post >= max_calls:
+            self._log_ollama_event(
+                "ollama_prompt_plan_skipped_budget",
+                {"purpose": "image_plan", "success": False, "fallback_used": True},
+            )
             return self._fallback_image_prompt_plan(draft, selected)
         ready, reason = self._prepare_local_llm()
         if not ready:
+            self._log_ollama_event(
+                "ollama_prompt_plan_skipped_unavailable",
+                {"purpose": "image_plan", "success": False, "fallback_used": True, "reason": reason},
+            )
             return self._fallback_image_prompt_plan(draft, selected)
 
         sections = section_bundle_for_llm(draft.html)
         keyword = re.sub(r"\s+", " ", str(getattr(selected, "title", "") or draft.title or "").strip())
         device = self._infer_device_type(f"{draft.title}\n{selected.title}")
         cluster = self._infer_cluster_id_from_keyword(" ".join(getattr(selected, "long_tail_keywords", [])[:2]) or keyword)
+        started = time.perf_counter()
         try:
             plan = self.ollama_client.build_image_prompt_plan(
                 keyword=keyword,
@@ -224,6 +246,18 @@ class AgentWorkflow:
                 section_texts=sections,
             )
             self._local_llm_calls_in_post += 1
+            self._local_llm_used_last_run = True
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            self._log_ollama_event(
+                "ollama_prompt_plan_ok",
+                {
+                    "purpose": "image_plan",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": True,
+                    "fallback_used": False,
+                },
+            )
             return {
                 "banner_prompt": str(plan.banner_prompt or "").strip(),
                 "inline_prompt": str(plan.inline_prompt or "").strip(),
@@ -233,15 +267,78 @@ class AgentWorkflow:
                 "ollama_reason": reason,
             }
         except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
             self._log_ollama_event(
                 "ollama_prompt_plan_failed",
                 {
+                    "purpose": "image_plan",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": False,
+                    "fallback_used": True,
                     "error": str(exc),
                     "reason": reason,
                     "model": str(getattr(self.settings.local_llm, "model", "") or ""),
                 },
             )
             return self._fallback_image_prompt_plan(draft, selected)
+
+    def _run_local_llm_qa_review(self, title: str, html: str, images: list[ImageAsset]) -> dict[str, Any]:
+        max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
+        if self._local_llm_calls_in_post >= max_calls:
+            self._log_ollama_event(
+                "ollama_qa_review_skipped_budget",
+                {"purpose": "qa_review", "success": False, "fallback_used": True},
+            )
+            return {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
+        ready, reason = self._prepare_local_llm()
+        if not ready:
+            self._log_ollama_event(
+                "ollama_qa_review_skipped_unavailable",
+                {"purpose": "qa_review", "success": False, "fallback_used": True, "reason": reason},
+            )
+            return {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
+
+        intro = self._extract_intro_text(html)
+        alt_values = [str(getattr(img, "alt", "") or "") for img in (images or []) if str(getattr(img, "alt", "") or "").strip()]
+        started = time.perf_counter()
+        try:
+            result = self.ollama_client.review_article_quality(
+                title=title,
+                html=html,
+                intro_text=intro,
+                alt_texts=alt_values,
+            )
+            self._local_llm_calls_in_post += 1
+            self._local_llm_used_last_run = True
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            self._log_ollama_event(
+                "ollama_qa_review_ok",
+                {
+                    "purpose": "qa_review",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": True,
+                    "fallback_used": False,
+                    "issue_count": len(list((result or {}).get("issues", []) or [])),
+                },
+            )
+            return result if isinstance(result, dict) else {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            self._log_ollama_event(
+                "ollama_qa_review_failed",
+                {
+                    "purpose": "qa_review",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": False,
+                    "fallback_used": True,
+                    "reason": reason,
+                    "error": str(exc),
+                },
+            )
+            return {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
 
     def _can_auto_index_notify(self) -> bool:
         try:
@@ -1031,6 +1128,23 @@ class AgentWorkflow:
         final_html += self._build_image_rights_block(images, draft.source_url)
         final_html = self._sanitize_publish_html(final_html, domain=current_domain)
         final_html = self._double_unescape(final_html)
+        local_qa_review = self._run_local_llm_qa_review(
+            title=draft.title,
+            html=final_html,
+            images=images,
+        )
+        for phrase in (local_qa_review.get("remove_phrases", []) if isinstance(local_qa_review, dict) else []):
+            tok = re.escape(re.sub(r"\s+", " ", str(phrase or "")).strip())
+            if not tok:
+                continue
+            final_html = re.sub(tok, "", final_html, flags=re.IGNORECASE)
+        if isinstance(local_qa_review, dict):
+            issue_count = len(list(local_qa_review.get("issues", []) or []))
+            if issue_count > 0:
+                generation_degraded_note = self._append_note(
+                    generation_degraded_note,
+                    f"local_llm_qa_issues={issue_count}",
+                )
         draft.title = self._double_unescape(str(draft.title or "")).strip()
         go_live_errors, go_live_warnings = self._go_live_gate_checklist(
             title=draft.title,
@@ -1268,6 +1382,7 @@ class AgentWorkflow:
                 summary=draft.summary,
                 global_keywords=global_keywords,
                 candidate=selected,
+                publish_at=publish_at,
             )
         except Exception:
             pass
@@ -1925,6 +2040,16 @@ class AgentWorkflow:
         final_html = draft.html + self._build_image_rights_block(images, draft.source_url)
         final_html = self._sanitize_publish_html(final_html, domain=resume_domain)
         final_html = self._double_unescape(final_html)
+        local_qa_review = self._run_local_llm_qa_review(
+            title=title,
+            html=final_html,
+            images=images,
+        )
+        for phrase in (local_qa_review.get("remove_phrases", []) if isinstance(local_qa_review, dict) else []):
+            tok = re.escape(re.sub(r"\s+", " ", str(phrase or "")).strip())
+            if not tok:
+                continue
+            final_html = re.sub(tok, "", final_html, flags=re.IGNORECASE)
         go_live_errors, go_live_warnings = self._go_live_gate_checklist(
             title=title,
             final_html=final_html,
@@ -2241,7 +2366,7 @@ class AgentWorkflow:
             else:
                 subject = "visual summary"
         thumb.alt = (
-            f"Illustration showing how {subject} can be applied to improve a practical office workflow."
+            f"Practical troubleshooting process diagram for {subject}."
         )[:180]
 
     def _enforce_seo_title(
@@ -2408,6 +2533,12 @@ class AgentWorkflow:
         # Remove placeholder-heavy paragraphs leaked from image metadata/templates.
         out = re.sub(
             r"<p[^>]*>[^<]*(section context visual|concept visual|supporting chart|visual\s*\d+|screenshot\s*\d+)[^<]*</p>",
+            "",
+            out,
+            flags=re.IGNORECASE,
+        )
+        out = re.sub(
+            r"<p[^>]*>\s*illustration\s+showing[^<]*</p>",
             "",
             out,
             flags=re.IGNORECASE,
@@ -2829,32 +2960,49 @@ class AgentWorkflow:
         mm = max(0, min(59, int(m.group(2))))
         return h, mm
 
+    def _publish_tz(self):
+        tz_name = str(getattr(self.settings, "timezone", "") or "").strip() or "America/New_York"
+        try:
+            return ZoneInfo(tz_name)
+        except Exception:
+            try:
+                return ZoneInfo("America/New_York")
+            except Exception:
+                return timezone.utc
+
     def _fit_publish_time_window(self, dt: datetime) -> datetime:
+        tz = self._publish_tz()
+        local_dt = (dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)).astimezone(tz)
         sh, sm = self._parse_hhmm(getattr(self.settings.publish, "time_window_start", "09:00"), 9, 0)
         eh, em = self._parse_hhmm(getattr(self.settings.publish, "time_window_end", "23:00"), 23, 0)
         start_min = sh * 60 + sm
         end_min = eh * 60 + em
-        cur_min = dt.hour * 60 + dt.minute
+        cur_min = local_dt.hour * 60 + local_dt.minute
         if start_min <= end_min:
             if cur_min < start_min:
-                return dt.replace(hour=sh, minute=sm, second=random.randint(0, 59), microsecond=0)
+                local_dt = local_dt.replace(hour=sh, minute=sm, second=random.randint(0, 59), microsecond=0)
+                return local_dt.astimezone(timezone.utc)
             if cur_min > end_min:
-                nxt = dt + timedelta(days=1)
-                return nxt.replace(hour=sh, minute=sm, second=random.randint(0, 59), microsecond=0)
-            return dt
+                nxt = local_dt + timedelta(days=1)
+                local_dt = nxt.replace(hour=sh, minute=sm, second=random.randint(0, 59), microsecond=0)
+                return local_dt.astimezone(timezone.utc)
+            return local_dt.astimezone(timezone.utc)
         # wrapped window (e.g., 22:00-03:00)
         if cur_min >= start_min or cur_min <= end_min:
-            return dt
-        return dt.replace(hour=sh, minute=sm, second=random.randint(0, 59), microsecond=0)
+            return local_dt.astimezone(timezone.utc)
+        local_dt = local_dt.replace(hour=sh, minute=sm, second=random.randint(0, 59), microsecond=0)
+        return local_dt.astimezone(timezone.utc)
 
     def _is_quiet_hours(self, dt: datetime) -> bool:
         if not bool(getattr(self.settings.publish, "quiet_hours_enabled", True)):
             return False
+        tz = self._publish_tz()
+        local_dt = (dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)).astimezone(tz)
         sh, sm = self._parse_hhmm(getattr(self.settings.publish, "quiet_hours_start", "02:00"), 2, 0)
         eh, em = self._parse_hhmm(getattr(self.settings.publish, "quiet_hours_end", "07:00"), 7, 0)
         start_min = sh * 60 + sm
         end_min = eh * 60 + em
-        cur_min = dt.hour * 60 + dt.minute
+        cur_min = local_dt.hour * 60 + local_dt.minute
         if start_min <= end_min:
             return start_min <= cur_min <= end_min
         return cur_min >= start_min or cur_min <= end_min
@@ -2951,6 +3099,9 @@ class AgentWorkflow:
             "resume_stage": str(resume.get("stage", "")),
             "resume_title": str(resume.get("title", "")),
             "resume_updated": str(resume.get("updated", "")),
+            "local_llm_used_last_run": bool(self._local_llm_used_last_run),
+            "local_llm_ready": bool(self._local_llm_ready),
+            "local_llm_reason": str(self._local_llm_last_reason or ""),
             "today_schedule_items": self.get_today_schedule_items(limit=24, allow_remote=allow_remote),
             "image_pipeline_status": str((self._image_pipeline_state or {}).get("status", "idle")),
             "image_pipeline_passed": int((self._image_pipeline_state or {}).get("passed", 0) or 0),
@@ -3798,14 +3949,20 @@ class AgentWorkflow:
         summary: str,
         global_keywords: list[str],
         candidate,
+        publish_at: datetime | None = None,
     ) -> None:
         device_type = self._infer_device_type(f"{title}\n{getattr(candidate, 'title', '')}")
         cluster_id = self._infer_cluster_id_from_keyword(" ".join(global_keywords[:2]) or title)
+        published_at_iso = (
+            publish_at.astimezone(timezone.utc).isoformat()
+            if isinstance(publish_at, datetime)
+            else datetime.now(timezone.utc).isoformat()
+        )
         self.posts_index.upsert_post(
             post_id=post_id or url,
             url=url,
             title=title,
-            published_at=datetime.now(timezone.utc).isoformat(),
+            published_at=published_at_iso,
             summary=str(summary or "")[:900],
             focus_keywords=[str(x).strip() for x in (global_keywords or []) if str(x).strip()],
             cluster_id=cluster_id,

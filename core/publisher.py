@@ -83,9 +83,10 @@ class Publisher:
         clean_title = self._normalize_text_entities(title)
         clean_html = self._normalize_html_entities(html_body)
         clean_html = self._clean_html_tags(clean_html)
+        lede_seed = self._first_text_paragraph(clean_html)
         post_html = self._merge_images(clean_html, images, creds)
         if self.semantic_html_enabled:
-            post_html = self._semanticize_article_html(post_html)
+            post_html = self._semanticize_article_html(post_html, lede_hint=lede_seed)
         post_html += self._author_schema()
         seo_description = self._normalize_meta_description(meta_description)
         self._assert_english_only_payload(
@@ -175,6 +176,7 @@ class Publisher:
             if src2:
                 alt2 = self._regen_alt_if_too_similar(second.alt, intro_text)
                 out = self._insert_inline_between_fix2_fix3(out, self._image_block(src2, alt2))
+        self._assert_html_image_integrity(out, min_images=2, require_no_figcaption=True, strict_intro_alt=True)
         return out
 
     def publish_existing_draft(
@@ -200,7 +202,10 @@ class Publisher:
             clean_html = self._normalize_html_entities(html_body)
             clean_html = self._clean_html_tags(clean_html)
             if self.semantic_html_enabled:
-                clean_html = self._semanticize_article_html(clean_html)
+                clean_html = self._semanticize_article_html(
+                    clean_html,
+                    lede_hint=self._first_text_paragraph(clean_html),
+                )
             payload["content"] = clean_html
         if labels is not None:
             payload["labels"] = labels
@@ -441,6 +446,8 @@ class Publisher:
                 thumb_src = self._file_to_data_uri(thumbnail.path)
             except Exception:
                 thumb_src = ""
+            if not thumb_src:
+                thumb_src = self._fallback_asset_data_uri(role="thumbnail")
             if thumb_src:
                 self._log_upload_event(
                     {
@@ -514,6 +521,7 @@ class Publisher:
         img_count = len(re.findall(r"<img\b[^>]*\bsrc=", html, flags=re.IGNORECASE))
         if img_count < 1:
             raise RuntimeError(f"publish failed - missing images before submit ({img_count}/1)")
+        self._assert_html_image_integrity(html, min_images=1, require_no_figcaption=True, strict_intro_alt=True)
         return html
 
     def _recover_thumbnail_blogger_src(
@@ -879,6 +887,12 @@ class Publisher:
                 }
             )
             raise RuntimeError("publish failed - missing images")
+        self._assert_html_image_integrity(
+            content,
+            min_images=1,
+            require_no_figcaption=True,
+            strict_intro_alt=True,
+        )
 
     def _log_upload_event(self, payload: dict) -> None:
         row = {
@@ -917,18 +931,18 @@ class Publisher:
 
     def _alt_template_pool(self) -> list[str]:
         return [
-            "Minimal visual explaining the main troubleshooting steps.",
-            "Practical office workflow illustration related to the section topic.",
-            "Clean diagram showing a simplified productivity process.",
-            "Concept image highlighting a repeatable workflow pattern.",
+            "Minimal diagram explaining the main troubleshooting steps.",
+            "Practical workflow diagram for the section topic.",
+            "Clean process diagram showing a simplified fix sequence.",
+            "Concept diagram highlighting a repeatable troubleshooting pattern.",
             "Visual summary of a time-saving office routine.",
-            "Diagram-style image for a real-world implementation scenario.",
-            "Illustrative scene focused on practical workflow execution.",
-            "Simple visual of a structured problem-solving sequence.",
-            "Infographic-like concept for operational decision clarity.",
-            "Section visual emphasizing implementation order and priorities.",
-            "Process illustration for a lightweight office automation flow.",
-            "Context visual presenting a beginner-friendly execution path.",
+            "Diagram for a real-world implementation scenario.",
+            "Simple process diagram focused on practical execution.",
+            "Structured problem-solving flow diagram.",
+            "Infographic-style process for operational decision clarity.",
+            "Implementation-order diagram for beginner-friendly fixes.",
+            "Lightweight office automation flow diagram.",
+            "Troubleshooting process visual for non-technical readers.",
         ]
 
     def _regen_alt_if_too_similar(self, alt: str, intro_text: str) -> str:
@@ -1002,15 +1016,17 @@ class Publisher:
         except Exception:
             return ""
 
+    def _fallback_asset_data_uri(self, role: str = "thumbnail") -> str:
+        rel = "assets/fallback/banner.png" if str(role or "").lower() == "thumbnail" else "assets/fallback/inline.png"
+        root = Path(__file__).resolve().parent.parent
+        asset = (root / rel).resolve()
+        return self._file_to_data_uri(asset)
+
     def _image_block(self, src: str, alt: str) -> str:
         safe_alt = html_lib.unescape(alt or "article image").replace('"', "&quot;")
-        caption = ""
-        if safe_alt and len(safe_alt) >= 24:
-            caption = f"<figcaption>{safe_alt}</figcaption>"
         return (
             '<figure class="rz-figure">'
             f'<img src="{src}" alt="{safe_alt}" loading="lazy" referrerpolicy="no-referrer" />'
-            f"{caption}"
             "</figure>"
         )
 
@@ -1206,7 +1222,7 @@ class Publisher:
             )
         )
 
-    def _semanticize_article_html(self, html_body: str) -> str:
+    def _semanticize_article_html(self, html_body: str, lede_hint: str = "") -> str:
         out = str(html_body or "").strip()
         if not out:
             return out
@@ -1234,7 +1250,9 @@ class Publisher:
 
         article_parts: list[str] = ['<article class="rz-post">']
         if preface:
-            lede = self._paragraph_plain_text(preface)[:320]
+            lede = re.sub(r"\s+", " ", str(lede_hint or "")).strip()[:320]
+            if not lede:
+                lede = self._first_text_paragraph(preface)[:320]
             if lede:
                 article_parts.append('<header class="rz-post-header">')
                 article_parts.append(f'<p class="rz-lede">{html_lib.escape(lede)}</p>')
@@ -1276,6 +1294,47 @@ class Publisher:
 
         article_parts.append("</article>")
         return "\n".join(article_parts)
+
+    def _first_text_paragraph(self, html: str) -> str:
+        src = str(html or "")
+        src = re.sub(r"<(figure|img|script|style)\b[^>]*>.*?</\1>", " ", src, flags=re.IGNORECASE | re.DOTALL)
+        src = re.sub(r"<img\b[^>]*>", " ", src, flags=re.IGNORECASE)
+        m = re.search(r"<p[^>]*>(.*?)</p>", src, flags=re.IGNORECASE | re.DOTALL)
+        if not m:
+            return ""
+        txt = re.sub(r"<[^>]+>", " ", str(m.group(1) or ""))
+        txt = html_lib.unescape(txt)
+        return re.sub(r"\s+", " ", txt).strip()
+
+    def _assert_html_image_integrity(
+        self,
+        html: str,
+        min_images: int = 1,
+        require_no_figcaption: bool = True,
+        strict_intro_alt: bool = True,
+    ) -> None:
+        content = str(html or "")
+        src_values = re.findall(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", content, flags=re.IGNORECASE)
+        valid_src = [
+            s for s in src_values
+            if str(s).strip()
+            and (
+                str(s).strip().lower().startswith("https://")
+                or str(s).strip().lower().startswith("http://")
+                or str(s).strip().lower().startswith("data:image/")
+            )
+        ]
+        if len(valid_src) < max(1, int(min_images)):
+            raise RuntimeError(f"publish failed - missing images ({len(valid_src)}/{int(min_images)})")
+        if require_no_figcaption and re.search(r"<figcaption\b", content, flags=re.IGNORECASE):
+            raise RuntimeError("publish failed - figcaption_not_allowed")
+        if strict_intro_alt:
+            intro = self._first_text_paragraph(content)
+            alt_values = re.findall(r"<img\b[^>]*\balt=\"([^\"]*)\"", content, flags=re.IGNORECASE)
+            for idx, alt in enumerate(alt_values, start=1):
+                sim = self._jaccard_similarity(intro, str(alt or ""))
+                if sim >= 0.75:
+                    raise RuntimeError(f"publish failed - intro_alt_similarity_high(idx={idx},sim={sim:.3f})")
 
     def _paragraph_plain_text(self, html: str) -> str:
         text = re.sub(r"<[^>]+>", " ", str(html or ""))

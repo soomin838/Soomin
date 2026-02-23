@@ -174,3 +174,64 @@ class OllamaClient:
             alt_suggestions=alt_suggestions,
             style_tags=style_tags,
         )
+
+    def review_article_quality(
+        self,
+        *,
+        title: str,
+        html: str,
+        intro_text: str,
+        alt_texts: list[str],
+    ) -> dict[str, Any]:
+        compact_html = re.sub(r"\s+", " ", str(html or "")).strip()[:6000]
+        compact_intro = re.sub(r"\s+", " ", str(intro_text or "")).strip()[:500]
+        compact_alts = [re.sub(r"\s+", " ", str(a or "")).strip()[:220] for a in (alt_texts or []) if str(a or "").strip()]
+        system_prompt = (
+            "You are a strict blog QA reviewer.\n"
+            "Return JSON only.\n"
+            "Language: English only.\n"
+            "Detect: internal debug leaks, AI-like repetitive markers, and intro-alt semantic duplication risk.\n"
+            "Never include explanations outside JSON.\n"
+            "JSON schema:\n"
+            "{\"issues\": [str], \"remove_phrases\": [str], \"rewrite_needed\": bool, \"summary\": str}"
+        )
+        user_payload = {
+            "title": str(title or ""),
+            "html_excerpt": compact_html,
+            "intro_text": compact_intro,
+            "alt_texts": compact_alts[:5],
+            "rules": {
+                "ban_tokens": [
+                    "workflow checkpoint stage",
+                    "av reference context",
+                    "jobtitle",
+                    "sameas",
+                    "selected topic",
+                    "source trending_entities",
+                ],
+                "max_remove_phrases": 8,
+            },
+        }
+        data = self.generate_json(system_prompt=system_prompt, user_payload=user_payload)
+        issues: list[str] = []
+        remove_phrases: list[str] = []
+        for v in (data.get("issues", []) if isinstance(data, dict) else []):
+            t = re.sub(r"\s+", " ", str(v or "")).strip()
+            if t and t not in issues:
+                issues.append(t[:160])
+            if len(issues) >= 12:
+                break
+        for v in (data.get("remove_phrases", []) if isinstance(data, dict) else []):
+            t = re.sub(r"\s+", " ", str(v or "")).strip()
+            if t and t not in remove_phrases:
+                remove_phrases.append(t[:120])
+            if len(remove_phrases) >= 8:
+                break
+        rewrite_needed = bool((data or {}).get("rewrite_needed", False)) if isinstance(data, dict) else False
+        summary = re.sub(r"\s+", " ", str((data or {}).get("summary", "") if isinstance(data, dict) else "")).strip()[:220]
+        return {
+            "issues": issues,
+            "remove_phrases": remove_phrases,
+            "rewrite_needed": rewrite_needed,
+            "summary": summary,
+        }

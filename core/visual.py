@@ -18,8 +18,6 @@ from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 import requests
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
 
 from .brain import DraftPost
 from .settings import VisualSettings
@@ -380,66 +378,14 @@ class VisualPipeline:
         return False
 
     def _capture_screenshots(self, urls: list[str], keyword: str) -> list[ImageAsset]:
-        assets: list[ImageAsset] = []
-        prepared_urls = self._prepare_english_urls(urls)
-        if not prepared_urls:
-            return assets
-
-        with sync_playwright() as p:
-            browser, context, launch_note = self._launch_browser_context(p)
-            if context is None or browser is None:
-                raise RuntimeError(
-                    "스크린샷 브라우저를 찾지 못했습니다. "
-                    "Chrome/Edge 경로 점검 또는 CHROME_PATH 설정이 필요합니다. "
-                    f"(시도 기록: {launch_note})"
-                )
-            try:
-                context.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
-            except Exception:
-                pass
-            page = context.new_page()
-            try:
-                page.set_viewport_size({"width": 1280, "height": 720})
-            except Exception:
-                pass
-            try:
-                for i, url in enumerate(prepared_urls, start=1):
-                    raw_path = self.temp_dir / f"capture_raw_{i:02d}.png"
-                    filename = self.temp_dir / f"capture_{i:02d}.png"
-                    try:
-                        page.goto(url, wait_until="domcontentloaded", timeout=25000)
-                        try:
-                            lang = (page.evaluate("document.documentElement.lang || ''") or "").lower()
-                            if lang.startswith("ko"):
-                                alt = self._force_english_url(url)
-                                if alt and alt != url:
-                                    page.goto(alt, wait_until="domcontentloaded", timeout=25000)
-                        except Exception:
-                            pass
-                        if not self._is_english_page(page):
-                            continue
-
-                        page.screenshot(path=str(raw_path), full_page=True)
-                        bbox = self._detect_focus_bbox(page)
-                        highlights = self._detect_highlight_boxes(page)
-                        self._build_editorial_screenshot(raw_path, filename, bbox, highlights)
-                        if raw_path.exists():
-                            raw_path.unlink(missing_ok=True)
-                        assets.append(
-                            ImageAsset(
-                                path=filename,
-                                alt=self._build_alt_text(keyword, "screenshot"),
-                                source_kind="screenshot",
-                                source_url=url,
-                                license_note="Editorial screenshot captured from source page for commentary.",
-                            )
-                        )
-                    except PlaywrightTimeoutError:
-                        continue
-            finally:
-                context.close()
-                browser.close()
-        return assets
+        self._log_visual_event(
+            {
+                "event": "screenshot_path_blocked",
+                "reason": "policy_disabled",
+                "url_count": len(urls or []),
+            }
+        )
+        return []
 
     def _prepare_english_urls(self, urls: list[str]) -> list[str]:
         out: list[str] = []
@@ -913,7 +859,7 @@ class VisualPipeline:
                     "index": index,
                 }
             )
-            return None
+            return self._fallback_asset_for_role(role=role, index=index)
 
         base_url = str(getattr(self.visual_settings, "pollinations_base_url", "") or "").strip().rstrip("/")
         if not base_url:
@@ -924,7 +870,7 @@ class VisualPipeline:
                     "index": index,
                 }
             )
-            return None
+            return self._fallback_asset_for_role(role=role, index=index)
 
         model = self._resolve_pollinations_model(role=role)
         role_key = str(role or "").strip().lower()
@@ -1620,18 +1566,18 @@ class VisualPipeline:
     def _build_alt_text(self, subject: str, context: str) -> str:
         s = re.sub(r"\s+", " ", str(subject or "").strip()) or "the workflow"
         templates = [
-            "Minimal visual explaining the main troubleshooting steps.",
-            "Practical office workflow illustration related to this section.",
-            "Clean diagram showing a simplified productivity process.",
-            "Concept image highlighting a repeatable workflow pattern.",
+            "Minimal diagram explaining the main troubleshooting steps.",
+            "Practical workflow diagram aligned with this section.",
+            "Clean process diagram showing a simplified fix sequence.",
+            "Concept diagram highlighting a repeatable troubleshooting pattern.",
             "Visual summary of a time-saving office routine.",
-            "Diagram-style image for a real-world implementation scenario.",
-            "Illustrative scene focused on practical workflow execution.",
-            "Simple visual of a structured problem-solving sequence.",
-            "Infographic-like concept for operational decision clarity.",
-            "Section visual emphasizing implementation order and priorities.",
-            "Process illustration for a lightweight office automation flow.",
-            f"Visual summary related to {s}.",
+            "Diagram for a real-world implementation scenario.",
+            "Simple process diagram focused on practical workflow execution.",
+            "Structured problem-solving flow diagram.",
+            "Infographic-style process for operational decision clarity.",
+            "Implementation-order diagram for beginner-friendly fixes.",
+            "Lightweight office automation flow diagram.",
+            f"Troubleshooting process visual related to {s}.",
         ]
         pick = random.choice(templates)
         return re.sub(r"\s+", " ", pick).strip()[:180]

@@ -20,8 +20,8 @@ class ScheduleSettings:
 class SourceSettings:
     mode: str = "mixed"
     seeds_path: str = "storage/seeds/seeds.json"
-    stackexchange_site: str = "stackoverflow"
-    stackexchange_tagged: str = "artificial-intelligence;productivity;automation;chatgpt"
+    stackexchange_site: str = "superuser"
+    stackexchange_tagged: str = "windows-11;macos;iphone;android;audio;drivers;networking"
     stackexchange_min_score: int = 3
     hn_min_score: int = 30
     github_repos: list[str] = field(default_factory=list)
@@ -58,7 +58,7 @@ class VisualSettings:
     max_inline_images: int = 1
     image_provider: str = "pollinations"
     screenshot_priority_keywords: list[str] = field(default_factory=list)
-    enable_gemini_image_generation: bool = True
+    enable_gemini_image_generation: bool = False
     gemini_image_model: str = "models/imagen-3.0-generate-001"
     gemini_prompt_model: str = "gemini-2.0-flash"
     allow_chart_fallback: bool = False
@@ -89,10 +89,10 @@ class PublishSettings:
     min_delay_minutes: int = 10
     max_delay_minutes: int = 45
     queue_horizon_hours: int = 120
-    target_queue_size: int = 10
+    target_queue_size: int = 25
     random_min_gap_floor_minutes: int = 180
     random_min_gap_ceiling_minutes: int = 360
-    daily_publish_cap: int = 2
+    daily_publish_cap: int = 5
     image_hosting_backend: str = "blogger_media"
     gcs_bucket_name: str = ""
     gcs_public_base_url: str = ""
@@ -123,7 +123,7 @@ class QualitySettings:
     humanity_hard_fail_block: bool = True
     min_word_count: int = 1400
     max_word_count: int = 1900
-    min_h2: int = 3
+    min_h2: int = 6
     min_h3: int = 2
     min_list_items: int = 6
     min_external_links: int = 2
@@ -322,7 +322,7 @@ class KeywordsPolicySettings:
 
 @dataclass
 class AppSettings:
-    timezone: str = "Asia/Seoul"
+    timezone: str = "America/New_York"
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
     sources: SourceSettings = field(default_factory=SourceSettings)
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
@@ -460,7 +460,7 @@ def load_settings(path: Path) -> AppSettings:
         raw["keyword_pool"]["pick_per_run"] = max(1, int(raw.get("publishing", {}).get("posts_to_publish_per_day", 2)))
 
     return AppSettings(
-        timezone=raw.get("timezone", "UTC"),
+        timezone=raw.get("timezone", "America/New_York"),
         schedule=_construct_dc(ScheduleSettings, raw.get("schedule", {})),
         sources=_construct_dc(SourceSettings, raw.get("sources", {})),
         gemini=_construct_dc(GeminiSettings, raw.get("gemini", {})),

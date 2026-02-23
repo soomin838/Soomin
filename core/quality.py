@@ -834,6 +834,10 @@ class ContentQAGate:
         raw_html = str(html or "").lower()
         if "www.google.com" in raw_html or "google.com/search" in raw_html:
             return True, "forbidden_reference_link:google.com"
+        if "<figcaption" in raw_html:
+            return True, "forbidden_markup:figcaption"
+        if re.search(r"\billustration\s+showing\b", raw_html):
+            return True, "forbidden_image_caption_phrase:illustration_showing"
         for fmt in (self.settings.ban_formats or []):
             f = str(fmt or "").strip()
             if not f:

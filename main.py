@@ -825,10 +825,10 @@ class AgentController:
                 _nested_set(raw, "sources.seeds_path", "storage/seeds/seeds.json")
                 changed = True
 
-            # Align legacy timezone default with current KST policy.
+            # Align legacy timezone default with US-target publish policy.
             legacy_tz = (_nested_get(raw, "timezone") or "").strip()
-            if legacy_tz in {"", "UTC", "America/Los_Angeles"}:
-                _nested_set(raw, "timezone", "Asia/Seoul")
+            if legacy_tz in {"", "UTC", "Asia/Seoul", "America/Los_Angeles"}:
+                _nested_set(raw, "timezone", "America/New_York")
                 changed = True
 
             cur_backend = (_nested_get(raw, "publish.image_hosting_backend") or "").strip().lower()
@@ -865,7 +865,7 @@ class AgentController:
             except Exception:
                 cur_target_images = 0
             if cur_target_images <= 0:
-                _nested_set(raw, "visual.target_images_per_post", 5)
+                _nested_set(raw, "visual.target_images_per_post", 2)
                 changed = True
 
             try:
@@ -877,26 +877,27 @@ class AgentController:
                 changed = True
 
             provider = (_nested_get(raw, "visual.image_provider") or "").strip().lower()
-            if provider not in {"pollinations", "gemini"}:
+            if provider != "pollinations":
                 _nested_set(raw, "visual.image_provider", "pollinations")
                 changed = True
-                provider = "pollinations"
-            if provider == "pollinations":
-                pollinations_raw = (
-                    raw.get("visual", {}) if isinstance(raw.get("visual", {}), dict) else {}
-                )
-                if "pollinations_enabled" not in pollinations_raw:
-                    _nested_set(raw, "visual.pollinations_enabled", True)
-                    changed = True
-                if str(pollinations_raw.get("pollinations_thumbnail_model", "")).strip() != "gptimage":
-                    _nested_set(raw, "visual.pollinations_thumbnail_model", "gptimage")
-                    changed = True
-                if str(pollinations_raw.get("pollinations_content_model", "")).strip() != "gptimage":
-                    _nested_set(raw, "visual.pollinations_content_model", "gptimage")
-                    changed = True
-                if "thumbnail_ocr_verify" not in pollinations_raw:
-                    _nested_set(raw, "visual.thumbnail_ocr_verify", False)
-                    changed = True
+            pollinations_raw = (
+                raw.get("visual", {}) if isinstance(raw.get("visual", {}), dict) else {}
+            )
+            if "pollinations_enabled" not in pollinations_raw:
+                _nested_set(raw, "visual.pollinations_enabled", True)
+                changed = True
+            if str(pollinations_raw.get("pollinations_thumbnail_model", "")).strip() != "gptimage":
+                _nested_set(raw, "visual.pollinations_thumbnail_model", "gptimage")
+                changed = True
+            if str(pollinations_raw.get("pollinations_content_model", "")).strip() != "gptimage":
+                _nested_set(raw, "visual.pollinations_content_model", "gptimage")
+                changed = True
+            if "thumbnail_ocr_verify" not in pollinations_raw:
+                _nested_set(raw, "visual.thumbnail_ocr_verify", False)
+                changed = True
+            if str(_nested_get(raw, "visual.enable_gemini_image_generation") or "").strip().lower() not in {"false", "0", "no", "off"}:
+                _nested_set(raw, "visual.enable_gemini_image_generation", False)
+                changed = True
 
             try:
                 cur_interval = float(_nested_get(raw, "schedule.interval_hours") or "0")
@@ -920,28 +921,33 @@ class AgentController:
                 _nested_set(raw, "schedule.max_interval_hours", 4.5)
                 changed = True
 
-            # Queue defaults are now rolling-window values and only migrated when missing/invalid.
+            # Queue defaults are rolling 5-day buffer values and only migrated when missing/invalid.
             try:
                 cur_horizon = int(_nested_get(raw, "publish.queue_horizon_hours") or "0")
             except Exception:
                 cur_horizon = 0
-            if cur_horizon == 2160:
-                _nested_set(raw, "publish.queue_horizon_hours", 72)
+            if cur_horizon in {72, 2160}:
+                _nested_set(raw, "publish.queue_horizon_hours", 120)
                 changed = True
-                cur_horizon = 72
+                cur_horizon = 120
             if cur_horizon <= 0:
-                _nested_set(raw, "publish.queue_horizon_hours", 72)
+                _nested_set(raw, "publish.queue_horizon_hours", 120)
                 changed = True
             try:
                 cur_queue_target = int(_nested_get(raw, "publish.target_queue_size") or "0")
             except Exception:
                 cur_queue_target = 0
-            if cur_queue_target == 180:
-                _nested_set(raw, "publish.target_queue_size", 18)
+            try:
+                dcap = int(_nested_get(raw, "publish.daily_publish_cap") or "5")
+            except Exception:
+                dcap = 5
+            expected_target = max(5, dcap * 5)
+            if cur_queue_target in {18, 180}:
+                _nested_set(raw, "publish.target_queue_size", expected_target)
                 changed = True
-                cur_queue_target = 18
+                cur_queue_target = expected_target
             if cur_queue_target <= 0:
-                _nested_set(raw, "publish.target_queue_size", 18)
+                _nested_set(raw, "publish.target_queue_size", expected_target)
                 changed = True
 
             legacy_qa_retry = (_nested_get(raw, "quality.qa_retry_max_passes") or "").strip()

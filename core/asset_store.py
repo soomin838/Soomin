@@ -268,18 +268,31 @@ class PostsIndexStore:
             row = conn.execute("SELECT COUNT(*) FROM posts").fetchone()
         return int(row[0]) if row else 0
 
-    def query_recent(self, limit: int = 120) -> list[dict]:
+    def query_recent(self, limit: int = 120, include_future: bool = False) -> list[dict]:
         cap = max(1, int(limit))
+        now_iso = _utc_now_iso()
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT post_id, url, title, published_at, summary, focus_keywords, cluster_id, device_type, word_count
-                FROM posts
-                ORDER BY published_at DESC
-                LIMIT ?
-                """,
-                (cap,),
-            ).fetchall()
+            if include_future:
+                rows = conn.execute(
+                    """
+                    SELECT post_id, url, title, published_at, summary, focus_keywords, cluster_id, device_type, word_count
+                    FROM posts
+                    ORDER BY published_at DESC
+                    LIMIT ?
+                    """,
+                    (cap,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT post_id, url, title, published_at, summary, focus_keywords, cluster_id, device_type, word_count
+                    FROM posts
+                    WHERE published_at <= ?
+                    ORDER BY published_at DESC
+                    LIMIT ?
+                    """,
+                    (now_iso, cap),
+                ).fetchall()
         out: list[dict] = []
         for r in rows:
             out.append(
@@ -296,4 +309,3 @@ class PostsIndexStore:
                 }
             )
         return out
-
