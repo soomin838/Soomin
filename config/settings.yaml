@@ -50,6 +50,7 @@ publish:
 quality:
   enabled: true
   strict_mode: true
+  qa_mode: "quick"
   min_quality_score: 91
   qa_retry_max_passes: 0
   humanity_enabled: true

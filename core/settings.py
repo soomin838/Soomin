@@ -123,6 +123,7 @@ class PublishSettings:
 class QualitySettings:
     enabled: bool = True
     strict_mode: bool = True
+    qa_mode: str = "quick"
     min_quality_score: int = 91
     qa_retry_max_passes: int = 0
     humanity_enabled: bool = True
@@ -433,6 +434,8 @@ def load_settings(path: Path) -> AppSettings:
     keyword_sources_raw = dict((keywords_raw.get("sources", {}) or {}))
 
     if isinstance(qa_raw, dict):
+        if "qa_mode" in qa_raw:
+            quality_raw["qa_mode"] = str(qa_raw.get("qa_mode", "quick") or "quick").strip().lower()
         if "prompt_leak_patterns" in qa_raw:
             quality_raw["prompt_leak_patterns"] = qa_raw.get("prompt_leak_patterns", [])
         disallowed = qa_raw.get("disallowed_terms", {}) or {}

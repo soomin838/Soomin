@@ -2,6 +2,8 @@
 
 import json
 import re
+import time
+import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -51,169 +53,249 @@ class ContentQAGate:
         self.settings = settings
         self.authority_links = authority_links
         self.qa_runtime_path = qa_runtime_path
+        if qa_runtime_path is not None:
+            self.qa_timing_path = qa_runtime_path.parent / "qa_timing.jsonl"
+        else:
+            self.qa_timing_path = Path("storage/logs/qa_timing.jsonl")
 
-    def evaluate(self, html: str, title: str = "", domain: str = "tech_troubleshoot") -> QAResult:
+    def evaluate(
+        self,
+        html: str,
+        title: str = "",
+        domain: str = "tech_troubleshoot",
+        keyword: str = "",
+    ) -> QAResult:
+        start_all = time.perf_counter()
+        run_id = uuid.uuid4().hex[:12]
+        breakdown_ms: dict[str, int] = {}
+
+        def _timed(name: str, fn):
+            t0 = time.perf_counter()
+            value = fn()
+            breakdown_ms[name] = int(round((time.perf_counter() - t0) * 1000))
+            return value
+
+        qa_mode = str(getattr(self.settings, "qa_mode", "quick") or "quick").strip().lower()
+        if qa_mode not in {"quick", "full"}:
+            qa_mode = "quick"
+
         checks: list[QACheck] = []
-        min_authority_links, min_external_links = self._link_requirements(domain)
-        text = self._to_text(html)
-        words = len(re.findall(r"[A-Za-z0-9']+", text))
-        h2_count = len(re.findall(r"<h2\b", html, flags=re.IGNORECASE))
-        h3_count = len(re.findall(r"<h3\b", html, flags=re.IGNORECASE))
-        li_count = len(re.findall(r"<li\b", html, flags=re.IGNORECASE))
-        links = re.findall(r'href="([^"]+)"', html, flags=re.IGNORECASE)
+        hard_failures: list[str] = []
+        text = _timed("text_parse", lambda: self._to_text(html))
+        min_authority_links, min_external_links = _timed(
+            "link_requirements",
+            lambda: self._link_requirements(domain),
+        )
+        parsed = _timed(
+            "word_h2_h3_li_link_parsing",
+            lambda: {
+                "words": len(re.findall(r"[A-Za-z0-9']+", text)),
+                "h2_count": len(re.findall(r"<h2\b", html, flags=re.IGNORECASE)),
+                "h3_count": len(re.findall(r"<h3\b", html, flags=re.IGNORECASE)),
+                "li_count": len(re.findall(r"<li\b", html, flags=re.IGNORECASE)),
+                "links": re.findall(r'href="([^"]+)"', html, flags=re.IGNORECASE),
+            },
+        )
+        words = int(parsed.get("words", 0))
+        h2_count = int(parsed.get("h2_count", 0))
+        h3_count = int(parsed.get("h3_count", 0))
+        li_count = int(parsed.get("li_count", 0))
+        links = list(parsed.get("links", []) or [])
         ext_links = [u for u in links if u.startswith("http://") or u.startswith("https://")]
         allowed_links = [u for u in ext_links if any(u.startswith(a) for a in self.authority_links)]
 
-        checks.append(
-            QACheck(
-                key="word_count",
-                passed=(words >= self.settings.min_word_count and words <= max(self.settings.max_word_count, self.settings.min_word_count)),
-                detail=f"word_count {words}/{self.settings.min_word_count}-{self.settings.max_word_count}",
+        def _add_check(key: str, passed: bool, detail: str, weight: int = 0, hard_reason: str = "") -> None:
+            checks.append(QACheck(key=key, passed=bool(passed), detail=str(detail or ""), weight=int(weight)))
+            if (not passed) and hard_reason:
+                hard_failures.append(hard_reason)
+                self._log_qa_reason(
+                    reason=hard_reason,
+                    detail=str(detail or ""),
+                    title=title,
+                    domain=domain,
+                )
+
+        if qa_mode == "full":
+            _add_check(
+                "word_count",
+                words >= self.settings.min_word_count and words <= max(self.settings.max_word_count, self.settings.min_word_count),
+                f"word_count {words}/{self.settings.min_word_count}-{self.settings.max_word_count}",
                 weight=20,
             )
-        )
-        checks.append(
-            QACheck(
-                key="heading_structure",
-                passed=(h2_count >= self.settings.min_h2 and h3_count >= self.settings.min_h3),
-                detail=f"H2={h2_count}, H3={h3_count}",
+            _add_check(
+                "heading_structure",
+                h2_count >= self.settings.min_h2 and h3_count >= self.settings.min_h3,
+                f"H2={h2_count}, H3={h3_count}",
                 weight=12,
             )
-        )
-        checks.append(
-            QACheck(
-                key="actionability",
-                passed=li_count >= self.settings.min_list_items,
-                detail=f"list_items {li_count}/{self.settings.min_list_items}",
+            _add_check(
+                "actionability",
+                li_count >= self.settings.min_list_items,
+                f"list_items {li_count}/{self.settings.min_list_items}",
                 weight=10,
             )
-        )
-        checks.append(
-            QACheck(
-                key="authority_links",
-                passed=len(allowed_links) >= min_authority_links,
-                detail=f"authority_links {len(allowed_links)}/{min_authority_links}",
+            _add_check(
+                "authority_links",
+                len(allowed_links) >= min_authority_links,
+                f"authority_links {len(allowed_links)}/{min_authority_links}",
                 weight=12,
             )
-        )
-        checks.append(
-            QACheck(
-                key="external_links",
-                passed=len(ext_links) >= min_external_links,
-                detail=f"external_links {len(ext_links)}/{min_external_links}",
+            _add_check(
+                "external_links",
+                len(ext_links) >= min_external_links,
+                f"external_links {len(ext_links)}/{min_external_links}",
                 weight=10,
             )
-        )
-        attribution_required = 0 if str(domain or "").strip().lower() == "tech_troubleshoot" else 1
-        checks.append(
-            QACheck(
-                key="source_attribution",
-                passed=len(ext_links) >= attribution_required,
-                detail=f"attribution_links {len(ext_links)}/{attribution_required}",
+            attribution_required = 0 if str(domain or "").strip().lower() == "tech_troubleshoot" else 1
+            _add_check(
+                "source_attribution",
+                len(ext_links) >= attribution_required,
+                f"attribution_links {len(ext_links)}/{attribution_required}",
                 weight=16,
             )
-        )
-        checks.append(
-            QACheck(
-                key="no_ai_markers",
-                passed=not self._has_banned_markers(text),
-                detail="banned_ai_markers check",
+            _add_check(
+                "no_ai_markers",
+                not _timed("banned_markers_detect", lambda: self._has_banned_markers(text)),
+                "banned_ai_markers check",
                 weight=10,
             )
-        )
-        checks.append(
-            QACheck(
-                key="burstiness",
-                passed=self._burstiness_ok(text),
-                detail="sentence_length_variation check",
+            _add_check(
+                "burstiness",
+                _timed("burstiness_detect", lambda: self._burstiness_ok(text)),
+                "sentence_length_variation check",
                 weight=10,
             )
+        else:
+            # quick mode keeps scoring simple and critical-only.
+            breakdown_ms.setdefault("banned_markers_detect", 0)
+            breakdown_ms.setdefault("burstiness_detect", 0)
+
+        prompt_leak, prompt_leak_detail = _timed(
+            "prompt_leak_detect",
+            lambda: self._detect_prompt_leak(html=html, title=title, domain=domain),
         )
-        prompt_leak, prompt_leak_detail = self._detect_prompt_leak(
-            html=html,
-            title=title,
-            domain=domain,
+        _add_check(
+            "prompt_leak",
+            not prompt_leak,
+            prompt_leak_detail or "no_prompt_leak",
+            weight=0,
+            hard_reason="prompt_leak_detected",
         )
-        checks.append(
-            QACheck(
-                key="prompt_leak",
-                passed=(not prompt_leak),
-                detail=prompt_leak_detail or "no_prompt_leak",
-                weight=0,
+
+        non_english, non_english_detail = _timed(
+            "english_only_detect",
+            lambda: self._detect_non_english_content(html=html, text=text),
+        )
+        _add_check(
+            "english_only",
+            not non_english,
+            non_english_detail or "english_only_ok",
+            weight=0,
+            hard_reason="non_english_content_detected",
+        )
+
+        phrase_fail, phrase_detail = _timed(
+            "forbidden_phrase_or_format_detect",
+            lambda: self._detect_forbidden_phrase_or_format(text=text, html=html),
+        )
+        _add_check(
+            "forbidden_phrases_formats",
+            not phrase_fail,
+            phrase_detail or "forbidden_content_ok",
+            weight=0,
+            hard_reason="forbidden_phrase_or_format_detected",
+        )
+
+        image_fail, image_detail = _timed(
+            "image_integrity_detect",
+            lambda: self._detect_image_integrity(html=html),
+        )
+        _add_check(
+            "image_integrity",
+            not image_fail,
+            image_detail or "image_integrity_ok",
+            weight=0,
+            hard_reason="image_integrity_failed",
+        )
+
+        title_intent_fail, title_intent_detail = _timed(
+            "title_intent_detect",
+            lambda: self._detect_title_intent(title=title, domain=domain),
+        )
+        _add_check(
+            "title_troubleshoot_intent",
+            not title_intent_fail,
+            title_intent_detail or "title_intent_ok",
+            weight=0,
+            hard_reason="title_intent_missing",
+        )
+
+        if qa_mode == "full":
+            domain_drift, domain_drift_detail = _timed(
+                "domain_drift_detect",
+                lambda: self._detect_domain_drift(text=text, domain=domain),
             )
-        )
-        domain_drift, domain_drift_detail = self._detect_domain_drift(text=text, domain=domain)
-        checks.append(
-            QACheck(
-                key="domain_drift",
-                passed=(not domain_drift),
-                detail=domain_drift_detail or "no_domain_drift",
+            _add_check(
+                "domain_drift",
+                not domain_drift,
+                domain_drift_detail or "no_domain_drift",
                 weight=0,
+                hard_reason="domain_drift_detected",
             )
-        )
-        title_intent_fail, title_intent_detail = self._detect_title_intent(title=title, domain=domain)
-        checks.append(
-            QACheck(
-                key="title_troubleshoot_intent",
-                passed=(not title_intent_fail),
-                detail=title_intent_detail or "title_intent_ok",
+
+            story_missing, story_detail = _timed(
+                "story_block_detect",
+                lambda: self._detect_missing_story_block(text=text, domain=domain),
+            )
+            _add_check(
+                "story_block",
+                not story_missing,
+                story_detail or "story_block_ok",
                 weight=0,
+                hard_reason="no_story_block_detected",
             )
-        )
-        story_missing, story_detail = self._detect_missing_story_block(text=text, domain=domain)
-        checks.append(
-            QACheck(
-                key="story_block",
-                passed=(not story_missing),
-                detail=story_detail or "story_block_ok",
+
+            screenshot_fail, screenshot_detail = _timed(
+                "screenshot_mention_detect",
+                lambda: self._detect_screenshot_mentions(text=text),
+            )
+            _add_check(
+                "no_screenshot_mentions",
+                not screenshot_fail,
+                screenshot_detail or "screenshot_mentions_ok",
                 weight=0,
+                hard_reason="screenshot_mention_detected",
             )
-        )
-        non_english, non_english_detail = self._detect_non_english_content(html=html, text=text)
-        checks.append(
-            QACheck(
-                key="english_only",
-                passed=(not non_english),
-                detail=non_english_detail or "english_only_ok",
+
+            qmark_fail, qmark_detail = _timed(
+                "question_mark_spam_detect",
+                lambda: self._detect_question_mark_spam(text=text),
+            )
+            _add_check(
+                "question_mark_limit",
+                not qmark_fail,
+                qmark_detail or "question_mark_limit_ok",
                 weight=0,
+                hard_reason="question_mark_spam_detected",
             )
-        )
-        phrase_fail, phrase_detail = self._detect_forbidden_phrase_or_format(text=text, html=html)
-        checks.append(
-            QACheck(
-                key="forbidden_phrases_formats",
-                passed=(not phrase_fail),
-                detail=phrase_detail or "forbidden_content_ok",
+
+            sensitive_fail, sensitive_detail = _timed(
+                "sensitive_topic_detect",
+                lambda: self._detect_sensitive_topics(text=text),
+            )
+            _add_check(
+                "sensitive_topics",
+                not sensitive_fail,
+                sensitive_detail or "sensitive_topics_ok",
                 weight=0,
+                hard_reason="sensitive_topic_detected",
             )
-        )
-        screenshot_fail, screenshot_detail = self._detect_screenshot_mentions(text=text)
-        checks.append(
-            QACheck(
-                key="no_screenshot_mentions",
-                passed=(not screenshot_fail),
-                detail=screenshot_detail or "screenshot_mentions_ok",
-                weight=0,
-            )
-        )
-        qmark_fail, qmark_detail = self._detect_question_mark_spam(text=text)
-        checks.append(
-            QACheck(
-                key="question_mark_limit",
-                passed=(not qmark_fail),
-                detail=qmark_detail or "question_mark_limit_ok",
-                weight=0,
-            )
-        )
-        sensitive_fail, sensitive_detail = self._detect_sensitive_topics(text=text)
-        checks.append(
-            QACheck(
-                key="sensitive_topics",
-                passed=(not sensitive_fail),
-                detail=sensitive_detail or "sensitive_topics_ok",
-                weight=0,
-            )
-        )
+        else:
+            breakdown_ms.setdefault("domain_drift_detect", 0)
+            breakdown_ms.setdefault("story_block_detect", 0)
+            breakdown_ms.setdefault("screenshot_mention_detect", 0)
+            breakdown_ms.setdefault("question_mark_spam_detect", 0)
+            breakdown_ms.setdefault("sensitive_topic_detect", 0)
 
         base_score = 0
         for c in checks:
@@ -222,103 +304,56 @@ class ContentQAGate:
 
         human_checks: list[QACheck] = []
         soft_score = 100
-        hard_failures: list[str] = []
-        if self.settings.humanity_enabled:
-            human_checks, soft_score, hard_failures = self._evaluate_humanity_50(text, html)
-
-        weight = max(0, min(100, int(self.settings.humanity_weight_percent or 0)))
-        if weight <= 0:
-            final_score = int(base_score)
-        else:
-            final_score = int(
-                round((base_score * (100 - weight) / 100.0) + (soft_score * weight / 100.0))
+        if qa_mode == "full" and self.settings.humanity_enabled and (not hard_failures):
+            human_checks, soft_score, human_hard = _timed(
+                "humanity_50_evaluate",
+                lambda: self._evaluate_humanity_50(text, html),
             )
+            hard_failures.extend(list(human_hard or []))
+        else:
+            breakdown_ms.setdefault("humanity_50_evaluate", 0)
 
-        if self.settings.humanity_enabled and soft_score < int(self.settings.humanity_min_soft_score):
+        if qa_mode == "quick":
+            any_failed = any(not c.passed for c in checks)
+            base_score = 0 if any_failed else 100
+            soft_score = 100
+            final_score = base_score
+        else:
+            weight = max(0, min(100, int(self.settings.humanity_weight_percent or 0)))
+            if weight <= 0:
+                final_score = int(base_score)
+            else:
+                final_score = int(
+                    round((base_score * (100 - weight) / 100.0) + (soft_score * weight / 100.0))
+                )
+
+        if qa_mode == "full" and self.settings.humanity_enabled and soft_score < int(self.settings.humanity_min_soft_score):
             hard_failures.append(
                 f"humanity_soft_floor({soft_score}/{int(self.settings.humanity_min_soft_score)})"
             )
-        if prompt_leak:
-            hard_failures.append("prompt_leak_detected")
-            self._log_qa_reason(
-                reason="prompt_leak_detected",
-                detail=prompt_leak_detail,
-                title=title,
-                domain=domain,
-            )
-        if domain_drift:
-            hard_failures.append("domain_drift_detected")
-            self._log_qa_reason(
-                reason="domain_drift_detected",
-                detail=domain_drift_detail,
-                title=title,
-                domain=domain,
-            )
-        if title_intent_fail:
-            hard_failures.append("title_intent_missing")
-            self._log_qa_reason(
-                reason="title_intent_missing",
-                detail=title_intent_detail,
-                title=title,
-                domain=domain,
-            )
-        if story_missing:
-            hard_failures.append("no_first_person_story_block")
-            self._log_qa_reason(
-                reason="no_story_block_detected",
-                detail=story_detail,
-                title=title,
-                domain=domain,
-            )
-        if non_english:
-            hard_failures.append("non_english_content_detected")
-            self._log_qa_reason(
-                reason="non_english_content_detected",
-                detail=non_english_detail,
-                title=title,
-                domain=domain,
-            )
-        if phrase_fail:
-            hard_failures.append("forbidden_phrase_or_format_detected")
-            self._log_qa_reason(
-                reason="forbidden_phrase_or_format_detected",
-                detail=phrase_detail,
-                title=title,
-                domain=domain,
-            )
-        if screenshot_fail:
-            hard_failures.append("screenshot_mention_detected")
-            self._log_qa_reason(
-                reason="screenshot_mention_detected",
-                detail=screenshot_detail,
-                title=title,
-                domain=domain,
-            )
-        if qmark_fail:
-            hard_failures.append("question_mark_spam_detected")
-            self._log_qa_reason(
-                reason="question_mark_spam_detected",
-                detail=qmark_detail,
-                title=title,
-                domain=domain,
-            )
-        if sensitive_fail:
-            hard_failures.append("sensitive_topic_detected")
-            self._log_qa_reason(
-                reason="sensitive_topic_detected",
-                detail=sensitive_detail,
-                title=title,
-                domain=domain,
-            )
-
-        return QAResult(
+        hard_failures = sorted(set(hard_failures))
+        result = QAResult(
             score=max(0, min(100, final_score)),
             base_score=max(0, min(100, int(base_score))),
             soft_score=max(0, min(100, int(soft_score))),
             checks=checks,
             human_checks=human_checks,
-            hard_failures=sorted(set(hard_failures)),
+            hard_failures=hard_failures,
         )
+        total_ms = int(round((time.perf_counter() - start_all) * 1000))
+        self._log_qa_timing(
+            run_id=run_id,
+            title=title,
+            keyword=keyword,
+            domain=domain,
+            qa_mode=qa_mode,
+            total_ms=total_ms,
+            breakdown_ms=breakdown_ms,
+            passed=(not result.has_hard_failure),
+            hard_failures=result.hard_failures,
+        )
+        self._print_qa_timing(total_ms=total_ms, breakdown_ms=breakdown_ms, qa_mode=qa_mode)
+        return result
 
     def improve(self, html: str) -> str:
         return self.improve_with_feedback(html, None, None)
@@ -665,6 +700,9 @@ class ContentQAGate:
         plain = re.sub(r"\s+", " ", text or "").strip()
         paragraphs = [p.strip() for p in re.split(r"\n{2,}", re.sub(r"</p>", "</p>\n\n", html, flags=re.IGNORECASE)) if p.strip()]
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", plain) if s.strip()]
+        # Cap sentence sample size to bound worst-case runtime on very long posts.
+        if len(sentences) > 40:
+            sentences = sentences[:30] + sentences[-10:]
         sent_lens = [len(re.findall(r"[A-Za-z0-9']+", s)) for s in sentences] or [0]
         words = re.findall(r"[A-Za-z0-9']+", plain)
         lower = plain.lower()
@@ -975,6 +1013,25 @@ class ContentQAGate:
                 return True, f"sensitive:{token}"
         return False, ""
 
+    def _detect_image_integrity(self, html: str) -> tuple[bool, str]:
+        raw_html = str(html or "")
+        src_values = re.findall(r"<img\b[^>]*\bsrc=\"([^\"]*)\"", raw_html, flags=re.IGNORECASE)
+        if len(src_values) < 2:
+            return True, f"insufficient_html_images({len(src_values)}/2)"
+        for idx, src in enumerate(src_values, start=1):
+            clean = str(src or "").strip().lower()
+            if not clean:
+                return True, f"image_src_empty(idx={idx})"
+            if not (
+                clean.startswith("https://")
+                or clean.startswith("http://")
+                or clean.startswith("data:image/")
+            ):
+                return True, f"image_src_invalid_scheme(idx={idx})"
+        if "<figcaption" in raw_html.lower():
+            return True, "forbidden_markup:figcaption"
+        return False, ""
+
     def _strip_non_english_lines(self, html: str) -> str:
         src = str(html or "")
         src = re.sub(
@@ -1068,6 +1125,47 @@ class ContentQAGate:
                 fh.write(json.dumps(row, ensure_ascii=True) + "\n")
         except Exception:
             return
+
+    def _log_qa_timing(
+        self,
+        run_id: str,
+        title: str,
+        keyword: str,
+        domain: str,
+        qa_mode: str,
+        total_ms: int,
+        breakdown_ms: dict[str, int],
+        passed: bool,
+        hard_failures: list[str],
+    ) -> None:
+        path = self.qa_timing_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            row = {
+                "ts_utc": datetime.now(timezone.utc).isoformat(),
+                "run_id": str(run_id or "").strip(),
+                "title": str(title or "").strip()[:180],
+                "keyword": str(keyword or "").strip()[:180],
+                "domain": str(domain or "").strip(),
+                "qa_mode": str(qa_mode or "quick").strip().lower(),
+                "total_ms": int(max(0, total_ms)),
+                "breakdown_ms": {str(k): int(max(0, int(v))) for k, v in (breakdown_ms or {}).items()},
+                "passed": bool(passed),
+                "hard_failures": [str(x) for x in (hard_failures or [])][:20],
+            }
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _print_qa_timing(self, total_ms: int, breakdown_ms: dict[str, int], qa_mode: str) -> None:
+        if not breakdown_ms:
+            return
+        top3 = sorted(breakdown_ms.items(), key=lambda kv: int(kv[1]), reverse=True)[:3]
+        top3_txt = ", ".join(f"{k}:{int(v)}ms" for k, v in top3)
+        print(f"[QA] mode={qa_mode} total={int(total_ms)}ms top3={top3_txt}")
+        if int(total_ms) >= 2000:
+            print(f"[SLOW QA] total={int(total_ms)}ms top3={top3_txt}")
 
     def _duplicate_sentence_ratio(self, sentences: list[str]) -> float:
         if not sentences:

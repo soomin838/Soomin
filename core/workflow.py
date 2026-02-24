@@ -1041,7 +1041,12 @@ class AgentWorkflow:
             base_html = linked_html
         base_html = self._canonicalize_html_payload(base_html)
         self._progress("qa", "품질 게이트 점검/개선", 58)
-        qa_result = self.qa.evaluate(base_html, title=draft.title, domain=current_domain)
+        qa_result = self.qa.evaluate(
+            base_html,
+            title=draft.title,
+            domain=current_domain,
+            keyword=str(getattr(selected, "title", "") or ""),
+        )
         final_html = base_html
         qa_retry_count = 0
         if self.settings.quality.enabled:
@@ -1083,7 +1088,12 @@ class AgentWorkflow:
                 else:
                     qa_no_progress_streak = 0
                 final_html = self._canonicalize_html_payload(improved)
-                qa_result = self.qa.evaluate(final_html, title=draft.title, domain=current_domain)
+                qa_result = self.qa.evaluate(
+                    final_html,
+                    title=draft.title,
+                    domain=current_domain,
+                    keyword=str(getattr(selected, "title", "") or ""),
+                )
 
         if (
             self.settings.quality.enabled
@@ -1097,7 +1107,12 @@ class AgentWorkflow:
             if completed != final_html:
                 qa_retry_count += 1
                 final_html = self._canonicalize_html_payload(completed)
-                qa_result = self.qa.evaluate(final_html, title=draft.title, domain=current_domain)
+                qa_result = self.qa.evaluate(
+                    final_html,
+                    title=draft.title,
+                    domain=current_domain,
+                    keyword=str(getattr(selected, "title", "") or ""),
+                )
 
         if (
             self.settings.quality.enabled
@@ -1123,7 +1138,12 @@ class AgentWorkflow:
             polished = self.qa.polish_if_possible(final_html, qa_result)
             if polished != final_html:
                 polished = self._canonicalize_html_payload(polished)
-                polished_result = self.qa.evaluate(polished, title=draft.title, domain=current_domain)
+                polished_result = self.qa.evaluate(
+                    polished,
+                    title=draft.title,
+                    domain=current_domain,
+                    keyword=str(getattr(selected, "title", "") or ""),
+                )
                 # If polish reduced score, develop the polished draft instead of discarding.
                 if polished_result.score < baseline_score:
                     candidate_html = polished
@@ -1161,7 +1181,12 @@ class AgentWorkflow:
                         else:
                             qa_no_progress_streak = 0
                         candidate_html = improved
-                        candidate_result = self.qa.evaluate(candidate_html, title=draft.title, domain=current_domain)
+                        candidate_result = self.qa.evaluate(
+                            candidate_html,
+                            title=draft.title,
+                            domain=current_domain,
+                            keyword=str(getattr(selected, "title", "") or ""),
+                        )
                     if candidate_result.score >= target_score and (
                         (not self.settings.quality.humanity_hard_fail_block)
                         or (not candidate_result.has_hard_failure)
@@ -2464,7 +2489,12 @@ class AgentWorkflow:
         if go_live_errors:
             raise RuntimeError("Go-live gate failed: " + "; ".join(go_live_errors[:5]))
 
-        qa_result = self.qa.evaluate(final_html, title=title, domain=resume_domain)
+        qa_result = self.qa.evaluate(
+            final_html,
+            title=title,
+            domain=resume_domain,
+            keyword=str(getattr(candidate, "title", "") or ""),
+        )
         labels = self._normalize_resume_labels(row.get("labels", []))
         if not labels:
             labels = self._build_public_labels(
