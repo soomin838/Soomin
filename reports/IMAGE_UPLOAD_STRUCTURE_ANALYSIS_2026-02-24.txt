@@ -1,0 +1,71 @@
+﻿RezeroAgent Blogger Image Upload Structure Analysis (2026-02-24)
+
+IMAGE_UPLOAD_ANALYSIS:
+- upload_function:
+  - Publisher._merge_images -> _upload_images -> _upload_images_to_blogger_media
+  - Publisher._upload_via_blogger_endpoint_detailed
+  - Publisher.preflight_thumbnail_blogger_media
+  - Publisher._upload_via_drive_fallback_detailed (fallback)
+  - Publisher._upload_images_to_drive (legacy backend=drive)
+- api_endpoint:
+  - https://www.blogger.com/upload-image.g
+  - https://www.googleapis.com/blogger/v3/blogs/{blogId}/posts
+  - https://www.googleapis.com/upload/drive/v3/files
+  - https://photoslibrary.googleapis.com/v1/uploads
+  - https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate
+- google_service_used: blogger + drive
+- drive_api_used: true
+- blogger_media_used: true
+- drive_files_create_present: true
+- upload_url_parsing_order: regex -> json -> html_src
+- thumbnail_host_check_logic: allow hosts = blogger.googleusercontent.com, bp.blogspot.com, lh3.googleusercontent.com, lh4.googleusercontent.com
+- fallback_host_logic: blogger endpoint fails -> drive fallback URL(lh3.googleusercontent.com) -> if invalid => preflight fail
+
+IMAGE_HOST_REPORT:
+- sample_selection_order: live -> scheduled -> draft
+- selected_post_status: draft
+- selected_post_id: 3879459766182744193
+- selected_post_title: [WIP:collect_done] Device not working? 3 fixes that actually work
+- selected_post_url: http://goundrich.blogspot.com/
+- selected_post_published: 2026-02-23T20:53:34-08:00
+- total_images: 0
+- hosts:
+   - blogger.googleusercontent.com: 0
+   - bp.blogspot.com: 0
+   - drive.google.com: 0
+   - lh3.googleusercontent.com: 0
+   - data:image: 0
+- any_drive_used: false
+- any_data_uri_used: false
+- note: Blogger API query returned no live/scheduled post with images at analysis time.
+
+DRIVE_USAGE_SCAN:
+- drive_calls_found:
+  - core/publisher.py:972 (_upload_via_drive_fallback_detailed, endpoint=drive.files.create)
+  - core/publisher.py:986 (drive.files().create)
+  - core/publisher.py:1836 (_upload_images_to_drive)
+  - core/publisher.py:1848 (drive.files().create)
+  - core/onboarding.py:233 (scope includes https://www.googleapis.com/auth/drive.file)
+- drive_scope_in_settings: true
+- drive_token_files_present: true
+- oauth_scopes_current:
+  - https://www.googleapis.com/auth/blogger
+  - https://www.googleapis.com/auth/drive.file
+  - https://www.googleapis.com/auth/indexing
+  - https://www.googleapis.com/auth/adsense.readonly
+  - https://www.googleapis.com/auth/analytics.readonly
+  - https://www.googleapis.com/auth/webmasters.readonly
+
+CURRENT_SETTINGS:
+- publish.image_hosting_backend: blogger_media
+- strict_thumbnail_blogger_media: true (runtime settings loader value)
+- thumbnail_data_uri_allowed: false
+
+Blogger upload-related endpoint URLs used in code:
+- https://www.blogger.com/upload-image.g
+- https://www.googleapis.com/blogger/v3/blogs/{blogId}/posts
+- https://www.googleapis.com/upload/drive/v3/files
+
+FINAL CONCLUSION:
+- CASE B
+- reason: Drive API is present and used in fallback path; host allowlist includes lh3/lh4.googleusercontent.com. data URI fallback logic also exists in code (CASE C trait), but current sampled post had 0 images.
