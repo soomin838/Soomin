@@ -10,7 +10,8 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=['tzdata', 'numpy'],
+        hiddenimports=['tzdata', 'numpy', 'core.publisher'],
+
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
