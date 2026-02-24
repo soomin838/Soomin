@@ -379,6 +379,19 @@ class KeywordsPolicySettings:
 
 
 @dataclass
+class SyncSettings:
+    enabled: bool = True
+    run_on_startup: bool = True
+    interval_hours: int = 24
+    purge_deleted_after_days: int = 7
+    include_statuses: list[str] = field(default_factory=lambda: ["live", "scheduled"])
+    max_results_per_status: int = 500
+    max_pages: int = 20
+    strict_url_validation: bool = True
+    log_path: str = "storage/logs/sync_blogger.jsonl"
+
+
+@dataclass
 class AppSettings:
     timezone: str = "America/New_York"
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
@@ -401,6 +414,7 @@ class AppSettings:
     images: ImagesPolicySettings = field(default_factory=ImagesPolicySettings)
     internal_links: InternalLinksPolicySettings = field(default_factory=InternalLinksPolicySettings)
     keywords: KeywordsPolicySettings = field(default_factory=KeywordsPolicySettings)
+    sync: SyncSettings = field(default_factory=SyncSettings)
     authority_links: list[str] = field(default_factory=list)
     windows: dict[str, Any] = field(default_factory=dict)
 
@@ -432,6 +446,7 @@ def load_settings(path: Path) -> AppSettings:
     internal_links_raw = dict(raw.get("internal_links", {}) or {})
     keywords_raw = dict(raw.get("keywords", {}) or {})
     keyword_sources_raw = dict((keywords_raw.get("sources", {}) or {}))
+    sync_raw = dict(raw.get("sync", {}) or {})
 
     if isinstance(qa_raw, dict):
         if "qa_mode" in qa_raw:
@@ -615,6 +630,7 @@ def load_settings(path: Path) -> AppSettings:
             avoid_reuse_days=int(keywords_raw.get("avoid_reuse_days", 30)),
             sources=_construct_dc(ImageSourcesPolicySettings, keyword_sources_raw),
         ),
+        sync=_construct_dc(SyncSettings, sync_raw),
         authority_links=raw.get("authority_links", []),
         windows=raw.get("windows", {"use_task_scheduler": True}),
     )

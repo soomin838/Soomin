@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from .brain import DraftPost, GeminiBrain
 from .budget import BudgetGuard
 from .asset_store import KeywordAssetStore, PostsIndexStore
+from .index_sync import BloggerIndexSync
 from .logstore import LogStore, RunRecord
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
@@ -119,6 +120,12 @@ class AgentWorkflow:
         )
         self.posts_index = PostsIndexStore(
             db_path=self.root / "storage" / "posts_index.sqlite",
+        )
+        self.index_sync = BloggerIndexSync(
+            publisher=self.publisher,
+            posts_index=self.posts_index,
+            sync_settings=self.settings.sync,
+            root=self.root,
         )
         self._image_pipeline_state: dict[str, Any] = {
             "status": "idle",
@@ -596,6 +603,28 @@ class AgentWorkflow:
             f"skip{skipped},defer{deferred},err{errors}"
         )
 
+    def _sync_posts_index_with_blogger(self, force: bool = False) -> str:
+        try:
+            report = self.index_sync.sync_with_blogger(force=bool(force))
+        except Exception as exc:
+            return f"sync_with_blogger=error:{str(exc)[:120]}"
+        status = str(report.get("status", "") or "").strip().lower()
+        reason = str(report.get("reason", "") or "").strip()
+        counts = dict(report.get("counts", {}) or {})
+        if status == "ok":
+            return (
+                "sync_with_blogger="
+                f"ok:add{int(counts.get('added', 0))},"
+                f"upd{int(counts.get('updated', 0))},"
+                f"soft_del{int(counts.get('soft_deleted', 0))},"
+                f"purge{int(counts.get('purged', 0))}"
+            )
+        if status == "skipped":
+            return f"sync_with_blogger=skipped:{reason or 'interval_guard'}"
+        if status == "error":
+            return f"sync_with_blogger=error:{str(report.get('error', '') or '')[:120]}"
+        return f"sync_with_blogger={status or 'unknown'}"
+
     def run_once(self, manual_trigger: bool = False) -> WorkflowResult:
         self._set_image_pipeline_state(
             "idle",
@@ -608,6 +637,7 @@ class AgentWorkflow:
         partial_fix_count = 0
         today_gemini_before = int(self.logs.get_today_gemini_count())
         self._progress("preflight", "실행 조건 확인 중", 2)
+        sync_note = self._sync_posts_index_with_blogger(force=bool(manual_trigger))
         blog_snapshot = self._blog_snapshot(force_refresh=True)
         snapshot_source = str(blog_snapshot.get("source", "local"))
         preflight_index_note = self._preflight_recent_index_sync()
@@ -623,6 +653,8 @@ class AgentWorkflow:
         )
         if not budget.ok:
             hold_note = f"Budget guard: {budget.reason}"
+            if sync_note:
+                hold_note = self._append_note(hold_note, sync_note)
             if preflight_index_note:
                 hold_note = self._append_note(hold_note, preflight_index_note)
             self.logs.append_run(
@@ -672,7 +704,7 @@ class AgentWorkflow:
         recent_titles: list[str] = []
         candidates = []
         latest_candidates = []
-        duplicate_recovery_note = preflight_index_note or ""
+        duplicate_recovery_note = self._append_note(preflight_index_note or "", sync_note)
         for round_idx in range(1, 4):
             latest_candidates = self._collect_candidates_with_retry(max_attempts=3)
             latest_candidates = [c for c in (latest_candidates or []) if self._candidate_matches_content_mode(c)]
@@ -4230,7 +4262,12 @@ class AgentWorkflow:
         current_kw = self._parse_focus_keywords(current_keywords or current_title)
         current_title_l = str(current_title or "").strip().lower()
 
-        rows = self.posts_index.query_recent(limit=260)
+        rows = self.posts_index.query_recent(
+            limit=260,
+            include_future=False,
+            statuses=["live"],
+            exclude_deleted=True,
+        )
         primary: list[dict] = []
         secondary: list[tuple[float, dict]] = []
         for row in rows:
@@ -4694,6 +4731,10 @@ class AgentWorkflow:
                     cluster_id=self._infer_cluster_id_from_keyword(title),
                     device_type=self._infer_device_type(title),
                     word_count=len(re.findall(r"[A-Za-z0-9']+", title)),
+                    status="live",
+                    deleted_at=None,
+                    last_seen_at=datetime.now(timezone.utc).isoformat(),
+                    source="blogger",
                 )
             self._posts_index_bootstrap_done = True
         except Exception:
@@ -4749,6 +4790,12 @@ class AgentWorkflow:
             if isinstance(publish_at, datetime)
             else datetime.now(timezone.utc).isoformat()
         )
+        status = "live"
+        if isinstance(publish_at, datetime):
+            now_utc = datetime.now(timezone.utc)
+            ref_dt = publish_at.astimezone(timezone.utc) if publish_at.tzinfo else publish_at.replace(tzinfo=timezone.utc)
+            if ref_dt > now_utc:
+                status = "scheduled"
         self.posts_index.upsert_post(
             post_id=post_id or url,
             url=url,
@@ -4759,5 +4806,9 @@ class AgentWorkflow:
             cluster_id=cluster_id,
             device_type=device_type,
             word_count=len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", html or ""))),
+            status=status,
+            deleted_at=None,
+            last_seen_at=datetime.now(timezone.utc).isoformat(),
+            source="blogger",
         )
 

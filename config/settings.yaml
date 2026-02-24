@@ -16,6 +16,17 @@ budget:
   daily_post_limit: 6
   daily_gemini_call_limit: 50
 
+sync:
+  enabled: true
+  run_on_startup: true
+  interval_hours: 24
+  purge_deleted_after_days: 7
+  include_statuses: ["live", "scheduled"]
+  max_results_per_status: 500
+  max_pages: 20
+  strict_url_validation: true
+  log_path: "storage/logs/sync_blogger.jsonl"
+
 publish:
   use_blogger_schedule: true
   min_delay_minutes: 10
