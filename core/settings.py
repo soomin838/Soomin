@@ -114,6 +114,9 @@ class PublishSettings:
     schedule_horizon_days: int = 14
     allow_inline_fallback_publish: bool = False
     allow_banner_fallback_publish: bool = True
+    strict_thumbnail_blogger_media: bool = True
+    thumbnail_data_uri_allowed: bool = False
+    thumbnail_preflight_only: bool = False
 
 
 @dataclass
@@ -552,6 +555,15 @@ def load_settings(path: Path) -> AppSettings:
         )
         raw["publish"]["allow_banner_fallback_publish"] = bool(
             publishing_raw.get("allow_banner_fallback_publish", raw["publish"].get("allow_banner_fallback_publish", True))
+        )
+        raw["publish"]["strict_thumbnail_blogger_media"] = bool(
+            publishing_raw.get("strict_thumbnail_blogger_media", raw["publish"].get("strict_thumbnail_blogger_media", True))
+        )
+        raw["publish"]["thumbnail_data_uri_allowed"] = bool(
+            publishing_raw.get("thumbnail_data_uri_allowed", raw["publish"].get("thumbnail_data_uri_allowed", False))
+        )
+        raw["publish"]["thumbnail_preflight_only"] = bool(
+            publishing_raw.get("thumbnail_preflight_only", raw["publish"].get("thumbnail_preflight_only", False))
         )
     if internal_links_raw:
         raw.setdefault("publish", {})

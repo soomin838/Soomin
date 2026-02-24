@@ -72,6 +72,12 @@ class AgentWorkflow:
             max_banner_images=settings.visual.max_banner_images,
             max_inline_images=settings.visual.max_inline_images,
             semantic_html_enabled=bool(getattr(settings.publish, "enable_semantic_html", True)),
+            strict_thumbnail_blogger_media=bool(
+                getattr(settings.publish, "strict_thumbnail_blogger_media", True)
+            ),
+            thumbnail_data_uri_allowed=bool(
+                getattr(settings.publish, "thumbnail_data_uri_allowed", False)
+            ),
         )
         self.qa = ContentQAGate(
             settings.quality,
@@ -1468,6 +1474,57 @@ class AgentWorkflow:
         self._progress("publish", "Blogger 예약 발행 처리", 92)
         published = None
         last_publish_err = ""
+        preflight_thumb_src = ""
+        try:
+            images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
+                draft=draft,
+                candidate=selected,
+                images=images,
+                prompt_plan=image_prompt_plan,
+                max_attempts=3,
+            )
+        except Exception as exc:
+            last_publish_err = str(exc)
+            draft_checkpoint_note = ""
+            try:
+                checkpoint = self.publisher.save_draft_checkpoint(
+                    title=draft.title,
+                    html_body=final_html,
+                    labels=labels,
+                    stage="hold",
+                    reason=last_publish_err,
+                    draft_post_id=(working_draft_id or None),
+                )
+                if str(getattr(checkpoint, "post_id", "")).strip():
+                    draft_checkpoint_note = f";draft_checkpoint={checkpoint.post_id}"
+            except Exception as cp_exc:
+                draft_checkpoint_note = f";draft_checkpoint_failed={str(cp_exc)[:120]}"
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=0,
+                    title=draft.title,
+                    source_url=draft.source_url,
+                    published_url="",
+                    note=f"requeued_to_tail: {last_publish_err}{draft_checkpoint_note}",
+                )
+            )
+            checkpoint_msg = ""
+            if "draft_checkpoint=" in draft_checkpoint_note:
+                checkpoint_msg = f" | {draft_checkpoint_note.lstrip(';')}"
+            return WorkflowResult("hold", f"requeued_to_tail: {last_publish_err}{checkpoint_msg}")
+        if bool(getattr(self.settings.publish, "thumbnail_preflight_only", False)):
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=score,
+                    title=draft.title,
+                    source_url=draft.source_url,
+                    published_url="",
+                    note=f"thumbnail_preflight_only_ok:{preflight_thumb_src[:180]}",
+                )
+            )
+            return WorkflowResult("hold", "thumbnail_preflight_only_ok")
         publish_backoff = [30, 300, 900]
         for publish_try in range(1, 4):
             try:
@@ -1479,6 +1536,7 @@ class AgentWorkflow:
                     publish_at=publish_at,
                     existing_draft_post_id=(working_draft_id or None),
                     meta_description=meta_description,
+                    preflight_thumbnail_src=preflight_thumb_src,
                 )
                 break
             except Exception as exc:
@@ -1496,6 +1554,19 @@ class AgentWorkflow:
                         )
                     )
                     return WorkflowResult("skipped", self._physical_block_reason(err))
+                if ("thumbnail_preflight_failed" in err or "missing thumbnail image url" in err) and publish_try < 3:
+                    try:
+                        images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
+                            draft=draft,
+                            candidate=selected,
+                            images=images,
+                            prompt_plan=image_prompt_plan,
+                            max_attempts=3,
+                        )
+                        continue
+                    except Exception as pre_exc:
+                        last_publish_err = str(pre_exc)
+                        break
                 if publish_try >= 3 or not self._is_retryable_error(err):
                     break
                 wait = publish_backoff[min(publish_try - 1, len(publish_backoff) - 1)]
@@ -2416,6 +2487,51 @@ class AgentWorkflow:
             summary=summary_text,
             html=final_html,
         )
+        preflight_thumb_src = ""
+        try:
+            images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
+                draft=draft,
+                candidate=candidate,
+                images=images,
+                prompt_plan=image_prompt_plan,
+                max_attempts=3,
+            )
+        except Exception as exc:
+            hold_labels = self._normalize_resume_labels(row.get("labels", []))
+            if not hold_labels:
+                hold_labels = self._build_public_labels(
+                    title=title,
+                    candidate=candidate,
+                    global_keywords=self.last_global_keywords,
+                    max_labels=6,
+                )
+            post_id = str(row.get("post_id", "") or "").strip()
+            updated_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                current_draft_post_id=post_id,
+                stage="hold",
+                title=title,
+                html_body=final_html,
+                labels=hold_labels,
+                reason=str(exc),
+            )
+            hold_msg = f"thumbnail_preflight_failed: {str(exc)}"
+            if hold_note:
+                hold_msg += f" | {hold_note}"
+            if updated_draft_id:
+                hold_msg += f" | draft_checkpoint={updated_draft_id}"
+            return WorkflowResult("hold", hold_msg)
+        if bool(getattr(self.settings.publish, "thumbnail_preflight_only", False)):
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=90,
+                    title=title,
+                    source_url="",
+                    published_url="",
+                    note=f"thumbnail_preflight_only_ok:{preflight_thumb_src[:180]}",
+                )
+            )
+            return WorkflowResult("hold", "thumbnail_preflight_only_ok")
         published = self.publisher.publish_post(
             title,
             final_html,
@@ -2424,6 +2540,7 @@ class AgentWorkflow:
             publish_at=publish_at,
             existing_draft_post_id=(post_id or None),
             meta_description=meta_description,
+            preflight_thumbnail_src=preflight_thumb_src,
         )
         self.logs.add_scheduled_post(
             publish_at=publish_at.isoformat(),
@@ -2897,6 +3014,42 @@ class AgentWorkflow:
                 if src.startswith("local://fallback"):
                     return False, "inline_image_generation_failed"
         return True, ""
+
+    def _preflight_thumbnail_with_recovery(
+        self,
+        draft: DraftPost,
+        candidate: TopicCandidate,
+        images: list[ImageAsset],
+        prompt_plan: dict[str, Any] | None,
+        max_attempts: int = 3,
+    ) -> tuple[list[ImageAsset], str]:
+        working = self.visual.ensure_unique_assets(list(images or []))
+        if not working:
+            raise RuntimeError("thumbnail_preflight_failed:no_images")
+        last_err = "thumbnail_preflight_failed:unknown"
+        attempts = max(1, int(max_attempts or 1))
+        for attempt_no in range(1, attempts + 1):
+            try:
+                thumb_src = self.publisher.preflight_thumbnail_blogger_media(
+                    working[0],
+                    max_attempts=2,
+                )
+                return working, str(thumb_src or "").strip()
+            except Exception as exc:
+                last_err = str(exc or "thumbnail_preflight_failed:unknown")
+                if attempt_no >= attempts:
+                    break
+                try:
+                    working = self.visual.regenerate_thumbnail_once(
+                        draft,
+                        working,
+                        prompt_plan=prompt_plan,
+                    )
+                    working = self.visual.ensure_unique_assets(working)
+                    self._optimize_thumbnail_alt(working, candidate)
+                except Exception as regen_exc:
+                    last_err = f"{last_err};thumbnail_regen_failed:{regen_exc}"
+        raise RuntimeError(last_err)
 
     def _force_image_floor(
         self,

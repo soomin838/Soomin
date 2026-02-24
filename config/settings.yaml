@@ -44,6 +44,9 @@ publish:
   schedule_horizon_days: 14
   allow_inline_fallback_publish: false
   allow_banner_fallback_publish: true
+  strict_thumbnail_blogger_media: true
+  thumbnail_data_uri_allowed: false
+  thumbnail_preflight_only: false
 quality:
   enabled: true
   strict_mode: true

@@ -229,6 +229,43 @@ class VisualPipeline:
         images.insert(0, generated)
         return images
 
+    def regenerate_thumbnail_once(
+        self,
+        draft: DraftPost,
+        images: list[ImageAsset],
+        prompt_plan: dict[str, Any] | None = None,
+    ) -> list[ImageAsset]:
+        """
+        Force one fresh thumbnail generation attempt and keep body assets untouched.
+        """
+        existing = list(images or [])
+        body_assets = existing[1:] if len(existing) > 1 else []
+        prompt = re.sub(
+            r"\s+",
+            " ",
+            str((prompt_plan or {}).get("banner_prompt", "") or "").strip(),
+        )
+        if not prompt:
+            prompt = self._build_thumbnail_prompt(draft)
+        index_seed = 900 + random.randint(1, 80)
+        generated = self._generate_image_with_pollinations(
+            prompt=prompt,
+            index=index_seed,
+            paragraph=(draft.summary or draft.title),
+            keyword=draft.title,
+            role="thumbnail",
+        )
+        if generated is None:
+            generated = self._fallback_asset_for_role(role="thumbnail", index=index_seed)
+        if generated is None:
+            return self.ensure_unique_assets(existing)
+        generated.anchor_text = ""
+        generated.alt = self._build_alt_text(draft.title, "thumbnail")
+        if not self._optimize_image_for_seo(generated.path, role="thumbnail"):
+            return self.ensure_unique_assets(existing)
+        out = [generated] + body_assets
+        return self.ensure_unique_assets(out)
+
     def ensure_unique_assets(self, images: list[ImageAsset]) -> list[ImageAsset]:
         return self._dedupe_assets_by_content(images)
 

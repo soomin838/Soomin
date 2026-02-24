@@ -9,6 +9,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote, urlparse
 
 import requests
@@ -51,6 +52,8 @@ class Publisher:
         max_banner_images: int = 1,
         max_inline_images: int = 2,
         semantic_html_enabled: bool = True,
+        strict_thumbnail_blogger_media: bool = True,
+        thumbnail_data_uri_allowed: bool = False,
     ) -> None:
         self.credentials_path = credentials_path
         self.blog_id = blog_id
@@ -61,12 +64,18 @@ class Publisher:
         self.max_banner_images = max(1, int(max_banner_images or 1))
         self.max_inline_images = max(0, int(max_inline_images or 0))
         self.semantic_html_enabled = bool(semantic_html_enabled)
+        self.strict_thumbnail_blogger_media = bool(strict_thumbnail_blogger_media)
+        self.thumbnail_data_uri_allowed = bool(thumbnail_data_uri_allowed)
         self._last_upload_report: dict = {}
         self._indexing_scope = "https://www.googleapis.com/auth/indexing"
         self._upload_log_path = (
             self.credentials_path.parent.parent / "storage" / "logs" / "publisher_upload.jsonl"
         ).resolve()
+        self._thumbnail_gate_log_path = (
+            self.credentials_path.parent.parent / "storage" / "logs" / "thumbnail_gate.jsonl"
+        ).resolve()
         self._upload_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._thumbnail_gate_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def publish_post(
         self,
@@ -77,14 +86,24 @@ class Publisher:
         publish_at: datetime | None = None,
         existing_draft_post_id: str | None = None,
         meta_description: str | None = None,
+        preflight_thumbnail_src: str | None = None,
     ) -> PublishResult:
         creds = self._oauth_credentials()
         service = build("blogger", "v3", credentials=creds)
         clean_title = self._normalize_text_entities(title)
         clean_html = self._normalize_html_entities(html_body)
         clean_html = self._clean_html_tags(clean_html)
+        preflight_src = str(preflight_thumbnail_src or "").strip()
+        if images:
+            if not (preflight_src and self._is_blogger_media_url(preflight_src)):
+                preflight_src = self.preflight_thumbnail_blogger_media(images[0], creds=creds, max_attempts=2)
         lede_seed = self._first_text_paragraph(clean_html)
-        post_html = self._merge_images(clean_html, images, creds)
+        post_html = self._merge_images(
+            clean_html,
+            images,
+            creds,
+            preflight_thumbnail_src=preflight_src,
+        )
         pre_semantic_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", post_html, flags=re.IGNORECASE))
         if self.semantic_html_enabled:
             post_html = self._semanticize_article_html(post_html, lede_hint=lede_seed)
@@ -464,7 +483,13 @@ class Publisher:
         out = re.sub(r"\n{3,}", "\n\n", out)
         return out.strip()
 
-    def _merge_images(self, html_body: str, images: list[ImageAsset], creds) -> str:
+    def _merge_images(
+        self,
+        html_body: str,
+        images: list[ImageAsset],
+        creds,
+        preflight_thumbnail_src: str = "",
+    ) -> str:
         if not images:
             raise RuntimeError("이미지 자산이 비어 있습니다. retry required")
 
@@ -476,8 +501,14 @@ class Publisher:
                 "image_hosting_backend": str(self.image_hosting_backend or ""),
             }
         )
+        src_map: dict[str, str] = {}
+        if preflight_thumbnail_src and images:
+            src_map[str(images[0].path)] = str(preflight_thumbnail_src).strip()
         hosted_urls = self._upload_images(images=images, creds=creds)
-        src_map: dict[str, str] = dict(hosted_urls or {})
+        for k, v in dict(hosted_urls or {}).items():
+            clean = str(v or "").strip()
+            if clean:
+                src_map[str(k)] = clean
         self._log_upload_event(
             {
                 "event": "merge_images_start",
@@ -490,7 +521,9 @@ class Publisher:
         thumbnail_kind = (getattr(thumbnail, "source_kind", "") or "").strip().lower()
         if thumbnail_kind not in {"gemini", "generated", "pollinations"}:
             raise RuntimeError("Thumbnail must be generated image. retry required")
-        thumb_src = src_map.get(str(thumbnail.path), "")
+        thumb_src = str(preflight_thumbnail_src or "").strip()
+        if not thumb_src:
+            thumb_src = src_map.get(str(thumbnail.path), "")
         if not thumb_src or not self._is_blogger_media_url(thumb_src):
             thumb_src = self._recover_thumbnail_blogger_src(
                 thumbnail=thumbnail,
@@ -498,13 +531,25 @@ class Publisher:
                 src_map=src_map,
                 creds=creds,
             )
-        if not thumb_src:
+        if not thumb_src and not self.strict_thumbnail_blogger_media:
             thumb_src = self._pick_relaxed_thumbnail_src(src_map=src_map, images=images)
-        if thumb_src and str(thumb_src).strip().lower().startswith("data:image/"):
+        if (
+            thumb_src
+            and str(thumb_src).strip().lower().startswith("data:image/")
+            and (not self.thumbnail_data_uri_allowed)
+        ):
             self._log_upload_event(
                 {
                     "event": "thumbnail_data_uri_blocked",
                     "path": str(getattr(thumbnail, "path", "") or ""),
+                }
+            )
+            thumb_src = ""
+        if thumb_src and self.strict_thumbnail_blogger_media and (not self._is_blogger_media_url(str(thumb_src))):
+            self._log_upload_event(
+                {
+                    "event": "thumbnail_non_blogger_blocked",
+                    "thumb_src": str(thumb_src)[:220],
                 }
             )
             thumb_src = ""
@@ -621,17 +666,18 @@ class Publisher:
         src_map: dict[str, str],
         creds,
     ) -> str:
-        # 1) Retry thumbnail-only upload once with blogger-compatible conversion.
+        # 1) Retry thumbnail-only preflight path first.
         try:
-            retried = self._upload_images_to_blogger_media([thumbnail], creds)
-            src = str(retried.get(str(thumbnail.path), "") or "").strip()
+            src = self.preflight_thumbnail_blogger_media(thumbnail, creds=creds, max_attempts=2)
             if src and self._is_blogger_media_url(src):
                 src_map[str(thumbnail.path)] = src
                 return src
         except Exception:
             pass
 
-        # 2) Keep strict Blogger hosting, but allow another generated image as fallback thumbnail.
+        # 2) Keep strict Blogger hosting, but allow another generated image URL only in relaxed mode.
+        if self.strict_thumbnail_blogger_media:
+            return ""
         for img in images:
             kind = (getattr(img, "source_kind", "") or "").strip().lower()
             if kind not in {"gemini", "generated", "pollinations"}:
@@ -851,9 +897,23 @@ class Publisher:
             return path, safe_mime or "image/png", None
 
     def _upload_via_blogger_endpoint(self, path: Path, mime: str, creds) -> str:
+        details = self._upload_via_blogger_endpoint_detailed(path=path, mime=mime, creds=creds)
+        return str(details.get("extracted_url", "") or "").strip()
+
+    def _upload_via_blogger_endpoint_detailed(self, path: Path, mime: str, creds) -> dict[str, Any]:
         endpoint = "https://www.blogger.com/upload-image.g"
         response = None
-        extracted = ""
+        details: dict[str, Any] = {
+            "endpoint": endpoint,
+            "file": str(getattr(path, "name", "")),
+            "mime": str(mime or ""),
+            "status_code": 0,
+            "response_preview": "",
+            "extracted_url": "",
+            "extracted_host": "",
+            "reason_code": "",
+            "ok": False,
+        }
         try:
             self._ensure_valid_token(creds)
             with path.open("rb") as fh:
@@ -869,73 +929,278 @@ class Publisher:
                     timeout=60,
                 )
         except Exception as exc:
-            self._log_upload_event(
-                {
-                    "event": "blogger_media_upload_exception",
-                    "endpoint": endpoint,
-                    "file": path.name,
-                    "mime": mime,
-                    "status_code": "exception",
-                    "error": str(exc),
-                }
-            )
-            return ""
+            msg = str(exc or "")
+            details["status_code"] = "exception"
+            details["response_preview"] = msg[:800]
+            lower = msg.lower()
+            if "invalid_scope" in lower:
+                details["reason_code"] = "invalid_scope"
+            elif "timeout" in lower:
+                details["reason_code"] = "timeout"
+            else:
+                details["reason_code"] = "http_4xx_or_5xx"
+            self._last_upload_report = dict(details)
+            self._log_upload_event({"event": "blogger_media_upload_exception", **details})
+            return details
+        details["status_code"] = int(getattr(response, "status_code", 0) or 0)
+        details["response_preview"] = str(getattr(response, "text", "") or "")[:800]
         if response.status_code not in {200, 201}:
-            self._log_upload_event(
-                {
-                    "event": "blogger_media_upload_failed",
-                    "endpoint": endpoint,
-                    "file": path.name,
-                    "mime": mime,
-                    "status_code": int(response.status_code),
-                    "response_preview": str(response.text or "")[:500],
-                    "extracted_url": "",
-                }
-            )
-            return ""
-        text = response.text or ""
-        m = re.search(r"https://[A-Za-z0-9._/-]*blogger\.googleusercontent\.com[^\s\"'<>]*", text)
-        if m:
-            extracted = str(m.group(0)).strip()
-            self._log_upload_event(
-                {
-                    "event": "blogger_media_upload_ok",
-                    "endpoint": endpoint,
-                    "file": path.name,
-                    "mime": mime,
-                    "status_code": int(response.status_code),
-                    "response_preview": str(response.text or "")[:500],
-                    "extracted_url": extracted,
-                }
-            )
-            return extracted
-        m2 = re.search(r"https://[A-Za-z0-9._/-]*googleusercontent\.com[^\s\"'<>]*", text)
-        if m2:
-            extracted = str(m2.group(0)).strip()
-            self._log_upload_event(
-                {
-                    "event": "blogger_media_upload_ok_non_blogger_host",
-                    "endpoint": endpoint,
-                    "file": path.name,
-                    "mime": mime,
-                    "status_code": int(response.status_code),
-                    "response_preview": str(response.text or "")[:500],
-                    "extracted_url": extracted,
-                }
-            )
-            return extracted
-        self._log_upload_event(
-            {
-                "event": "blogger_media_upload_no_url",
-                "endpoint": endpoint,
-                "file": path.name,
-                "mime": mime,
-                "status_code": int(response.status_code),
-                "response_preview": str(response.text or "")[:500],
-                "extracted_url": "",
-            }
+            lower = str(response.text or "").lower()
+            details["reason_code"] = "invalid_scope" if ("invalid_scope" in lower or "insufficientpermission" in lower) else "http_4xx_or_5xx"
+            self._last_upload_report = dict(details)
+            self._log_upload_event({"event": "blogger_media_upload_failed", **details})
+            return details
+        extracted, parse_source = self._extract_upload_url_from_response(str(response.text or ""))
+        details["extracted_url"] = extracted
+        details["extracted_host"] = (urlparse(extracted).netloc or "").lower() if extracted else ""
+        if extracted:
+            details["ok"] = True
+            if self._is_blogger_media_url(extracted):
+                details["reason_code"] = ""
+            else:
+                details["reason_code"] = "non_blogger_host"
+            self._last_upload_report = dict(details)
+            self._log_upload_event({"event": "blogger_media_upload_ok", "parse_source": parse_source, **details})
+            return details
+        details["reason_code"] = "response_parse_failed"
+        self._last_upload_report = dict(details)
+        self._log_upload_event({"event": "blogger_media_upload_no_url", "parse_source": parse_source, **details})
+        return details
+
+    def _extract_upload_url_from_response(self, text: str) -> tuple[str, str]:
+        raw = str(text or "")
+        patterns = [
+            r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*blogger\.googleusercontent\.com[^\s\"'<>]*",
+            r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*bp\.blogspot\.com[^\s\"'<>]*",
+            r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*googleusercontent\.com[^\s\"'<>]*",
+        ]
+        for pat in patterns:
+            m = re.search(pat, raw, flags=re.IGNORECASE)
+            if m:
+                return str(m.group(0) or "").strip(), "regex"
+        try:
+            parsed = json.loads(raw)
+            url = self._search_url_in_json(parsed)
+            if url:
+                return url, "json"
+        except Exception:
+            pass
+        m = re.search(
+            r"src=[\"'](https://[^\"']*(?:blogger\.googleusercontent\.com|bp\.blogspot\.com|googleusercontent\.com)[^\"']*)[\"']",
+            raw,
+            flags=re.IGNORECASE,
         )
+        if m:
+            return str(m.group(1) or "").strip(), "html_src"
+        return "", "none"
+
+    def _search_url_in_json(self, value: Any) -> str:
+        key_hints = {"url", "imageurl", "link", "contenturl", "src", "mediaurl"}
+        stack: list[Any] = [value]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    try:
+                        key = str(k or "").strip().lower()
+                    except Exception:
+                        key = ""
+                    if isinstance(v, str):
+                        vv = v.strip()
+                        if vv.startswith("https://") and (
+                            "googleusercontent.com" in vv.lower() or "blogspot.com" in vv.lower()
+                        ):
+                            return vv
+                        if key in key_hints and vv.startswith("http"):
+                            return vv
+                    elif isinstance(v, (dict, list, tuple)):
+                        stack.append(v)
+            elif isinstance(node, (list, tuple)):
+                for item in node:
+                    if isinstance(item, (dict, list, tuple)):
+                        stack.append(item)
+                    elif isinstance(item, str):
+                        vv = item.strip()
+                        if vv.startswith("https://") and (
+                            "googleusercontent.com" in vv.lower() or "blogspot.com" in vv.lower()
+                        ):
+                            return vv
         return ""
+
+    def preflight_thumbnail_blogger_media(self, thumbnail: ImageAsset, creds=None, *, max_attempts: int = 2) -> str:
+        path = Path(getattr(thumbnail, "path", ""))
+        if not path.exists():
+            self._log_thumbnail_gate_event(
+                {
+                    "event": "thumbnail_gate_result",
+                    "ok": False,
+                    "reason_code": "file_missing",
+                    "source_path": str(path),
+                }
+            )
+            raise RuntimeError("thumbnail_preflight_failed:file_missing")
+        if creds is None:
+            creds = self._oauth_credentials()
+
+        last_reason = "missing_extracted_url"
+        for attempt_no in range(1, max(1, int(max_attempts)) + 1):
+            cleanup_path: Path | None = None
+            upload_path = path
+            upload_mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            resized_w = 0
+            resized_h = 0
+            file_size = 0
+            try:
+                if attempt_no == 1:
+                    upload_path, upload_mime, cleanup_path = self._prepare_blogger_upload_asset(
+                        path,
+                        upload_mime,
+                        role="thumbnail",
+                    )
+                else:
+                    upload_path, upload_mime, cleanup_path = self._prepare_thumbnail_jpeg_asset(path, quality=82)
+
+                file_size = int(upload_path.stat().st_size) if upload_path.exists() else 0
+                try:
+                    with Image.open(upload_path) as im:
+                        resized_w, resized_h = int(im.width), int(im.height)
+                except Exception:
+                    resized_w, resized_h = 0, 0
+
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_upload_attempt",
+                        "attempt_no": attempt_no,
+                        "source_path": str(path),
+                        "prepared_path": str(upload_path),
+                        "mime": str(upload_mime or ""),
+                        "file_size_bytes": file_size,
+                        "resized_width": resized_w,
+                        "resized_height": resized_h,
+                        "token_scopes": self._token_scopes(creds),
+                        "token_expiry": str(getattr(creds, "expiry", "") or ""),
+                    }
+                )
+
+                if file_size < 10 * 1024:
+                    last_reason = "file_too_small"
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "thumbnail_gate_result",
+                            "attempt_no": attempt_no,
+                            "ok": False,
+                            "reason_code": last_reason,
+                        }
+                    )
+                    continue
+
+                details = self._upload_via_blogger_endpoint_detailed(upload_path, upload_mime, creds)
+                extracted_url = str(details.get("extracted_url", "") or "").strip()
+                extracted_host = str(details.get("extracted_host", "") or "").strip().lower()
+                reason_code = str(details.get("reason_code", "") or "").strip()
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_upload_response",
+                        "attempt_no": attempt_no,
+                        "status_code": details.get("status_code", 0),
+                        "response_preview": str(details.get("response_preview", "") or "")[:800],
+                        "extracted_url": extracted_url,
+                        "extracted_host": extracted_host,
+                    }
+                )
+
+                if extracted_url and self._is_blogger_media_url(extracted_url):
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "thumbnail_gate_result",
+                            "attempt_no": attempt_no,
+                            "ok": True,
+                            "reason_code": "",
+                            "thumbnail_url": extracted_url,
+                        }
+                    )
+                    return extracted_url
+
+                if not extracted_url:
+                    last_reason = reason_code or "missing_extracted_url"
+                elif extracted_host and (not self._is_blogger_media_url(extracted_url)):
+                    last_reason = "non_blogger_host"
+                else:
+                    last_reason = reason_code or "response_parse_failed"
+
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_gate_result",
+                        "attempt_no": attempt_no,
+                        "ok": False,
+                        "reason_code": last_reason,
+                    }
+                )
+            except requests.Timeout:
+                last_reason = "timeout"
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_gate_result",
+                        "attempt_no": attempt_no,
+                        "ok": False,
+                        "reason_code": last_reason,
+                    }
+                )
+            except Exception as exc:
+                msg = str(exc or "")
+                lower = msg.lower()
+                if "invalid_scope" in lower or "insufficientpermission" in lower:
+                    last_reason = "invalid_scope"
+                else:
+                    last_reason = "http_4xx_or_5xx"
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_gate_result",
+                        "attempt_no": attempt_no,
+                        "ok": False,
+                        "reason_code": last_reason,
+                        "error": msg[:220],
+                    }
+                )
+            finally:
+                if cleanup_path and cleanup_path.exists():
+                    try:
+                        cleanup_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+        raise RuntimeError(f"thumbnail_preflight_failed:{last_reason}")
+
+    def _prepare_thumbnail_jpeg_asset(self, path: Path, quality: int = 82) -> tuple[Path, str, Path]:
+        q = max(60, min(95, int(quality or 82)))
+        with Image.open(path) as im:
+            working = im
+            target_width = 1200
+            if im.width > target_width:
+                ratio = target_width / float(im.width)
+                new_height = max(1, int(im.height * ratio))
+                working = im.resize((target_width, new_height), Image.Resampling.LANCZOS)
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".jpg",
+                prefix="rz_thumb_",
+                dir=str(path.parent),
+            ) as tmp:
+                tmp_path = Path(tmp.name)
+            rgb = working.convert("RGB") if working.mode not in {"RGB", "L"} else working
+            rgb.save(tmp_path, format="JPEG", quality=q, optimize=True, progressive=True)
+        return tmp_path, "image/jpeg", tmp_path
+
+    def _log_thumbnail_gate_event(self, payload: dict) -> None:
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            **(payload or {}),
+        }
+        try:
+            with self._thumbnail_gate_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def _assert_post_contains_images(self, service, post_id: str) -> None:
         pid = str(post_id or "").strip()
