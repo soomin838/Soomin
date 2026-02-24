@@ -1130,39 +1130,11 @@ class Publisher:
 
                 # Blogger endpoint may fail in some environments (e.g. 405).
                 # Recovery path must remain Blogger-only: temporary draft roundtrip.
-                roundtrip_url = self._upload_via_temp_draft_roundtrip(upload_path, upload_mime, creds, idx=attempt_no)
-                roundtrip_host = (urlparse(roundtrip_url).netloc or "").lower() if roundtrip_url else ""
-                self._log_thumbnail_gate_event(
-                    {
-                        "event": "thumbnail_upload_roundtrip_response",
-                        "attempt_no": attempt_no,
-                        "extracted_url": roundtrip_url,
-                        "extracted_host": roundtrip_host,
-                    }
-                )
-                if roundtrip_url and self._is_blogger_media_url(roundtrip_url):
-                    self._log_thumbnail_gate_event(
-                        {
-                            "event": "thumbnail_gate_result",
-                            "attempt_no": attempt_no,
-                            "ok": True,
-                            "reason_code": "draft_roundtrip",
-                            "thumbnail_url": roundtrip_url,
-                        }
-                    )
-                    return roundtrip_url
+        roundtrip_url = ""
+        roundtrip_host = ""
 
-                if roundtrip_url and roundtrip_url.strip().lower().startswith("data:image/"):
-                    last_reason = "thumbnail_data_uri_not_allowed"
-                    self._log_thumbnail_gate_event(
-                        {
-                            "event": "thumbnail_gate_result",
-                            "attempt_no": attempt_no,
-                            "ok": False,
-                            "reason_code": last_reason,
-                        }
-                    )
-                    continue
+
+      
 
                 if not extracted_url:
                     last_reason = reason_code or "missing_extracted_url"
