@@ -17,7 +17,6 @@ from PIL import Image
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
 from zoneinfo import ZoneInfo
 
 from .visual import ImageAsset
@@ -123,6 +122,8 @@ class Publisher:
                     min_images=2,
                     require_no_figcaption=True,
                     strict_intro_alt=True,
+                    allow_data_uri=False,
+                    require_blogger_hosts=True,
                 )
             except Exception as exc:
                 self._log_upload_event(
@@ -646,7 +647,14 @@ class Publisher:
             )
             raise RuntimeError(f"publish failed - missing images before submit ({img_count}/2)")
         try:
-            self._assert_html_image_integrity(html, min_images=2, require_no_figcaption=True, strict_intro_alt=True)
+            self._assert_html_image_integrity(
+                html,
+                min_images=2,
+                require_no_figcaption=True,
+                strict_intro_alt=True,
+                allow_data_uri=False,
+                require_blogger_hosts=True,
+            )
         except Exception as exc:
             self._log_upload_event(
                 {
@@ -723,15 +731,8 @@ class Publisher:
                 fallback_backend="",
             )
             return hosted
-        # Legacy fallback only when explicitly requested.
-        if backend == "drive":
-            hosted = self._upload_images_to_drive(images, creds)
-            self._last_upload_report = self._compose_upload_report(
-                backend="drive",
-                requested=requested,
-                hosted=hosted,
-            )
-            return hosted
+        if backend in {"drive", "photos"}:
+            raise RuntimeError("drive_backend_disabled")
         raise RuntimeError(f"지원하지 않는 이미지 호스팅 백엔드: {backend}")
 
     def _compose_upload_report(
@@ -763,7 +764,6 @@ class Publisher:
     def _upload_images_to_blogger_media(self, images: list[ImageAsset], creds) -> dict[str, str]:
         # Blogger v3 has no public binary media endpoint; use a temporary draft-post
         # roundtrip so Blogger stores images on its own media infrastructure.
-        service = build("blogger", "v3", credentials=creds)
         hosted: dict[str, str] = {}
         for idx, image in enumerate(images, start=1):
             path = image.path
@@ -777,31 +777,12 @@ class Publisher:
                 mime,
                 role=role,
             )
-            post_id = ""
             try:
                 uploaded = self._upload_via_blogger_endpoint(upload_path, upload_mime, creds)
                 if uploaded:
                     hosted[str(path)] = uploaded
                     continue
-                data_uri = self._image_data_uri(upload_path, upload_mime)
-                payload = {
-                    "title": f"[asset] {datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')} {idx}",
-                    "content": f'<p><img src="{data_uri}" alt="asset {idx}" /></p>',
-                }
-                draft = service.posts().insert(
-                    blogId=self.blog_id,
-                    body=payload,
-                    isDraft=True,
-                ).execute()
-                post_id = str(draft.get("id", "") or "")
-                if not post_id:
-                    continue
-                fetched = service.posts().get(
-                    blogId=self.blog_id,
-                    postId=post_id,
-                    view="ADMIN",
-                ).execute()
-                src = self._extract_first_img_src(str(fetched.get("content", "") or ""))
+                src = self._upload_via_temp_draft_roundtrip(upload_path, upload_mime, creds, idx=idx)
                 if not src:
                     continue
                 if not self._is_blogger_media_url(src):
@@ -813,11 +794,6 @@ class Publisher:
                 if cleanup_path and cleanup_path.exists():
                     try:
                         cleanup_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                if post_id:
-                    try:
-                        service.posts().delete(blogId=self.blog_id, postId=post_id).execute()
                     except Exception:
                         pass
         return hosted
@@ -967,62 +943,43 @@ class Publisher:
         self._log_upload_event({"event": "blogger_media_upload_no_url", "parse_source": parse_source, **details})
         return details
 
-    def _upload_via_drive_fallback_detailed(self, path: Path, mime: str, creds) -> dict[str, Any]:
-        details: dict[str, Any] = {
-            "endpoint": "drive.files.create",
-            "file": str(getattr(path, "name", "")),
-            "mime": str(mime or ""),
-            "status_code": 0,
-            "response_preview": "",
-            "extracted_url": "",
-            "extracted_host": "",
-            "reason_code": "",
-            "ok": False,
-        }
+    def _upload_via_temp_draft_roundtrip(self, path: Path, mime: str, creds, idx: int = 1) -> str:
+        service = build("blogger", "v3", credentials=creds)
+        post_id = ""
         try:
-            self._ensure_valid_token(creds)
-            drive = build("drive", "v3", credentials=creds)
-            media = MediaFileUpload(str(path), mimetype=mime or "image/png", resumable=False)
-            created = drive.files().create(
-                body={"name": path.name, "mimeType": mime or "image/png"},
-                media_body=media,
-                fields="id",
+            data_uri = self._image_data_uri(path, mime)
+            payload = {
+                "title": f"[asset] {datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')} {idx}",
+                "content": f'<p><img src="{data_uri}" alt="asset {idx}" /></p>',
+            }
+            draft = service.posts().insert(
+                blogId=self.blog_id,
+                body=payload,
+                isDraft=True,
             ).execute()
-            file_id = str((created or {}).get("id", "") or "").strip()
-            if not file_id:
-                details["reason_code"] = "response_parse_failed"
-                return details
-            drive.permissions().create(
-                fileId=file_id,
-                body={"type": "anyone", "role": "reader"},
+            post_id = str(draft.get("id", "") or "")
+            if not post_id:
+                return ""
+            fetched = service.posts().get(
+                blogId=self.blog_id,
+                postId=post_id,
+                view="ADMIN",
             ).execute()
-            url = f"https://lh3.googleusercontent.com/d/{file_id}=w1600"
-            details["ok"] = True
-            details["status_code"] = 200
-            details["extracted_url"] = url
-            details["extracted_host"] = (urlparse(url).netloc or "").lower()
-            return details
-        except Exception as exc:
-            msg = str(exc or "")
-            details["status_code"] = "exception"
-            details["response_preview"] = msg[:800]
-            lower = msg.lower()
-            if "invalid_scope" in lower or "insufficientpermission" in lower:
-                details["reason_code"] = "invalid_scope"
-            elif "storagequotaexceeded" in lower or "quota has been exceeded" in lower:
-                details["reason_code"] = "drive_storage_quota_exceeded"
-            elif "timeout" in lower:
-                details["reason_code"] = "timeout"
-            else:
-                details["reason_code"] = "http_4xx_or_5xx"
-            return details
+            return self._extract_first_img_src(str(fetched.get("content", "") or ""))
+        except Exception:
+            return ""
+        finally:
+            if post_id:
+                try:
+                    service.posts().delete(blogId=self.blog_id, postId=post_id).execute()
+                except Exception:
+                    pass
 
     def _extract_upload_url_from_response(self, text: str) -> tuple[str, str]:
         raw = str(text or "")
         patterns = [
             r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*blogger\.googleusercontent\.com[^\s\"'<>]*",
             r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*bp\.blogspot\.com[^\s\"'<>]*",
-            r"https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*googleusercontent\.com[^\s\"'<>]*",
         ]
         for pat in patterns:
             m = re.search(pat, raw, flags=re.IGNORECASE)
@@ -1036,7 +993,7 @@ class Publisher:
         except Exception:
             pass
         m = re.search(
-            r"src=[\"'](https://[^\"']*(?:blogger\.googleusercontent\.com|bp\.blogspot\.com|googleusercontent\.com)[^\"']*)[\"']",
+            r"src=[\"'](https://[^\"']*(?:blogger\.googleusercontent\.com|bp\.blogspot\.com)[^\"']*)[\"']",
             raw,
             flags=re.IGNORECASE,
         )
@@ -1058,7 +1015,7 @@ class Publisher:
                     if isinstance(v, str):
                         vv = v.strip()
                         if vv.startswith("https://") and (
-                            "googleusercontent.com" in vv.lower() or "blogspot.com" in vv.lower()
+                            "blogger.googleusercontent.com" in vv.lower() or "bp.blogspot.com" in vv.lower()
                         ):
                             return vv
                         if key in key_hints and vv.startswith("http"):
@@ -1072,7 +1029,7 @@ class Publisher:
                     elif isinstance(item, str):
                         vv = item.strip()
                         if vv.startswith("https://") and (
-                            "googleusercontent.com" in vv.lower() or "blogspot.com" in vv.lower()
+                            "blogger.googleusercontent.com" in vv.lower() or "bp.blogspot.com" in vv.lower()
                         ):
                             return vv
         return ""
@@ -1171,39 +1128,48 @@ class Publisher:
                     )
                     return extracted_url
 
-                # Blogger endpoint can return 405 in some environments; recover via Drive->googleusercontent URL.
-                drive_details = self._upload_via_drive_fallback_detailed(upload_path, upload_mime, creds)
-                drive_url = str(drive_details.get("extracted_url", "") or "").strip()
-                drive_host = str(drive_details.get("extracted_host", "") or "").strip().lower()
-                drive_reason = str(drive_details.get("reason_code", "") or "").strip()
+                # Blogger endpoint may fail in some environments (e.g. 405).
+                # Recovery path must remain Blogger-only: temporary draft roundtrip.
+                roundtrip_url = self._upload_via_temp_draft_roundtrip(upload_path, upload_mime, creds, idx=attempt_no)
+                roundtrip_host = (urlparse(roundtrip_url).netloc or "").lower() if roundtrip_url else ""
                 self._log_thumbnail_gate_event(
                     {
-                        "event": "thumbnail_upload_drive_fallback",
+                        "event": "thumbnail_upload_roundtrip_response",
                         "attempt_no": attempt_no,
-                        "status_code": drive_details.get("status_code", 0),
-                        "response_preview": str(drive_details.get("response_preview", "") or "")[:800],
-                        "extracted_url": drive_url,
-                        "extracted_host": drive_host,
+                        "extracted_url": roundtrip_url,
+                        "extracted_host": roundtrip_host,
                     }
                 )
-                if drive_url and self._is_blogger_media_url(drive_url):
+                if roundtrip_url and self._is_blogger_media_url(roundtrip_url):
                     self._log_thumbnail_gate_event(
                         {
                             "event": "thumbnail_gate_result",
                             "attempt_no": attempt_no,
                             "ok": True,
-                            "reason_code": "drive_fallback",
-                            "thumbnail_url": drive_url,
+                            "reason_code": "draft_roundtrip",
+                            "thumbnail_url": roundtrip_url,
                         }
                     )
-                    return drive_url
+                    return roundtrip_url
+
+                if roundtrip_url and roundtrip_url.strip().lower().startswith("data:image/"):
+                    last_reason = "thumbnail_data_uri_not_allowed"
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "thumbnail_gate_result",
+                            "attempt_no": attempt_no,
+                            "ok": False,
+                            "reason_code": last_reason,
+                        }
+                    )
+                    continue
 
                 if not extracted_url:
-                    last_reason = drive_reason or reason_code or "missing_extracted_url"
+                    last_reason = reason_code or "missing_extracted_url"
                 elif extracted_host and (not self._is_blogger_media_url(extracted_url)):
-                    last_reason = drive_reason or "non_blogger_host"
+                    last_reason = "non_blogger_host"
                 else:
-                    last_reason = drive_reason or reason_code or "response_parse_failed"
+                    last_reason = reason_code or "response_parse_failed"
 
                 self._log_thumbnail_gate_event(
                     {
@@ -1297,11 +1263,7 @@ class Publisher:
                 or str(s).strip().lower().startswith("http://")
             )
         ]
-        valid_data_src = [
-            s for s in src_values
-            if str(s).strip().lower().startswith("data:image/")
-        ]
-        if len(valid_http_src) + len(valid_data_src) < 2:
+        if len(valid_http_src) < 2:
             self._log_upload_event(
                 {
                     "event": "go_live_gate_fail",
@@ -1317,7 +1279,7 @@ class Publisher:
                     "post_id": pid,
                     "img_count": len(src_values),
                     "valid_http_src_count": len(valid_http_src),
-                    "valid_data_src_count": len(valid_data_src),
+                    "valid_data_src_count": 0,
                     "title": str(post.get("title", "") or "")[:180],
                     "content_preview": content[:500],
                 }
@@ -1328,6 +1290,8 @@ class Publisher:
             min_images=2,
             require_no_figcaption=True,
             strict_intro_alt=True,
+            allow_data_uri=False,
+            require_blogger_hosts=True,
         )
 
     def _log_upload_event(self, payload: dict) -> None:
@@ -1448,8 +1412,6 @@ class Publisher:
         allow = (
             "blogger.googleusercontent.com",
             "bp.blogspot.com",
-            "lh3.googleusercontent.com",
-            "lh4.googleusercontent.com",
         )
         return any(host.endswith(h) for h in allow)
 
@@ -1770,20 +1732,27 @@ class Publisher:
         min_images: int = 1,
         require_no_figcaption: bool = True,
         strict_intro_alt: bool = True,
+        allow_data_uri: bool = True,
+        require_blogger_hosts: bool = False,
     ) -> None:
         content = str(html or "")
         if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", content):
             raise RuntimeError("publish failed - markdown_heading_detected")
         src_values = re.findall(r"<img\b[^>]*\bsrc=\"([^\"]+)\"", content, flags=re.IGNORECASE)
-        valid_src = [
-            s for s in src_values
-            if str(s).strip()
-            and (
-                str(s).strip().lower().startswith("https://")
-                or str(s).strip().lower().startswith("http://")
-                or str(s).strip().lower().startswith("data:image/")
-            )
-        ]
+        valid_src: list[str] = []
+        for src in src_values:
+            s = str(src or "").strip()
+            if not s:
+                continue
+            lower = s.lower()
+            if lower.startswith("data:image/"):
+                if allow_data_uri:
+                    valid_src.append(s)
+                continue
+            if lower.startswith("https://") or lower.startswith("http://"):
+                if require_blogger_hosts and (not self._is_blogger_media_url(s)):
+                    raise RuntimeError(f"publish failed - non_blogger_image_host:{(urlparse(s).netloc or '').lower()}")
+                valid_src.append(s)
         if len(valid_src) < max(1, int(min_images)):
             raise RuntimeError(f"publish failed - missing images ({len(valid_src)}/{int(min_images)})")
         if require_no_figcaption and re.search(r"<figcaption\b", content, flags=re.IGNORECASE):
@@ -1832,96 +1801,6 @@ class Publisher:
             "which",
         }
         return {t for t in tokens if t not in stop}
-
-    def _upload_images_to_drive(self, images: list[ImageAsset], creds) -> dict[str, str]:
-        drive = build("drive", "v3", credentials=creds)
-        hosted: dict[str, str] = {}
-        for image in images:
-            path = image.path
-            if not path.exists():
-                continue
-            mime, _ = mimetypes.guess_type(path.name)
-            mime = mime or "image/png"
-            media = MediaFileUpload(str(path), mimetype=mime, resumable=False)
-            body = {"name": path.name, "mimeType": mime}
-            try:
-                created = drive.files().create(body=body, media_body=media, fields="id").execute()
-                file_id = str(created.get("id", "")).strip()
-                if not file_id:
-                    continue
-                drive.permissions().create(
-                    fileId=file_id,
-                    body={"type": "anyone", "role": "reader"},
-                ).execute()
-                # Chrome ORB can block drive.google.com/uc hotlinks inside <img>.
-                # Use lh3.googleusercontent direct render URL to keep Blogger embeds stable.
-                hosted[str(path)] = f"https://lh3.googleusercontent.com/d/{file_id}=w1600"
-            except Exception:
-                continue
-        return hosted
-
-    def _upload_images_to_photos(self, images: list[ImageAsset], creds) -> dict[str, str]:
-        scopes = self._token_scopes(creds)
-        if not any("photoslibrary" in s for s in scopes):
-            return {}
-
-        hosted: dict[str, str] = {}
-        for image in images:
-            path = image.path
-            if not path.exists():
-                continue
-            mime, _ = mimetypes.guess_type(path.name)
-            mime = mime or "image/png"
-            upload_token = ""
-            try:
-                with path.open("rb") as fh:
-                    up = requests.post(
-                        "https://photoslibrary.googleapis.com/v1/uploads",
-                        headers={
-                            "Authorization": f"Bearer {creds.token}",
-                            "Content-type": "application/octet-stream",
-                            "X-Goog-Upload-Protocol": "raw",
-                            "X-Goog-Upload-File-Name": path.name,
-                        },
-                        data=fh.read(),
-                        timeout=90,
-                    )
-                if up.status_code != 200:
-                    continue
-                upload_token = (up.text or "").strip()
-                if not upload_token:
-                    continue
-                meta = {
-                    "newMediaItems": [
-                        {
-                            "description": f"RezeroAgent asset {path.name}",
-                            "simpleMediaItem": {"uploadToken": upload_token},
-                        }
-                    ]
-                }
-                cr = requests.post(
-                    "https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate",
-                    headers={
-                        "Authorization": f"Bearer {creds.token}",
-                        "Content-Type": "application/json",
-                    },
-                    json=meta,
-                    timeout=90,
-                )
-                if cr.status_code != 200:
-                    continue
-                payload = cr.json() or {}
-                rows = payload.get("newMediaItemResults", []) or []
-                if not rows:
-                    continue
-                item = (rows[0] or {}).get("mediaItem", {}) or {}
-                base = str(item.get("baseUrl", "")).strip()
-                if not base:
-                    continue
-                hosted[str(path)] = f"{base}=w1600-h900"
-            except Exception:
-                continue
-        return hosted
 
     def _token_scopes(self, creds) -> list[str]:
         scope_raw = getattr(creds, "scopes", None)

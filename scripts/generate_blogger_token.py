@@ -14,8 +14,6 @@ def main() -> None:
         str(CLIENT_SECRET),
         scopes=[
             "https://www.googleapis.com/auth/blogger",
-            "https://www.googleapis.com/auth/photoslibrary.appendonly",
-            "https://www.googleapis.com/auth/photoslibrary.sharing",
         ],
     )
     creds = flow.run_local_server(port=0)

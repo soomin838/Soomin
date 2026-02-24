@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 from html import escape, unescape
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 from zoneinfo import ZoneInfo
 
 from .brain import DraftPost, GeminiBrain
@@ -2984,6 +2984,28 @@ class AgentWorkflow:
         html_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", str(gate_html or final_html or ""), flags=re.IGNORECASE))
         if html_img_count < 2:
             errors.append(f"insufficient_html_images({html_img_count}/2)")
+        # Enforce Blogger-media-only image hosts in production mode.
+        html_for_hosts = str(gate_html or final_html or "")
+        src_matches = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_for_hosts, flags=re.IGNORECASE)
+        allow_hosts = {"blogger.googleusercontent.com", "bp.blogspot.com"}
+        dry_run = bool(getattr(self.settings.budget, "dry_run", False))
+        allow_data_uri = bool(getattr(self.settings.publish, "thumbnail_data_uri_allowed", False)) or dry_run
+        for src in src_matches:
+            clean_src = str(src or "").strip()
+            if not clean_src:
+                errors.append("image_src_empty")
+                continue
+            lower_src = clean_src.lower()
+            if lower_src.startswith("data:image/"):
+                if not allow_data_uri:
+                    errors.append("thumbnail_data_uri_not_allowed")
+                continue
+            host = (urlparse(clean_src).netloc or "").lower()
+            if not host:
+                errors.append("image_host_missing")
+                continue
+            if not any(host.endswith(h) for h in allow_hosts):
+                errors.append(f"non_blogger_host:{host}")
 
         # Troubleshooting title quality check.
         title_lower = str(title or "").lower()

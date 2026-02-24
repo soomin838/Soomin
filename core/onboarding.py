@@ -230,7 +230,6 @@ def gui_setup(path: Path, force: bool = False) -> bool:
                 str(client_secret),
                 scopes=[
                     "https://www.googleapis.com/auth/blogger",
-                    "https://www.googleapis.com/auth/drive.file",
                     "https://www.googleapis.com/auth/indexing",
                     "https://www.googleapis.com/auth/adsense.readonly",
                     "https://www.googleapis.com/auth/analytics.readonly",
