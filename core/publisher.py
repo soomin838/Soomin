@@ -967,6 +967,56 @@ class Publisher:
         self._log_upload_event({"event": "blogger_media_upload_no_url", "parse_source": parse_source, **details})
         return details
 
+    def _upload_via_drive_fallback_detailed(self, path: Path, mime: str, creds) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "endpoint": "drive.files.create",
+            "file": str(getattr(path, "name", "")),
+            "mime": str(mime or ""),
+            "status_code": 0,
+            "response_preview": "",
+            "extracted_url": "",
+            "extracted_host": "",
+            "reason_code": "",
+            "ok": False,
+        }
+        try:
+            self._ensure_valid_token(creds)
+            drive = build("drive", "v3", credentials=creds)
+            media = MediaFileUpload(str(path), mimetype=mime or "image/png", resumable=False)
+            created = drive.files().create(
+                body={"name": path.name, "mimeType": mime or "image/png"},
+                media_body=media,
+                fields="id",
+            ).execute()
+            file_id = str((created or {}).get("id", "") or "").strip()
+            if not file_id:
+                details["reason_code"] = "response_parse_failed"
+                return details
+            drive.permissions().create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"},
+            ).execute()
+            url = f"https://lh3.googleusercontent.com/d/{file_id}=w1600"
+            details["ok"] = True
+            details["status_code"] = 200
+            details["extracted_url"] = url
+            details["extracted_host"] = (urlparse(url).netloc or "").lower()
+            return details
+        except Exception as exc:
+            msg = str(exc or "")
+            details["status_code"] = "exception"
+            details["response_preview"] = msg[:800]
+            lower = msg.lower()
+            if "invalid_scope" in lower or "insufficientpermission" in lower:
+                details["reason_code"] = "invalid_scope"
+            elif "storagequotaexceeded" in lower or "quota has been exceeded" in lower:
+                details["reason_code"] = "drive_storage_quota_exceeded"
+            elif "timeout" in lower:
+                details["reason_code"] = "timeout"
+            else:
+                details["reason_code"] = "http_4xx_or_5xx"
+            return details
+
     def _extract_upload_url_from_response(self, text: str) -> tuple[str, str]:
         raw = str(text or "")
         patterns = [
@@ -1121,12 +1171,39 @@ class Publisher:
                     )
                     return extracted_url
 
+                # Blogger endpoint can return 405 in some environments; recover via Drive->googleusercontent URL.
+                drive_details = self._upload_via_drive_fallback_detailed(upload_path, upload_mime, creds)
+                drive_url = str(drive_details.get("extracted_url", "") or "").strip()
+                drive_host = str(drive_details.get("extracted_host", "") or "").strip().lower()
+                drive_reason = str(drive_details.get("reason_code", "") or "").strip()
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_upload_drive_fallback",
+                        "attempt_no": attempt_no,
+                        "status_code": drive_details.get("status_code", 0),
+                        "response_preview": str(drive_details.get("response_preview", "") or "")[:800],
+                        "extracted_url": drive_url,
+                        "extracted_host": drive_host,
+                    }
+                )
+                if drive_url and self._is_blogger_media_url(drive_url):
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "thumbnail_gate_result",
+                            "attempt_no": attempt_no,
+                            "ok": True,
+                            "reason_code": "drive_fallback",
+                            "thumbnail_url": drive_url,
+                        }
+                    )
+                    return drive_url
+
                 if not extracted_url:
-                    last_reason = reason_code or "missing_extracted_url"
+                    last_reason = drive_reason or reason_code or "missing_extracted_url"
                 elif extracted_host and (not self._is_blogger_media_url(extracted_url)):
-                    last_reason = "non_blogger_host"
+                    last_reason = drive_reason or "non_blogger_host"
                 else:
-                    last_reason = reason_code or "response_parse_failed"
+                    last_reason = drive_reason or reason_code or "response_parse_failed"
 
                 self._log_thumbnail_gate_event(
                     {
@@ -1371,6 +1448,8 @@ class Publisher:
         allow = (
             "blogger.googleusercontent.com",
             "bp.blogspot.com",
+            "lh3.googleusercontent.com",
+            "lh4.googleusercontent.com",
         )
         return any(host.endswith(h) for h in allow)
 
