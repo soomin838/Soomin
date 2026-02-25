@@ -31,6 +31,7 @@ class PipelineCanvas(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255, 64))
         p.drawRoundedRect(QRectF(2, 2, w - 4, h - 4), 18, 18)
+
         stages = ["Source", "Draft", "Story", "SEO", "Image", "HTML", "Publish"]
         xs = [18 + int(i * (w - 36) / (len(stages) - 1)) for i in range(len(stages))]
         y = int(h * 0.48)

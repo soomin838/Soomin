@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFontMetrics
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ui.widgets.motion_button import MotionButton
 
@@ -17,22 +17,29 @@ class TopNav(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("TopNav")
-        self.setMinimumHeight(96)
+        self.setMinimumHeight(108)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(16, 12, 16, 12)
+        row.setContentsMargins(16, 14, 16, 14)
         row.setSpacing(10)
 
         brand = QVBoxLayout()
+        brand.setContentsMargins(0, 2, 0, 2)
         brand.setSpacing(2)
         self.title_label = QLabel("RezeroAgent")
         self.title_label.setObjectName("Title")
         self.title_label.setWordWrap(False)
+        self.title_label.setMinimumHeight(34)
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.blog_name = QLabel("블로그: -")
         self.blog_name.setObjectName("Subtitle")
         self.blog_name.setWordWrap(False)
+        self.blog_name.setMinimumHeight(20)
+        self.blog_name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.mascot_state = QLabel("◕‿◕")
         self.mascot_state.setObjectName("Subtitle")
+        self.mascot_state.setMinimumHeight(20)
+        self.mascot_state.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         mascot_row = QHBoxLayout()
         mascot_row.setContentsMargins(0, 0, 0, 0)
@@ -44,6 +51,8 @@ class TopNav(QWidget):
         self.sub_label = QLabel("macOS 글래스 감성 자동화 스튜디오")
         self.sub_label.setObjectName("Subtitle")
         self.sub_label.setWordWrap(False)
+        self.sub_label.setMinimumHeight(20)
+        self.sub_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         brand.addWidget(self.title_label)
         brand.addLayout(mascot_row)
         brand.addWidget(self.sub_label)
@@ -126,10 +135,11 @@ class TopNav(QWidget):
         if compact != self._compact:
             self._compact = compact
             self.sub_label.setVisible(not compact)
+            self.mascot_state.setVisible(not compact)
             self.help_btn.setText("도움" if compact else "도움말")
             self.refresh_btn.setText("새로" if compact else "새로고침")
             self.theme_toggle_btn.setText("테마" if compact else "라이트/다크")
-            self.setMinimumHeight(84 if compact else 96)
+            self.setMinimumHeight(92 if compact else 108)
         self._apply_blog_elide()
 
     def _apply_blog_elide(self) -> None:

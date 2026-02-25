@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QHBoxLayout, QVBoxLayout, QWidget
 
 from ui.widgets.glass_card import GlassCard
@@ -17,9 +18,10 @@ class TimelineStep(GlassCard):
         top = QHBoxLayout()
         self.title_label = QLabel(f"{icon} {title}".strip())
         self.title_label.setObjectName("Subtitle")
-        self.title_label.setWordWrap(False)
+        self.title_label.setWordWrap(True)
         self.badge = QLabel("pending")
         self.badge.setObjectName("Badge")
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         top.addWidget(self.title_label, 1)
         top.addWidget(self.badge, 0)
         self.message_label = QLabel("-")
@@ -27,7 +29,7 @@ class TimelineStep(GlassCard):
         self.message_label.setWordWrap(True)
         root.addLayout(top)
         root.addWidget(self.message_label)
-        self.setMinimumHeight(76)
+        self.setMinimumHeight(88)
 
     def set_status(self, status: str, message: str = "") -> None:
         next_status = str(status or "pending").strip().lower()

@@ -11,9 +11,11 @@ from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSequential
 from PySide6.QtGui import QBrush, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -134,7 +137,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("RezeroAgent Studio")
         self.resize(1360, 900)
-        self.setMinimumSize(1080, 700)
+        self.setMinimumSize(980, 660)
         self._apply_cute_font()
         self._build_ui()
         self._bind_top_nav()
@@ -178,7 +181,7 @@ class MainWindow(QMainWindow):
                     candidate = QFont(fams[0], 10)
                     metrics = QFontMetrics(candidate)
                     # Guard against decorative fonts causing clipped text on compact layouts.
-                    if metrics.height() <= 22:
+                    if metrics.height() <= 18 and metrics.lineSpacing() <= 19:
                         loaded_family = fams[0]
                         break
         app.setFont(QFont(loaded_family, 10))
@@ -194,12 +197,13 @@ class MainWindow(QMainWindow):
         self.top_nav.set_theme_mode(self.theme_manager.mode)
         root.addWidget(self.top_nav)
 
-        content_row = QHBoxLayout()
-        content_row.setSpacing(10)
-        root.addLayout(content_row, 5)
+        self.content_row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.content_row.setSpacing(10)
+        root.addLayout(self.content_row, 5)
 
         # Left column
         left = QWidget()
+        left.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         left_col = QVBoxLayout(left)
         left_col.setContentsMargins(0, 0, 0, 0)
         left_col.setSpacing(10)
@@ -223,6 +227,7 @@ class MainWindow(QMainWindow):
         hero_title.setObjectName("Subtitle")
         self.hero_stage = QLabel("대기")
         self.hero_stage.setObjectName("Title")
+        self.hero_stage.setWordWrap(True)
         self.hero_task = QLabel("작업 준비 중")
         self.hero_task.setObjectName("ValueSmall")
         self.hero_task.setWordWrap(True)
@@ -276,10 +281,12 @@ class MainWindow(QMainWindow):
         self.timeline_card.setMinimumHeight(290)
         left_col.addWidget(self.timeline_card, 4)
 
-        content_row.addWidget(left, 3)
+        self.left_col_widget = left
+        self.content_row.addWidget(left, 3)
 
         # Right column
         right = QWidget()
+        right.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         right_col = QVBoxLayout(right)
         right_col.setContentsMargins(0, 0, 0, 0)
         right_col.setSpacing(10)
@@ -337,7 +344,8 @@ class MainWindow(QMainWindow):
         self.schedule_panel.setMinimumHeight(180)
         right_col.addWidget(self.schedule_panel, 3)
 
-        content_row.addWidget(right, 2)
+        self.right_col_widget = right
+        self.content_row.addWidget(right, 2)
 
         # Bottom bar
         self.bottom_bar = GlassCard()
@@ -366,17 +374,43 @@ class MainWindow(QMainWindow):
         self.log_panel = LogPanel()
         root.addWidget(self.log_panel, 2)
 
-        self.setCentralWidget(self.app_root)
+        self.root_scroll = QScrollArea(self)
+        self.root_scroll.setWidgetResizable(True)
+        self.root_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.root_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.root_scroll.setWidget(self.app_root)
+        self.setCentralWidget(self.root_scroll)
 
         self.toast_manager = ToastManager(self.app_root, self.open_logs_dialog)
         self.toast_manager.resize(380, 260)
+        self._apply_responsive_layout()
         self._position_toast_layer()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._apply_responsive_layout()
         self._position_toast_layer()
         self._relayout_timeline_steps()
         self._bg_apply_timer.start(80)
+
+    def _apply_responsive_layout(self) -> None:
+        if not hasattr(self, "content_row"):
+            return
+        width = max(1, self.app_root.width())
+        stacked = width < 1260
+        target_dir = QBoxLayout.Direction.TopToBottom if stacked else QBoxLayout.Direction.LeftToRight
+        if self.content_row.direction() != target_dir:
+            self.content_row.setDirection(target_dir)
+        if stacked:
+            self.content_row.setStretch(0, 0)
+            self.content_row.setStretch(1, 0)
+            self.left_col_widget.setMinimumWidth(0)
+            self.right_col_widget.setMinimumWidth(0)
+        else:
+            self.content_row.setStretch(0, 3)
+            self.content_row.setStretch(1, 2)
+            self.left_col_widget.setMinimumWidth(0)
+            self.right_col_widget.setMinimumWidth(420)
 
     def _position_toast_layer(self) -> None:
         if not hasattr(self, "toast_manager"):
@@ -725,29 +759,20 @@ class MainWindow(QMainWindow):
         return "[오류]" in lower or " error:" in lower or "failed" in lower or "exception" in lower
 
     def _animate_intro(self) -> None:
-        widgets = [
-            self.top_nav,
-            self.hero_card,
-            self.timeline_card,
-            self.error_panel,
-            self.usage_panel,
-            self.schedule_panel,
-            self.bottom_bar,
-            self.log_panel,
-        ]
-        for idx, w in enumerate(widgets):
-            if self.animation_intensity == "off":
-                continue
-            start = w.pos() + QPoint(0, 12)
-            end = w.pos()
-            w.move(start)
-            anim = QPropertyAnimation(w, b"pos", self)
-            anim.setDuration(180 + (idx * 24 if self.animation_intensity == "high" else idx * 16))
-            anim.setStartValue(start)
-            anim.setEndValue(end)
-            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            anim.start()
-            self._animations.append(anim)
+        if self.animation_intensity == "off":
+            return
+        # Layout-managed widgets must not be moved directly; opacity-only intro avoids overlap/clipping.
+        fx = QGraphicsOpacityEffect(self.app_root)
+        self.app_root.setGraphicsEffect(fx)
+        fx.setOpacity(0.0)
+        anim = QPropertyAnimation(fx, b"opacity", self)
+        anim.setDuration(220 if self.animation_intensity == "medium" else 320)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(lambda: self.app_root.setGraphicsEffect(None))
+        anim.start()
+        self._animations.append(anim)
 
     def _shake_widget(self, widget: QWidget) -> None:
         if self.animation_intensity == "off":
