@@ -6,6 +6,7 @@ import base64
 import html as html_lib
 import tempfile
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -944,6 +945,15 @@ class Publisher:
         return details
 
     def _upload_via_temp_draft_roundtrip(self, path: Path, mime: str, creds, idx: int = 1) -> str:
+        """
+        Recovery path when upload-image.g fails.
+        Strategy:
+          1) create temp draft with data URI
+          2) publish it (forces Blogger to materialize image into CDN URL)
+          3) refetch post content and extract first <img src>
+          4) delete temp post
+        Returns Blogger media URL only, otherwise "".
+        """
         service = build("blogger", "v3", credentials=creds)
         post_id = ""
         try:
@@ -960,12 +970,31 @@ class Publisher:
             post_id = str(draft.get("id", "") or "")
             if not post_id:
                 return ""
-            fetched = service.posts().get(
-                blogId=self.blog_id,
-                postId=post_id,
-                view="ADMIN",
-            ).execute()
-            return self._extract_first_img_src(str(fetched.get("content", "") or ""))
+
+            # Publish to force Blogger CDN rewrite.
+            try:
+                service.posts().publish(
+                    blogId=self.blog_id,
+                    postId=post_id,
+                ).execute()
+            except Exception:
+                pass
+
+            # Retry fetch a few times until src is rewritten from data-uri to Blogger CDN.
+            for _ in range(3):
+                try:
+                    fetched = service.posts().get(
+                        blogId=self.blog_id,
+                        postId=post_id,
+                        view="ADMIN",
+                    ).execute()
+                    src = self._extract_first_img_src(str(fetched.get("content", "") or ""))
+                    if src and self._is_blogger_media_url(src):
+                        return src
+                except Exception:
+                    pass
+                time.sleep(0.9)
+            return ""
         except Exception:
             return ""
         finally:
@@ -1130,6 +1159,39 @@ class Publisher:
 
                 # Blogger endpoint may fail in some environments (e.g. 405).
                 # Recovery path must remain Blogger-only.
+                roundtrip_url = self._upload_via_temp_draft_roundtrip(upload_path, upload_mime, creds, idx=attempt_no)
+                roundtrip_host = (urlparse(roundtrip_url).netloc or "").lower() if roundtrip_url else ""
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_upload_roundtrip_response",
+                        "attempt_no": attempt_no,
+                        "extracted_url": roundtrip_url,
+                        "extracted_host": roundtrip_host,
+                    }
+                )
+                if roundtrip_url and self._is_blogger_media_url(roundtrip_url):
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "thumbnail_gate_result",
+                            "attempt_no": attempt_no,
+                            "ok": True,
+                            "reason_code": "temp_post_publish_roundtrip",
+                            "thumbnail_url": roundtrip_url,
+                        }
+                    )
+                    return roundtrip_url
+                if roundtrip_url and str(roundtrip_url).strip().lower().startswith("data:image/"):
+                    last_reason = "thumbnail_data_uri_not_allowed"
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "thumbnail_gate_result",
+                            "attempt_no": attempt_no,
+                            "ok": False,
+                            "reason_code": last_reason,
+                        }
+                    )
+                    continue
+
                 if not extracted_url:
                     last_reason = reason_code or "missing_extracted_url"
                 elif extracted_host and (not self._is_blogger_media_url(extracted_url)):
