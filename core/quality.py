@@ -1141,6 +1141,11 @@ class ContentQAGate:
         path = self.qa_timing_path
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            top3 = sorted(
+                [(str(k), int(max(0, int(v)))) for k, v in (breakdown_ms or {}).items()],
+                key=lambda kv: kv[1],
+                reverse=True,
+            )[:3]
             row = {
                 "ts_utc": datetime.now(timezone.utc).isoformat(),
                 "run_id": str(run_id or "").strip(),
@@ -1150,6 +1155,8 @@ class ContentQAGate:
                 "qa_mode": str(qa_mode or "quick").strip().lower(),
                 "total_ms": int(max(0, total_ms)),
                 "breakdown_ms": {str(k): int(max(0, int(v))) for k, v in (breakdown_ms or {}).items()},
+                "is_slow": bool(int(max(0, total_ms)) >= 2000),
+                "top3_slowest": [{"check": k, "ms": int(v)} for k, v in top3],
                 "passed": bool(passed),
                 "hard_failures": [str(x) for x in (hard_failures or [])][:20],
             }

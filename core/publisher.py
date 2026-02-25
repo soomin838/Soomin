@@ -1129,13 +1129,7 @@ class Publisher:
                     return extracted_url
 
                 # Blogger endpoint may fail in some environments (e.g. 405).
-                # Recovery path must remain Blogger-only: temporary draft roundtrip.
-        roundtrip_url = ""
-        roundtrip_host = ""
-
-
-      
-
+                # Recovery path must remain Blogger-only.
                 if not extracted_url:
                     last_reason = reason_code or "missing_extracted_url"
                 elif extracted_host and (not self._is_blogger_media_url(extracted_url)):

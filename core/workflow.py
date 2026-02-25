@@ -5,6 +5,7 @@ import re
 import random
 import time
 import threading
+import uuid
 from dataclasses import dataclass
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -140,17 +141,232 @@ class AgentWorkflow:
         self._local_llm_used_last_run = False
         self._posts_index_bootstrap_started = False
         self._posts_index_bootstrap_done = False
+        self._workflow_perf_path = self.root / "storage" / "logs" / "workflow_perf.jsonl"
+        self._workflow_perf_run_id = ""
+        self._workflow_perf_run_started_mono = 0.0
+        self._workflow_perf_current_phase = ""
+        self._workflow_perf_phase_started_mono = 0.0
+        self._workflow_perf_phase_last_message = ""
+        self._workflow_perf_phase_last_percent = 0
+        self._workflow_perf_last_heartbeat_mono = 0.0
+        self._workflow_perf_slow_phase_threshold_ms = 5000
+        self._workflow_perf_slow_call_threshold_ms = 2500
+        self._workflow_perf_heartbeat_sec = 20.0
+        self._workflow_perf_phase_count = 0
+        self._workflow_perf_slow_phases: list[dict[str, Any]] = []
         self._start_posts_index_bootstrap()
 
     def set_progress_hook(self, hook) -> None:
         self._progress_hook = hook
 
     def _progress(self, phase: str, message: str, percent: int = 0) -> None:
+        phase_key = str(phase or "idle").strip() or "idle"
+        phase_msg = str(message or "").strip()
+        phase_pct = max(0, min(100, int(percent)))
+        self._workflow_perf_track_progress(phase=phase_key, message=phase_msg, percent=phase_pct)
         try:
             if callable(self._progress_hook):
-                self._progress_hook(phase, message, max(0, min(100, int(percent))))
+                self._progress_hook(phase_key, phase_msg, phase_pct)
         except Exception:
             pass
+
+    def _append_workflow_perf(self, event: str, payload: dict[str, Any] | None = None) -> None:
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "event": str(event or "").strip(),
+            "run_id": str(self._workflow_perf_run_id or "").strip(),
+        }
+        row.update(dict(payload or {}))
+        try:
+            self._workflow_perf_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._workflow_perf_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _workflow_perf_start_run(self, manual_trigger: bool = False) -> None:
+        if self._workflow_perf_run_id:
+            # Close any stale run from an abnormal termination path.
+            self._workflow_perf_finish_run(status="aborted", message="stale_run_closed_on_next_start")
+        self._workflow_perf_run_id = uuid.uuid4().hex[:12]
+        self._workflow_perf_run_started_mono = time.perf_counter()
+        self._workflow_perf_current_phase = ""
+        self._workflow_perf_phase_started_mono = 0.0
+        self._workflow_perf_phase_last_message = ""
+        self._workflow_perf_phase_last_percent = 0
+        self._workflow_perf_last_heartbeat_mono = 0.0
+        self._workflow_perf_phase_count = 0
+        self._workflow_perf_slow_phases = []
+        self._append_workflow_perf(
+            "run_start",
+            {
+                "manual_trigger": bool(manual_trigger),
+                "qa_mode": str(getattr(self.settings.quality, "qa_mode", "quick") or "quick"),
+                "target_images_per_post": int(getattr(self.settings.visual, "target_images_per_post", 2) or 2),
+            },
+        )
+
+    def _workflow_perf_close_phase(self, now_mono: float, reason: str) -> None:
+        phase = str(self._workflow_perf_current_phase or "").strip()
+        if not phase:
+            return
+        elapsed_ms = int(max(0.0, now_mono - float(self._workflow_perf_phase_started_mono or now_mono)) * 1000)
+        slow = elapsed_ms >= int(self._workflow_perf_slow_phase_threshold_ms)
+        payload = {
+            "phase": phase,
+            "duration_ms": int(elapsed_ms),
+            "reason": str(reason or "phase_change"),
+            "last_message": str(self._workflow_perf_phase_last_message or ""),
+            "last_percent": int(self._workflow_perf_phase_last_percent or 0),
+            "slow": bool(slow),
+        }
+        self._append_workflow_perf("phase_end", payload)
+        if slow:
+            self._workflow_perf_slow_phases.append(
+                {"phase": phase, "duration_ms": int(elapsed_ms), "reason": str(reason or "phase_change")}
+            )
+        self._workflow_perf_current_phase = ""
+        self._workflow_perf_phase_started_mono = 0.0
+        self._workflow_perf_phase_last_message = ""
+        self._workflow_perf_phase_last_percent = 0
+
+    def _workflow_perf_track_progress(self, phase: str, message: str, percent: int) -> None:
+        if not self._workflow_perf_run_id:
+            return
+        now_mono = time.perf_counter()
+        phase_key = str(phase or "idle").strip() or "idle"
+        msg = str(message or "").strip()
+        pct = max(0, min(100, int(percent or 0)))
+
+        if not self._workflow_perf_current_phase:
+            self._workflow_perf_current_phase = phase_key
+            self._workflow_perf_phase_started_mono = now_mono
+            self._workflow_perf_phase_last_message = msg
+            self._workflow_perf_phase_last_percent = pct
+            self._workflow_perf_last_heartbeat_mono = now_mono
+            self._workflow_perf_phase_count += 1
+            self._append_workflow_perf(
+                "phase_start",
+                {"phase": phase_key, "message": msg, "percent": pct},
+            )
+            return
+
+        if phase_key != self._workflow_perf_current_phase:
+            self._workflow_perf_close_phase(now_mono, reason="phase_change")
+            self._workflow_perf_current_phase = phase_key
+            self._workflow_perf_phase_started_mono = now_mono
+            self._workflow_perf_phase_last_message = msg
+            self._workflow_perf_phase_last_percent = pct
+            self._workflow_perf_last_heartbeat_mono = now_mono
+            self._workflow_perf_phase_count += 1
+            self._append_workflow_perf(
+                "phase_start",
+                {"phase": phase_key, "message": msg, "percent": pct},
+            )
+            return
+
+        changed = (msg != self._workflow_perf_phase_last_message) or (pct != self._workflow_perf_phase_last_percent)
+        if changed and (now_mono - self._workflow_perf_last_heartbeat_mono) >= float(self._workflow_perf_heartbeat_sec):
+            elapsed_ms = int(max(0.0, now_mono - float(self._workflow_perf_phase_started_mono or now_mono)) * 1000)
+            self._append_workflow_perf(
+                "phase_heartbeat",
+                {
+                    "phase": phase_key,
+                    "elapsed_ms": elapsed_ms,
+                    "message": msg,
+                    "percent": pct,
+                },
+            )
+            self._workflow_perf_last_heartbeat_mono = now_mono
+
+        self._workflow_perf_phase_last_message = msg
+        self._workflow_perf_phase_last_percent = pct
+
+    def _workflow_perf_finish_run(self, status: str, message: str = "") -> None:
+        if not self._workflow_perf_run_id:
+            return
+        now_mono = time.perf_counter()
+        self._workflow_perf_close_phase(now_mono, reason="run_end")
+        total_ms = int(max(0.0, now_mono - float(self._workflow_perf_run_started_mono or now_mono)) * 1000)
+        self._append_workflow_perf(
+            "run_end",
+            {
+                "status": str(status or "unknown").strip() or "unknown",
+                "message": str(message or "")[:260],
+                "total_ms": int(total_ms),
+                "phase_count": int(self._workflow_perf_phase_count or 0),
+                "slow_phase_count": int(len(self._workflow_perf_slow_phases)),
+                "slow_phases": list(self._workflow_perf_slow_phases[:8]),
+            },
+        )
+        self._workflow_perf_run_id = ""
+        self._workflow_perf_run_started_mono = 0.0
+        self._workflow_perf_current_phase = ""
+        self._workflow_perf_phase_started_mono = 0.0
+        self._workflow_perf_phase_last_message = ""
+        self._workflow_perf_phase_last_percent = 0
+        self._workflow_perf_last_heartbeat_mono = 0.0
+        self._workflow_perf_phase_count = 0
+        self._workflow_perf_slow_phases = []
+
+    def _profile_call(
+        self,
+        stage: str,
+        fn,
+        *,
+        slow_ms: int | None = None,
+        meta: dict[str, Any] | None = None,
+    ):
+        stage_name = str(stage or "stage").strip() or "stage"
+        threshold = int(slow_ms if slow_ms is not None else self._workflow_perf_slow_call_threshold_ms)
+        self._append_workflow_perf("stage_start", {"stage": stage_name, **dict(meta or {})})
+        started = time.perf_counter()
+        ok = False
+        error_summary = ""
+        try:
+            value = fn()
+            ok = True
+            return value
+        except Exception as exc:
+            error_summary = str(exc or "")[:260]
+            raise
+        finally:
+            elapsed = int(max(0.0, time.perf_counter() - started) * 1000)
+            payload = {
+                "stage": stage_name,
+                "elapsed_ms": int(elapsed),
+                "ok": bool(ok),
+                "slow": bool(elapsed >= threshold),
+            }
+            payload.update(dict(meta or {}))
+            if error_summary:
+                payload["error"] = error_summary
+            self._append_workflow_perf("stage_end", payload)
+
+    def _qa_evaluate(
+        self,
+        html: str,
+        *,
+        title: str = "",
+        domain: str = "tech_troubleshoot",
+        keyword: str = "",
+        context: str = "qa",
+    ):
+        return self._profile_call(
+            stage=f"qa_evaluate:{context}",
+            fn=lambda: self.qa.evaluate(
+                html,
+                title=title,
+                domain=domain,
+                keyword=keyword,
+            ),
+            slow_ms=1200,
+            meta={
+                "domain": str(domain or ""),
+                "keyword": str(keyword or "")[:120],
+                "title": str(title or "")[:120],
+            },
+        )
 
     def _reset_local_llm_budget(self) -> None:
         self._local_llm_calls_in_post = 0
@@ -626,6 +842,7 @@ class AgentWorkflow:
         return f"sync_with_blogger={status or 'unknown'}"
 
     def run_once(self, manual_trigger: bool = False) -> WorkflowResult:
+        self._workflow_perf_start_run(manual_trigger=bool(manual_trigger))
         self._set_image_pipeline_state(
             "idle",
             0,
@@ -637,10 +854,23 @@ class AgentWorkflow:
         partial_fix_count = 0
         today_gemini_before = int(self.logs.get_today_gemini_count())
         self._progress("preflight", "실행 조건 확인 중", 2)
-        sync_note = self._sync_posts_index_with_blogger(force=bool(manual_trigger))
-        blog_snapshot = self._blog_snapshot(force_refresh=True)
+        sync_note = self._profile_call(
+            "sync_with_blogger",
+            lambda: self._sync_posts_index_with_blogger(force=bool(manual_trigger)),
+            slow_ms=1500,
+            meta={"manual_trigger": bool(manual_trigger)},
+        )
+        blog_snapshot = self._profile_call(
+            "blog_snapshot_refresh",
+            lambda: self._blog_snapshot(force_refresh=True),
+            slow_ms=1800,
+        )
         snapshot_source = str(blog_snapshot.get("source", "local"))
-        preflight_index_note = self._preflight_recent_index_sync()
+        preflight_index_note = self._profile_call(
+            "preflight_index_sync",
+            self._preflight_recent_index_sync,
+            slow_ms=2000,
+        )
         budget = self.guard.can_run(
             today_posts=(
                 int(blog_snapshot.get("today_posts", 0))
@@ -667,6 +897,7 @@ class AgentWorkflow:
                     note=hold_note,
                 )
             )
+            self._workflow_perf_finish_run("hold", budget.reason)
             return WorkflowResult("hold", budget.reason)
 
         self._progress("queue_check", "예약 큐 상태 점검", 8)
@@ -688,6 +919,7 @@ class AgentWorkflow:
             queue_advisory=queue_advisory,
         )
         if resume_result is not None:
+            self._workflow_perf_finish_run(str(resume_result.status or "hold"), str(resume_result.message or ""))
             return resume_result
 
         self._progress("topic_growth", "주제 풀 확장 점검", 12)
@@ -706,7 +938,11 @@ class AgentWorkflow:
         latest_candidates = []
         duplicate_recovery_note = self._append_note(preflight_index_note or "", sync_note)
         for round_idx in range(1, 4):
-            latest_candidates = self._collect_candidates_with_retry(max_attempts=3)
+            latest_candidates = self._profile_call(
+                f"collect_candidates_round_{round_idx}",
+                lambda: self._collect_candidates_with_retry(max_attempts=3),
+                slow_ms=2500,
+            )
             latest_candidates = [c for c in (latest_candidates or []) if self._candidate_matches_content_mode(c)]
             recent_history_titles = self._get_recent_blogger_titles(limit=240, refresh_api=False)
             recent_urls = []
@@ -794,6 +1030,7 @@ class AgentWorkflow:
                         note="Entity topical-duplicate gate: no candidate after extended topic-growth recovery",
                     )
                 )
+                self._workflow_perf_finish_run("skipped", "Entity diversity gate: no diversified candidate")
                 return WorkflowResult("skipped", "Entity diversity gate: no diversified candidate")
         self.brain.reset_run_counter()
         api_ready = bool(
@@ -856,7 +1093,9 @@ class AgentWorkflow:
                             note=self._physical_block_reason(err),
                         )
                     )
-                    return WorkflowResult("skipped", self._physical_block_reason(err))
+                    skip_reason = self._physical_block_reason(err)
+                    self._workflow_perf_finish_run("skipped", skip_reason)
+                    return WorkflowResult("skipped", skip_reason)
                 if select_try >= 1 or not self._is_retryable_error(err):
                     reason = self._append_note(
                         reason,
@@ -890,6 +1129,7 @@ class AgentWorkflow:
                 hold_msg = "content_mode_no_valid_candidate"
                 if hold_note:
                     hold_msg += f" | {hold_note}"
+                self._workflow_perf_finish_run("hold", hold_msg)
                 return WorkflowResult("hold", hold_msg)
 
         if score < self.settings.gemini.min_publish_score:
@@ -979,7 +1219,9 @@ class AgentWorkflow:
                                 note=self._physical_block_reason(err),
                             )
                         )
-                        return WorkflowResult("skipped", self._physical_block_reason(err))
+                        skip_reason = self._physical_block_reason(err)
+                        self._workflow_perf_finish_run("skipped", skip_reason)
+                        return WorkflowResult("skipped", skip_reason)
                     # Temporary 429 should be retried by scheduler with 20-30min window.
                     if self._is_temporary_rate_limit_error(err):
                         raise
@@ -1073,11 +1315,12 @@ class AgentWorkflow:
             base_html = linked_html
         base_html = self._canonicalize_html_payload(base_html)
         self._progress("qa", "품질 게이트 점검/개선", 58)
-        qa_result = self.qa.evaluate(
+        qa_result = self._qa_evaluate(
             base_html,
             title=draft.title,
             domain=current_domain,
             keyword=str(getattr(selected, "title", "") or ""),
+            context="initial",
         )
         final_html = base_html
         qa_retry_count = 0
@@ -1120,11 +1363,12 @@ class AgentWorkflow:
                 else:
                     qa_no_progress_streak = 0
                 final_html = self._canonicalize_html_payload(improved)
-                qa_result = self.qa.evaluate(
+                qa_result = self._qa_evaluate(
                     final_html,
                     title=draft.title,
                     domain=current_domain,
                     keyword=str(getattr(selected, "title", "") or ""),
+                    context="improve_loop",
                 )
 
         if (
@@ -1139,11 +1383,12 @@ class AgentWorkflow:
             if completed != final_html:
                 qa_retry_count += 1
                 final_html = self._canonicalize_html_payload(completed)
-                qa_result = self.qa.evaluate(
+                qa_result = self._qa_evaluate(
                     final_html,
                     title=draft.title,
                     domain=current_domain,
                     keyword=str(getattr(selected, "title", "") or ""),
+                    context="strict_mode_complete",
                 )
 
         if (
@@ -1170,11 +1415,12 @@ class AgentWorkflow:
             polished = self.qa.polish_if_possible(final_html, qa_result)
             if polished != final_html:
                 polished = self._canonicalize_html_payload(polished)
-                polished_result = self.qa.evaluate(
+                polished_result = self._qa_evaluate(
                     polished,
                     title=draft.title,
                     domain=current_domain,
                     keyword=str(getattr(selected, "title", "") or ""),
+                    context="polish_pass",
                 )
                 # If polish reduced score, develop the polished draft instead of discarding.
                 if polished_result.score < baseline_score:
@@ -1213,11 +1459,12 @@ class AgentWorkflow:
                         else:
                             qa_no_progress_streak = 0
                         candidate_html = improved
-                        candidate_result = self.qa.evaluate(
+                        candidate_result = self._qa_evaluate(
                             candidate_html,
                             title=draft.title,
                             domain=current_domain,
                             keyword=str(getattr(selected, "title", "") or ""),
+                            context="polish_recover_loop",
                         )
                     if candidate_result.score >= target_score and (
                         (not self.settings.quality.humanity_hard_fail_block)
@@ -1252,7 +1499,9 @@ class AgentWorkflow:
                                 note=self._physical_block_reason(err),
                             )
                         )
-                        return WorkflowResult("skipped", self._physical_block_reason(err))
+                        skip_reason = self._physical_block_reason(err)
+                        self._workflow_perf_finish_run("skipped", skip_reason)
+                        return WorkflowResult("skipped", skip_reason)
                     if self._is_temporary_rate_limit_error(err):
                         raise
                     if judge_try >= 3 or not self._is_retryable_error(err):
@@ -1294,30 +1543,50 @@ class AgentWorkflow:
 
         self._progress("visual", "이미지 생성/매칭", 74)
         self._set_image_pipeline_state("running", 0, int(self.settings.visual.target_images_per_post or 5), "이미지 생성 시작")
-        image_prompt_plan = self._build_image_prompt_plan_with_local_llm(draft, selected)
+        image_prompt_plan = self._profile_call(
+            "image_prompt_plan",
+            lambda: self._build_image_prompt_plan_with_local_llm(draft, selected),
+            slow_ms=1500,
+        )
         plan_source = str((image_prompt_plan or {}).get("source", "fallback") or "fallback")
         if plan_source:
             generation_degraded_note = self._append_note(
                 generation_degraded_note,
                 f"image_prompt_plan={plan_source}",
             )
-        images = self.visual.build(draft, prompt_plan=image_prompt_plan)
-        images = self.visual.ensure_generated_thumbnail(draft, images, prompt_plan=image_prompt_plan)
+        images = self._profile_call(
+            "visual_build",
+            lambda: self.visual.build(draft, prompt_plan=image_prompt_plan),
+            slow_ms=7000,
+        )
+        images = self._profile_call(
+            "visual_ensure_thumbnail",
+            lambda: self.visual.ensure_generated_thumbnail(draft, images, prompt_plan=image_prompt_plan),
+            slow_ms=2500,
+        )
         images = self.visual.ensure_unique_assets(images)
         target_images = max(2, int(self.settings.visual.target_images_per_post or 0))
         if len(images) < target_images:
             self._set_image_pipeline_state("retrying", len(images), target_images, "이미지 부족, 재시도 진행 중")
             self._progress("visual", "이미지 부족, 재시도 진행 중", 76)
-            images = self.visual.fill_missing_generated_images(
-                draft,
-                images,
-                target_images,
-                min_retry_attempts=5,
+            images = self._profile_call(
+                "visual_fill_missing",
+                lambda: self.visual.fill_missing_generated_images(
+                    draft,
+                    images,
+                    target_images,
+                    min_retry_attempts=5,
+                ),
+                slow_ms=12000,
             )
-        images = self._force_image_floor(
-            draft=draft,
-            images=images,
-            target_images=target_images,
+        images = self._profile_call(
+            "visual_force_floor",
+            lambda: self._force_image_floor(
+                draft=draft,
+                images=images,
+                target_images=target_images,
+            ),
+            slow_ms=3000,
         )
         images = self.visual.ensure_unique_assets(images)
         if len(images) > target_images:
@@ -1341,6 +1610,7 @@ class AgentWorkflow:
             hold_msg = policy_reason
             if hold_note:
                 hold_msg += f" | {hold_note}"
+            self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
         min_required_images = min(target_images, 2)
         image_kind_counts = Counter((getattr(img, "source_kind", "") or "unknown") for img in images)
@@ -1396,10 +1666,14 @@ class AgentWorkflow:
         final_html = self._sanitize_publish_html(final_html, domain=current_domain)
         final_html = self._double_unescape(final_html)
         final_html = self._canonicalize_html_payload(final_html)
-        local_qa_review = self._run_local_llm_qa_review(
-            title=draft.title,
-            html=final_html,
-            images=images,
+        local_qa_review = self._profile_call(
+            "local_llm_qa_review",
+            lambda: self._run_local_llm_qa_review(
+                title=draft.title,
+                html=final_html,
+                images=images,
+            ),
+            slow_ms=2500,
         )
         for phrase in (local_qa_review.get("remove_phrases", []) if isinstance(local_qa_review, dict) else []):
             tok = re.escape(re.sub(r"\s+", " ", str(phrase or "")).strip())
@@ -1429,6 +1703,7 @@ class AgentWorkflow:
                 hold_msg = "markdown_canonicalize_failed"
                 if hold_note:
                     hold_msg += f" | {hold_note}"
+                self._workflow_perf_finish_run("hold", hold_msg)
                 return WorkflowResult("hold", hold_msg)
         if isinstance(local_qa_review, dict):
             issue_count = len(list(local_qa_review.get("issues", []) or []))
@@ -1511,6 +1786,7 @@ class AgentWorkflow:
                     ),
                 )
             )
+            self._workflow_perf_finish_run("success", published_url)
             return WorkflowResult("success", published_url)
 
         self._progress("schedule", "예약 시간 계산", 84)
@@ -1533,12 +1809,16 @@ class AgentWorkflow:
         last_publish_err = ""
         preflight_thumb_src = ""
         try:
-            images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
-                draft=draft,
-                candidate=selected,
-                images=images,
-                prompt_plan=image_prompt_plan,
-                max_attempts=3,
+            images, preflight_thumb_src = self._profile_call(
+                "thumbnail_preflight_with_recovery",
+                lambda: self._preflight_thumbnail_with_recovery(
+                    draft=draft,
+                    candidate=selected,
+                    images=images,
+                    prompt_plan=image_prompt_plan,
+                    max_attempts=3,
+                ),
+                slow_ms=8000,
             )
         except Exception as exc:
             last_publish_err = str(exc)
@@ -1569,7 +1849,9 @@ class AgentWorkflow:
             checkpoint_msg = ""
             if "draft_checkpoint=" in draft_checkpoint_note:
                 checkpoint_msg = f" | {draft_checkpoint_note.lstrip(';')}"
-            return WorkflowResult("hold", f"requeued_to_tail: {last_publish_err}{checkpoint_msg}")
+            hold_msg = f"requeued_to_tail: {last_publish_err}{checkpoint_msg}"
+            self._workflow_perf_finish_run("hold", hold_msg)
+            return WorkflowResult("hold", hold_msg)
         if bool(getattr(self.settings.publish, "thumbnail_preflight_only", False)):
             self.logs.append_run(
                 RunRecord(
@@ -1581,19 +1863,25 @@ class AgentWorkflow:
                     note=f"thumbnail_preflight_only_ok:{preflight_thumb_src[:180]}",
                 )
             )
+            self._workflow_perf_finish_run("hold", "thumbnail_preflight_only_ok")
             return WorkflowResult("hold", "thumbnail_preflight_only_ok")
         publish_backoff = [30, 300, 900]
         for publish_try in range(1, 4):
             try:
-                published = self.publisher.publish_post(
-                    draft.title,
-                    final_html,
-                    images,
-                    labels,
-                    publish_at=publish_at,
-                    existing_draft_post_id=(working_draft_id or None),
-                    meta_description=meta_description,
-                    preflight_thumbnail_src=preflight_thumb_src,
+                published = self._profile_call(
+                    f"publish_post_attempt_{publish_try}",
+                    lambda: self.publisher.publish_post(
+                        draft.title,
+                        final_html,
+                        images,
+                        labels,
+                        publish_at=publish_at,
+                        existing_draft_post_id=(working_draft_id or None),
+                        meta_description=meta_description,
+                        preflight_thumbnail_src=preflight_thumb_src,
+                    ),
+                    slow_ms=8000,
+                    meta={"attempt": int(publish_try)},
                 )
                 break
             except Exception as exc:
@@ -1610,7 +1898,9 @@ class AgentWorkflow:
                             note=self._physical_block_reason(err),
                         )
                     )
-                    return WorkflowResult("skipped", self._physical_block_reason(err))
+                    skip_reason = self._physical_block_reason(err)
+                    self._workflow_perf_finish_run("skipped", skip_reason)
+                    return WorkflowResult("skipped", skip_reason)
                 if ("thumbnail_preflight_failed" in err or "missing thumbnail image url" in err) and publish_try < 3:
                     try:
                         images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
@@ -1660,7 +1950,9 @@ class AgentWorkflow:
             checkpoint_msg = ""
             if "draft_checkpoint=" in draft_checkpoint_note:
                 checkpoint_msg = f" | {draft_checkpoint_note.lstrip(';')}"
-            return WorkflowResult("hold", f"requeued_to_tail: {last_publish_err}{checkpoint_msg}")
+            hold_msg = f"requeued_to_tail: {last_publish_err}{checkpoint_msg}"
+            self._workflow_perf_finish_run("hold", hold_msg)
+            return WorkflowResult("hold", hold_msg)
         self._progress("indexing", "인덱싱/후처리 반영", 97)
         self.logs.add_scheduled_post(
             publish_at=publish_at.isoformat(),
@@ -1752,7 +2044,10 @@ class AgentWorkflow:
         self._cleanup_local_image_files(images)
         self._progress("done", "회차 완료", 100)
         if publish_at:
-            return WorkflowResult("success", f"{published.url} (scheduled: {publish_at.isoformat()})")
+            success_msg = f"{published.url} (scheduled: {publish_at.isoformat()})"
+            self._workflow_perf_finish_run("success", success_msg)
+            return WorkflowResult("success", success_msg)
+        self._workflow_perf_finish_run("success", published.url)
         return WorkflowResult("success", published.url)
 
     def _cleanup_local_image_files(self, images: list[ImageAsset]) -> int:
@@ -2521,11 +2816,12 @@ class AgentWorkflow:
         if go_live_errors:
             raise RuntimeError("Go-live gate failed: " + "; ".join(go_live_errors[:5]))
 
-        qa_result = self.qa.evaluate(
+        qa_result = self._qa_evaluate(
             final_html,
             title=title,
             domain=resume_domain,
             keyword=str(getattr(candidate, "title", "") or ""),
+            context="resume_publish",
         )
         labels = self._normalize_resume_labels(row.get("labels", []))
         if not labels:
@@ -2551,12 +2847,16 @@ class AgentWorkflow:
         )
         preflight_thumb_src = ""
         try:
-            images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
-                draft=draft,
-                candidate=candidate,
-                images=images,
-                prompt_plan=image_prompt_plan,
-                max_attempts=3,
+            images, preflight_thumb_src = self._profile_call(
+                "resume_thumbnail_preflight_with_recovery",
+                lambda: self._preflight_thumbnail_with_recovery(
+                    draft=draft,
+                    candidate=candidate,
+                    images=images,
+                    prompt_plan=image_prompt_plan,
+                    max_attempts=3,
+                ),
+                slow_ms=8000,
             )
         except Exception as exc:
             hold_labels = self._normalize_resume_labels(row.get("labels", []))
@@ -2594,15 +2894,19 @@ class AgentWorkflow:
                 )
             )
             return WorkflowResult("hold", "thumbnail_preflight_only_ok")
-        published = self.publisher.publish_post(
-            title,
-            final_html,
-            images,
-            labels,
-            publish_at=publish_at,
-            existing_draft_post_id=(post_id or None),
-            meta_description=meta_description,
-            preflight_thumbnail_src=preflight_thumb_src,
+        published = self._profile_call(
+            "resume_publish_post",
+            lambda: self.publisher.publish_post(
+                title,
+                final_html,
+                images,
+                labels,
+                publish_at=publish_at,
+                existing_draft_post_id=(post_id or None),
+                meta_description=meta_description,
+                preflight_thumbnail_src=preflight_thumb_src,
+            ),
+            slow_ms=8000,
         )
         self.logs.add_scheduled_post(
             publish_at=publish_at.isoformat(),

@@ -22,11 +22,18 @@ Source: "..\..\dist\version.txt"; DestDir: "{app}"; Flags: ignoreversion
 [InstallDelete]
 Type: files; Name: "{autodesktop}\RezeroAgent.lnk"
 Type: files; Name: "{group}\RezeroAgent.lnk"
+; Remove stale standalone desktop executables so users always run the installed binary.
+Type: files; Name: "{userdesktop}\RezeroAgent.exe"
+Type: files; Name: "{commondesktop}\RezeroAgent.exe"
 
 [Icons]
 Name: "{group}\RezeroAgent"; Filename: "{app}\RezeroAgent.exe"
 Name: "{group}\Uninstall RezeroAgent"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\RezeroAgent"; Filename: "{app}\RezeroAgent.exe"
+; Always create a desktop shortcut in the active install context.
+; - admin install: common desktop
+; - non-admin install: current user desktop
+Name: "{commondesktop}\RezeroAgent"; Filename: "{app}\RezeroAgent.exe"; Check: IsAdminInstallMode
+Name: "{userdesktop}\RezeroAgent"; Filename: "{app}\RezeroAgent.exe"; Check: not IsAdminInstallMode
 
 [Run]
 Filename: "{app}\RezeroAgent.exe"; Description: "Launch RezeroAgent"; Flags: nowait postinstall skipifsilent
