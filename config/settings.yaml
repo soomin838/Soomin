@@ -237,7 +237,7 @@ visual:
   max_banner_images: 1
   max_inline_images: 1
   image_provider: "pollinations"
-  enable_gemini_image_generation: false
+  enable_gemini_image_generation: true
   allow_chart_fallback: false
   gemini_prompt_model: "gemini-2.0-flash"
   gemini_image_model: "models/imagen-3.0-generate-001"
@@ -279,7 +279,7 @@ llm:
   max_calls_per_post: 3
   enable_refine_loop: false
   enable_judge_post: false
-  enable_image_generation: false
+  enable_image_generation: true
 
 content_mode:
   mode: "tech_troubleshoot_only"

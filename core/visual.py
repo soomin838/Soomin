@@ -894,20 +894,180 @@ class VisualPipeline:
         keyword: str,
         role: str = "content",
     ) -> ImageAsset | None:
-        # 정책: 이미지 생성은 Pollinations(gptimage) API-only.
-        # 로컬/타 모델 폴백 없이 Pollinations 경로로만 처리한다.
-        prompt = self._enforce_no_text_rule(prompt)
-        provider = str(getattr(self.visual_settings, "image_provider", "pollinations") or "pollinations").strip().lower()
-        if provider not in {"pollinations", "pollination"}:
+        prompt_text = self._enforce_software_troubleshoot_prompt(
+            self._enforce_no_text_rule(re.sub(r"\s+", " ", str(prompt or "")).strip())
+        )
+        if not prompt_text:
+            prompt_text = self._enforce_software_troubleshoot_prompt(
+                self._enforce_no_text_rule(self._fallback_prompt(paragraph, keyword, variation_index=index, role=role))
+            )
+
+        if not self.gemini_api_key:
             self._log_visual_event(
                 {
-                    "event": "image_provider_forced",
+                    "event": "gemini_fallback_failed",
                     "index": index,
-                    "requested_provider": provider,
-                    "forced_provider": "pollinations",
+                    "role": str(role or "content"),
+                    "reason": "missing_gemini_api_key",
                 }
             )
-        return self._generate_image_with_pollinations(prompt, index, paragraph, keyword, role=role)
+            return None
+
+        role_key = str(role or "").strip().lower()
+        candidates = self._resolve_image_model_candidates(role=role_key)
+        if not candidates:
+            self._log_visual_event(
+                {
+                    "event": "gemini_fallback_failed",
+                    "index": index,
+                    "role": role_key,
+                    "reason": "no_model_candidates",
+                }
+            )
+            return None
+
+        for model_candidate in candidates:
+            method, model = self._parse_model_candidate(model_candidate)
+            if method.strip().lower() != "generatecontent":
+                self._log_visual_event(
+                    {
+                        "event": "gemini_image_model_skip",
+                        "index": index,
+                        "role": role_key,
+                        "model": model,
+                        "reason": f"unsupported_method:{method}",
+                    }
+                )
+                continue
+            endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            payload = {
+                "contents": [{"parts": [{"text": prompt_text}]}],
+                "generationConfig": {"responseModalities": ["IMAGE"]},
+                "safetySettings": self._build_safety_settings(),
+            }
+            self._log_visual_event(
+                {
+                    "event": "gemini_fallback_request",
+                    "index": index,
+                    "role": role_key,
+                    "model": model,
+                    "method": method,
+                    "prompt_hash": hashlib.sha1(prompt_text.encode("utf-8", errors="ignore")).hexdigest()[:16],
+                }
+            )
+            try:
+                response = requests.post(
+                    endpoint,
+                    params={"key": self.gemini_api_key},
+                    json=payload,
+                    timeout=max(10, int(getattr(self.visual_settings, "pollinations_timeout_sec", 30) or 30)),
+                )
+                self._last_image_request_at = datetime.now(timezone.utc)
+                if response.status_code != 200:
+                    self._log_visual_event(
+                        {
+                            "event": "gemini_fallback_failed",
+                            "index": index,
+                            "role": role_key,
+                            "model": model,
+                            "status": int(response.status_code),
+                            "response_preview": (response.text or "")[:260],
+                        }
+                    )
+                    continue
+                data = response.json()
+                raw, mime = self._extract_image_payload(data, "generateContent")
+                if not raw:
+                    self._log_visual_event(
+                        {
+                            "event": "gemini_fallback_failed",
+                            "index": index,
+                            "role": role_key,
+                            "model": model,
+                            "reason": "empty_image_payload",
+                        }
+                    )
+                    continue
+                lower_mime = str(mime or "").lower()
+                ext = ".png"
+                if "jpeg" in lower_mime or "jpg" in lower_mime:
+                    ext = ".jpg"
+                elif "webp" in lower_mime:
+                    ext = ".webp"
+                unique_token = f"{self._run_marker}_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+                filename = self.temp_dir / f"generated_{index:02d}_gemini_{model.replace('/', '_')}_{unique_token}{ext}"
+                filename.write_bytes(raw)
+                try:
+                    if filename.stat().st_size < 5 * 1024:
+                        self._log_visual_event(
+                            {
+                                "event": "gemini_fallback_failed",
+                                "index": index,
+                                "role": role_key,
+                                "model": model,
+                                "reason": "image_too_small",
+                                "size_bytes": int(filename.stat().st_size),
+                            }
+                        )
+                        filename.unlink(missing_ok=True)
+                        continue
+                except Exception:
+                    pass
+                ok, reason, metrics = self._validate_generated_asset(
+                    path=filename,
+                    role=role,
+                    prompt=prompt_text,
+                    context=paragraph,
+                    retry_index=1,
+                    source_model=model,
+                )
+                if not ok:
+                    self._log_visual_event(
+                        {
+                            "event": "generated_image_rejected",
+                            "provider": "gemini",
+                            "index": index,
+                            "model": model,
+                            "reason": reason,
+                            "metrics": metrics,
+                        }
+                    )
+                    try:
+                        filename.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    continue
+                self._log_visual_event(
+                    {
+                        "event": "gemini_fallback_success",
+                        "index": index,
+                        "role": role_key,
+                        "model": model,
+                        "saved_path": str(filename),
+                        "size_bytes": int(filename.stat().st_size),
+                    }
+                )
+                return ImageAsset(
+                    path=filename,
+                    alt=self._build_alt_text(keyword, "generated image"),
+                    anchor_text=paragraph,
+                    source_kind="gemini",
+                    source_url=f"gemini://{model}",
+                    license_note="Generated by Gemini image model.",
+                )
+            except Exception as exc:
+                self._log_visual_event(
+                    {
+                        "event": "gemini_fallback_failed",
+                        "index": index,
+                        "role": role_key,
+                        "model": model,
+                        "status": "exception",
+                        "exception": str(exc),
+                    }
+                )
+                continue
+        return None
 
     def _generate_image_with_pollinations(
         self,
@@ -1004,6 +1164,8 @@ class VisualPipeline:
         best_candidate_score = -1.0
         best_candidate_reason = ""
         best_candidate_metrics: dict[str, float | int | str | bool] = {}
+        quota_fallback_reason = ""
+        quota_fallback_status: int | str = ""
 
         # Policy: deterministic three-stage retry.
         # 1) original prompt
@@ -1168,7 +1330,15 @@ class VisualPipeline:
                             "prompt_hash": cache_key[:16],
                         }
                     )
+                    if self._is_pollinations_quota_exhausted(
+                        status_code=int(response.status_code),
+                        response_preview=body_preview or (response.text or "")[:260],
+                    ):
+                        quota_fallback_status = int(response.status_code)
+                        quota_fallback_reason = "pollinations_quota_exhausted"
+                        break
                 except Exception as exc:
+                    exc_msg = str(exc or "")
                     self._log_visual_event(
                         {
                             "event": "pollinations_failed",
@@ -1176,13 +1346,42 @@ class VisualPipeline:
                             "status": "exception",
                             "model": model,
                             "auth_mode": mode,
-                            "exception": str(exc),
+                            "exception": exc_msg,
                             "attempt": gen_try,
                             "prompt_mode": prompt_mode,
                             "prompt_hash": cache_key[:16],
                         }
                     )
+                    if self._is_pollinations_quota_exhausted(
+                        status_code="exception",
+                        response_preview=exc_msg,
+                    ):
+                        quota_fallback_status = "exception"
+                        quota_fallback_reason = "pollinations_quota_exception"
+                        break
                     continue
+            if quota_fallback_reason:
+                break
+
+        if quota_fallback_reason:
+            self._log_visual_event(
+                {
+                    "event": "pollinations_quota_fallback_trigger",
+                    "index": index,
+                    "role": role_key,
+                    "status": quota_fallback_status,
+                    "reason": quota_fallback_reason,
+                }
+            )
+            gemini_asset = self._generate_image_with_gemini(
+                prompt=prompt_text,
+                index=index,
+                paragraph=paragraph,
+                keyword=keyword,
+                role=role,
+            )
+            if gemini_asset is not None:
+                return gemini_asset
 
         if best_candidate_path is not None and best_candidate_path.exists():
             self._log_visual_event(
@@ -1254,6 +1453,40 @@ class VisualPipeline:
             text = f"{text}. software troubleshooting checklist flow diagram"
         text += " no physical hazards, no damaged hardware"
         return re.sub(r"\s+", " ", text).strip()[:900]
+
+    def _is_pollinations_quota_exhausted(self, status_code: int | str, response_preview: str = "") -> bool:
+        text = str(response_preview or "").lower()
+        try:
+            code = int(status_code)  # type: ignore[arg-type]
+        except Exception:
+            code = -1
+        if code == 429:
+            return True
+        if code in {402, 403} and any(
+            token in text
+            for token in (
+                "quota",
+                "limit",
+                "rate limit",
+                "too many requests",
+                "exceeded",
+                "billing",
+                "credit",
+            )
+        ):
+            return True
+        if code == -1 and any(
+            token in text
+            for token in (
+                "429",
+                "quota",
+                "rate limit",
+                "too many requests",
+                "limit exceeded",
+            )
+        ):
+            return True
+        return False
 
     def _validate_generated_asset(
         self,
