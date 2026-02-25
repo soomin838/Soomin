@@ -1644,7 +1644,7 @@ class AgentWorkflow:
         non_generated = [
             (getattr(img, "source_kind", "") or "unknown")
             for img in images
-            if (getattr(img, "source_kind", "") or "").strip().lower() not in {"gemini", "generated", "pollinations"}
+            if (getattr(img, "source_kind", "") or "").strip().lower() not in {"gemini", "generated"}
         ]
         if non_generated:
             self._set_image_pipeline_state(
@@ -2211,8 +2211,6 @@ class AgentWorkflow:
         msg = (message or "").lower()
         if "api 키가 설정되지 않았습니다" in msg:
             return True
-        if "pollinations image api key is missing" in msg:
-            return True
         if "api key not valid" in msg:
             return True
         if "invalid api key" in msg:
@@ -2241,8 +2239,6 @@ class AgentWorkflow:
             return "No Quota: daily limit exhausted"
         if "api 키가 설정되지 않았습니다" in msg:
             return "No API Key: Gemini key is missing"
-        if "pollinations image api key is missing" in msg:
-            return "No API Key: Pollinations image key is missing"
         if "api key not valid" in msg or "invalid api key" in msg:
             return "No API Key: invalid Gemini key"
         if "permission denied" in msg and "drive" in msg:

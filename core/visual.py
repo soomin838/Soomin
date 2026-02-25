@@ -70,7 +70,7 @@ class VisualPipeline:
     def build(self, draft: DraftPost, prompt_plan: dict[str, Any] | None = None) -> list[ImageAsset]:
         self._current_run_hashes = set()
         self._current_run_embeddings = []
-        provider = str(getattr(self.visual_settings, "image_provider", "pollinations") or "pollinations").strip().lower()
+        provider = str(getattr(self.visual_settings, "image_provider", "gemini") or "gemini").strip().lower()
         target = max(1, int(self.visual_settings.target_images_per_post))
         body_slots = max(0, target - 1)
         self._log_visual_event(
@@ -82,10 +82,15 @@ class VisualPipeline:
                 "target_inline": int(body_slots),
             }
         )
-        if provider in {"pollinations", "pollination"}:
-            # Pollinations API-only mode: key is optional depending on provider plan.
-            # Never hard-fail image generation solely due to empty key.
-            pass
+        if provider != "gemini":
+            self._log_visual_event(
+                {
+                    "event": "image_provider_forced",
+                    "requested": provider,
+                    "forced": "gemini",
+                }
+            )
+            provider = "gemini"
         # Generated-only policy:
         # - Total images per post = target_images_per_post
         # - 1 thumbnail is created in ensure_generated_thumbnail()
@@ -117,7 +122,7 @@ class VisualPipeline:
 
         for i, paragraph in enumerate(selected_paragraphs):
             prompt = prompts[i] if i < len(prompts) else self._fallback_prompt(paragraph, draft.title)
-            generated = self._generate_image_with_pollinations(
+            generated = self._generate_image_with_gemini(
                 prompt,
                 i + 1,
                 paragraph,
@@ -138,7 +143,7 @@ class VisualPipeline:
             context = seed_contexts[cursor % len(seed_contexts)] if seed_contexts else (draft.summary or draft.title)
             cursor += 1
             prompt = self._fallback_prompt(context or draft.summary, draft.title)
-            generated = self._generate_image_with_pollinations(
+            generated = self._generate_image_with_gemini(
                 prompt,
                 idx,
                 context or "",
@@ -197,7 +202,7 @@ class VisualPipeline:
         # If there is already a generated thumbnail candidate, move it to index 0.
         for idx, asset in enumerate(images):
             kind = (getattr(asset, "source_kind", "") or "").strip().lower()
-            if kind in {"gemini", "generated", "pollinations"} and Path(getattr(asset, "path", "")).exists():
+            if kind in {"gemini", "generated"} and Path(getattr(asset, "path", "")).exists():
                 if idx != 0:
                     images.insert(0, images.pop(idx))
                 self._optimize_image_for_seo(images[0].path, role="thumbnail")
@@ -211,7 +216,7 @@ class VisualPipeline:
         )
         if not prompt:
             prompt = self._build_thumbnail_prompt(draft)
-        generated = self._generate_image_with_pollinations(
+        generated = self._generate_image_with_gemini(
             prompt=prompt,
             index=0,
             paragraph=(draft.summary or draft.title),
@@ -248,7 +253,7 @@ class VisualPipeline:
         if not prompt:
             prompt = self._build_thumbnail_prompt(draft)
         index_seed = 900 + random.randint(1, 80)
-        generated = self._generate_image_with_pollinations(
+        generated = self._generate_image_with_gemini(
             prompt=prompt,
             index=index_seed,
             paragraph=(draft.summary or draft.title),
@@ -303,7 +308,7 @@ class VisualPipeline:
             context = seed_contexts[cursor % len(seed_contexts)] if seed_contexts else (draft.summary or draft.title)
             cursor += 1
             prompt = self._fallback_prompt(context or draft.summary, draft.title)
-            generated = self._generate_image_with_pollinations(
+            generated = self._generate_image_with_gemini(
                 prompt=prompt,
                 index=file_index_seed,
                 paragraph=context or "",
@@ -960,7 +965,7 @@ class VisualPipeline:
                     endpoint,
                     params={"key": self.gemini_api_key},
                     json=payload,
-                    timeout=max(10, int(getattr(self.visual_settings, "pollinations_timeout_sec", 30) or 30)),
+                    timeout=45,
                 )
                 self._last_image_request_at = datetime.now(timezone.utc)
                 if response.status_code != 200:
@@ -1077,337 +1082,22 @@ class VisualPipeline:
         keyword: str,
         role: str = "content",
     ) -> ImageAsset | None:
-        if not bool(getattr(self.visual_settings, "pollinations_enabled", True)):
-            self._log_visual_event(
-                {
-                    "event": "pollinations_failed",
-                    "reason": "feature_disabled",
-                    "index": index,
-                    "status": "disabled",
-                }
-            )
-            return self._fallback_asset_for_role(role=role, index=index)
-
-        base_url = str(getattr(self.visual_settings, "pollinations_base_url", "") or "").strip().rstrip("/")
-        if not base_url:
-            self._log_visual_event(
-                {
-                    "event": "pollinations_failed",
-                    "reason": "missing_base_url",
-                    "index": index,
-                    "status": "missing_base_url",
-                }
-            )
-            return self._fallback_asset_for_role(role=role, index=index)
-
-        model = self._resolve_pollinations_model(role=role)
-        role_key = str(role or "").strip().lower()
-        is_thumbnail = role_key == "thumbnail"
-        # Keep prompt policy simple and context-first.
-        prompt_text = re.sub(r"\s+", " ", str(prompt or "")).strip()
-        if not prompt_text:
-            prompt_text = self._fallback_prompt(paragraph, keyword, variation_index=index, role=role)
-        prompt_text = self._enforce_software_troubleshoot_prompt(prompt_text)
-        prompt_text = self._enforce_no_text_rule(prompt_text)
-        width, height = (1280, 720) if str(role or "").lower() == "thumbnail" else (1152, 648)
-        # Stable cache key policy: sha1(model + size + prompt)
-        prompt_suffix = re.sub(r"\s+", " ", str(getattr(self.visual_settings, "prompt_suffix", "") or "").strip())
-        cache_key = hashlib.sha1(
-            f"{model}|{width}x{height}|{prompt_text}|{prompt_suffix}".encode("utf-8", errors="ignore")
-        ).hexdigest()
-        cache_path = self.image_cache_dir / f"{cache_key}.png"
-        if cache_path.exists():
-            try:
-                if cache_path.stat().st_size < 5 * 1024:
-                    cache_path.unlink(missing_ok=True)
-                else:
-                    cached_out = self.temp_dir / f"generated_{index:02d}_cache_{cache_key[:10]}.png"
-                    shutil.copy2(cache_path, cached_out)
-                    self._log_visual_event(
-                        {
-                            "event": "pollinations_image_cache_hit",
-                            "index": index,
-                            "model": model,
-                            "role": role_key,
-                            "cache_path": str(cache_path),
-                        }
-                    )
-                    return ImageAsset(
-                        path=cached_out,
-                        alt=self._build_alt_text(keyword, "cached generated image"),
-                        anchor_text=paragraph,
-                        source_kind="pollinations",
-                        source_url=f"pollinations://{model}",
-                        license_note="Generated by Pollinations.ai (cached).",
-                    )
-            except Exception:
-                pass
-        base_params = {
-            "model": model,
-            "width": str(width),
-            "height": str(height),
-            "safe": "true",
-            "enhance": "true",
-            "nologo": "true",
-            "seed": str(random.randint(1, 2_000_000_000)),
-        }
-
-        key = str(getattr(self.visual_settings, "pollinations_api_key", "") or "").strip()
-        if key and key.upper() in {"POLLINATIONS_API_KEY", "YOUR_POLLINATIONS_API_KEY"}:
-            key = ""
-        primary_auth: tuple[str, dict[str, str], dict[str, str]] = ("anonymous", {}, {})
-        auth_modes: list[tuple[str, dict[str, str], dict[str, str]]] = [primary_auth]
-        if key:
-            auth_modes.append(("key_query", {"key": key}, {}))
-            auth_modes.append(("key_bearer", {}, {"Authorization": f"Bearer {key}"}))
-        best_candidate_path: Path | None = None
-        best_candidate_score = -1.0
-        best_candidate_reason = ""
-        best_candidate_metrics: dict[str, float | int | str | bool] = {}
-        quota_fallback_reason = ""
-        quota_fallback_status: int | str = ""
-
-        # Policy: deterministic three-stage retry.
-        # 1) original prompt
-        # 2) same prompt + different seed
-        # 3) simplified prompt + different seed
-        max_generation_attempts = 3
-        for gen_try in range(1, max_generation_attempts + 1):
-            # Throttle per generation attempt (not per auth mode).
-            self._respect_image_interval()
-            params_seed = dict(base_params)
-            params_seed["seed"] = str(random.randint(1, 2_000_000_000))
-            attempt_prompt = prompt_text
-            prompt_mode = "original"
-            if gen_try == 2:
-                prompt_mode = "seed_refresh"
-            elif gen_try >= 3:
-                attempt_prompt = self._enforce_software_troubleshoot_prompt(
-                    self._enforce_no_text_rule(
-                        self._simplify_prompt_for_retry(prompt_text, retry_index=gen_try, role=role_key)
-                    )
-                )
-                prompt_mode = "simplified"
-            encoded_prompt = quote(attempt_prompt, safe="")
-            endpoint = f"{base_url}/image/{encoded_prompt}"
-            mode_queue: list[tuple[str, dict[str, str], dict[str, str]]] = list(auth_modes)
-            for mode, extra_params, extra_headers in mode_queue:
-                self._log_visual_event(
-                    {
-                        "event": "pollinations_request",
-                        "index": index,
-                        "model": model,
-                        "role": role_key,
-                        "width": width,
-                        "height": height,
-                        "prompt_hash": cache_key[:16],
-                        "attempt": gen_try,
-                        "auth_mode": mode,
-                        "status": "requesting",
-                    }
-                )
-                try:
-                    params = dict(params_seed)
-                    params.update(extra_params)
-                    headers = {"Accept": "image/*"}
-                    headers.update(extra_headers)
-                    response = requests.get(
-                        endpoint,
-                        params=params,
-                        headers=headers,
-                        timeout=max(5, int(getattr(self.visual_settings, "pollinations_timeout_sec", 30) or 30)),
-                    )
-                    self._last_image_request_at = datetime.now(timezone.utc)
-                    content_type = str(response.headers.get("content-type", "")).lower()
-                    if response.status_code == 200 and content_type.startswith("image/") and response.content:
-                        ext = ".png"
-                        if "jpeg" in content_type or "jpg" in content_type:
-                            ext = ".jpg"
-                        elif "webp" in content_type:
-                            ext = ".webp"
-                        unique_token = f"{self._run_marker}_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
-                        filename = self.temp_dir / (
-                            f"generated_{index:02d}_pollinations_t{gen_try}_{mode}_{unique_token}{ext}"
-                        )
-                        filename.write_bytes(response.content)
-                        try:
-                            if filename.stat().st_size < 5 * 1024:
-                                self._log_visual_event(
-                                    {
-                                        "event": "pollinations_image_too_small",
-                                        "index": index,
-                                        "model": model,
-                                        "auth_mode": mode,
-                                        "attempt": gen_try,
-                                        "size_bytes": int(filename.stat().st_size),
-                                    }
-                                )
-                                filename.unlink(missing_ok=True)
-                                continue
-                        except Exception:
-                            pass
-
-                        self._log_visual_event(
-                            {
-                                "event": "pollinations_success",
-                                "index": index,
-                                "status": 200,
-                                "model": model,
-                                "auth_mode": mode,
-                                "saved_path": str(filename),
-                                "size_bytes": int(filename.stat().st_size),
-                                "attempt": gen_try,
-                                "prompt_mode": prompt_mode,
-                            }
-                        )
-                        ok, reason, metrics = self._validate_generated_asset(
-                            path=filename,
-                            role=role,
-                            prompt=attempt_prompt,
-                            context=paragraph,
-                            retry_index=gen_try,
-                            source_model=model,
-                        )
-                        if not ok:
-                            candidate_score = self._rejected_candidate_score(reason=reason, metrics=metrics)
-                            self._log_visual_event(
-                                {
-                                    "event": "generated_image_rejected",
-                                    "provider": "pollinations",
-                                    "index": index,
-                                    "model": model,
-                                    "auth_mode": mode,
-                                    "attempt": gen_try,
-                                    "prompt_mode": prompt_mode,
-                                    "reason": reason,
-                                    "metrics": metrics,
-                                    "candidate_score": candidate_score,
-                                }
-                            )
-                            if candidate_score is not None and candidate_score > best_candidate_score:
-                                if best_candidate_path is not None:
-                                    try:
-                                        best_candidate_path.unlink(missing_ok=True)
-                                    except Exception:
-                                        pass
-                                best_candidate_path = filename
-                                best_candidate_score = float(candidate_score)
-                                best_candidate_reason = str(reason)
-                                best_candidate_metrics = dict(metrics or {})
-                            else:
-                                try:
-                                    filename.unlink(missing_ok=True)
-                                except Exception:
-                                    pass
-                            continue
-                        try:
-                            shutil.copy2(filename, cache_path)
-                        except Exception:
-                            pass
-                        return ImageAsset(
-                            path=filename,
-                            alt=self._build_alt_text(keyword, "generated image"),
-                            anchor_text=paragraph,
-                            source_kind="pollinations",
-                            source_url=f"pollinations://{model}",
-                            license_note="Generated by Pollinations.ai.",
-                        )
-
-                    body_preview = ""
-                    if not content_type.startswith("image/"):
-                        body_preview = (response.text or "")[:260]
-                    self._log_visual_event(
-                        {
-                            "event": "pollinations_failed",
-                            "index": index,
-                            "status": int(response.status_code),
-                            "model": model,
-                            "auth_mode": mode,
-                            "content_type": content_type,
-                            "response_preview": body_preview,
-                            "attempt": gen_try,
-                            "prompt_mode": prompt_mode,
-                            "prompt_hash": cache_key[:16],
-                        }
-                    )
-                    if self._is_pollinations_quota_exhausted(
-                        status_code=int(response.status_code),
-                        response_preview=body_preview or (response.text or "")[:260],
-                    ):
-                        quota_fallback_status = int(response.status_code)
-                        quota_fallback_reason = "pollinations_quota_exhausted"
-                        break
-                except Exception as exc:
-                    exc_msg = str(exc or "")
-                    self._log_visual_event(
-                        {
-                            "event": "pollinations_failed",
-                            "index": index,
-                            "status": "exception",
-                            "model": model,
-                            "auth_mode": mode,
-                            "exception": exc_msg,
-                            "attempt": gen_try,
-                            "prompt_mode": prompt_mode,
-                            "prompt_hash": cache_key[:16],
-                        }
-                    )
-                    if self._is_pollinations_quota_exhausted(
-                        status_code="exception",
-                        response_preview=exc_msg,
-                    ):
-                        quota_fallback_status = "exception"
-                        quota_fallback_reason = "pollinations_quota_exception"
-                        break
-                    continue
-            if quota_fallback_reason:
-                break
-
-        if quota_fallback_reason:
-            self._log_visual_event(
-                {
-                    "event": "pollinations_quota_fallback_trigger",
-                    "index": index,
-                    "role": role_key,
-                    "status": quota_fallback_status,
-                    "reason": quota_fallback_reason,
-                }
-            )
-            gemini_asset = self._generate_image_with_gemini(
-                prompt=prompt_text,
-                index=index,
-                paragraph=paragraph,
-                keyword=keyword,
-                role=role,
-            )
-            if gemini_asset is not None:
-                return gemini_asset
-
-        if best_candidate_path is not None and best_candidate_path.exists():
-            self._log_visual_event(
-                {
-                    "event": "generated_image_best_effort_accept",
-                    "provider": "pollinations",
-                    "index": index,
-                    "model": model,
-                    "path": str(best_candidate_path),
-                    "reason": best_candidate_reason,
-                    "metrics": best_candidate_metrics,
-                    "score": round(float(best_candidate_score), 4),
-                }
-            )
-            return ImageAsset(
-                path=best_candidate_path,
-                alt=self._build_alt_text(keyword, "generated image"),
-                anchor_text=paragraph,
-                source_kind="pollinations",
-                source_url=f"pollinations://{model}",
-                license_note="Generated by Pollinations.ai.",
-            )
-        fallback = self._fallback_asset_for_role(role=role_key, index=index)
-        if fallback is not None:
-            return fallback
-        return None
+        # Pollinations path removed by policy: always forward to Gemini image generation.
+        self._log_visual_event(
+            {
+                "event": "pollinations_disabled_forwarded",
+                "index": int(index or 0),
+                "role": str(role or "content"),
+                "provider": "gemini",
+            }
+        )
+        return self._generate_image_with_gemini(
+            prompt=prompt,
+            index=index,
+            paragraph=paragraph,
+            keyword=keyword,
+            role=role,
+        )
 
     def _simplify_prompt_for_retry(self, prompt: str, retry_index: int, role: str) -> str:
         text = re.sub(r"\s+", " ", str(prompt or "")).strip()
@@ -1453,40 +1143,6 @@ class VisualPipeline:
             text = f"{text}. software troubleshooting checklist flow diagram"
         text += " no physical hazards, no damaged hardware"
         return re.sub(r"\s+", " ", text).strip()[:900]
-
-    def _is_pollinations_quota_exhausted(self, status_code: int | str, response_preview: str = "") -> bool:
-        text = str(response_preview or "").lower()
-        try:
-            code = int(status_code)  # type: ignore[arg-type]
-        except Exception:
-            code = -1
-        if code == 429:
-            return True
-        if code in {402, 403} and any(
-            token in text
-            for token in (
-                "quota",
-                "limit",
-                "rate limit",
-                "too many requests",
-                "exceeded",
-                "billing",
-                "credit",
-            )
-        ):
-            return True
-        if code == -1 and any(
-            token in text
-            for token in (
-                "429",
-                "quota",
-                "rate limit",
-                "too many requests",
-                "limit exceeded",
-            )
-        ):
-            return True
-        return False
 
     def _validate_generated_asset(
         self,
@@ -1769,24 +1425,6 @@ class VisualPipeline:
 
         return (True, True, "ok")
 
-    def _resolve_pollinations_model(self, role: str = "content") -> str:
-        # Policy: all generated images use gptimage.
-        requested = (
-            str(getattr(self.visual_settings, "pollinations_thumbnail_model", "") or "").strip()
-            if str(role or "").lower().strip() == "thumbnail"
-            else str(getattr(self.visual_settings, "pollinations_content_model", "") or "").strip()
-        )
-        if requested and requested.lower() != "gptimage":
-            self._log_visual_event(
-                {
-                    "event": "pollinations_model_forced",
-                    "requested": requested,
-                    "forced": "gptimage",
-                    "role": str(role or "content"),
-                }
-            )
-        return "gptimage"
-
     def _build_safety_settings(self) -> list[dict[str, str]]:
         # Keep legal-safe defaults while avoiding over-blocking on benign editorial visuals.
         return [
@@ -1989,7 +1627,7 @@ class VisualPipeline:
             return None
         self._log_visual_event(
             {
-                "event": "pollinations_image_fallback_local",
+                "event": "gemini_image_fallback_local",
                 "role": "thumbnail" if is_thumb else "inline",
                 "source": str(src),
                 "target": str(dst),
@@ -1999,7 +1637,7 @@ class VisualPipeline:
             path=dst,
             alt=self._build_alt_text("troubleshooting workflow", "fallback image"),
             anchor_text="",
-            source_kind="pollinations",
+            source_kind="gemini",
             source_url="local://fallback",
             license_note="Local fallback image.",
         )

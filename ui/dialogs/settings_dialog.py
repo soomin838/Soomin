@@ -100,10 +100,6 @@ def _is_valid_gemini_key(value: str) -> bool:
     return bool(re.fullmatch(r"AIza[0-9A-Za-z_-]{20,}", value.strip()))
 
 
-def _is_valid_pollinations_key(value: str) -> bool:
-    return bool(re.fullmatch(r"sk_[0-9A-Za-z_-]{16,}", value.strip()))
-
-
 def _is_valid_blogger_blog_id(value: str) -> bool:
     return bool(re.fullmatch(r"\d{8,30}", value.strip()))
 
@@ -257,26 +253,22 @@ class SettingsDialog(QDialog):
         form = QFormLayout(page)
         form.setSpacing(10)
         self.image_provider = QComboBox()
-        self.image_provider.addItems(["pollinations"])
-        self.image_provider.setCurrentText("pollinations")
+        self.image_provider.addItems(["gemini"])
+        self.image_provider.setCurrentText("gemini")
         self.image_provider.setEnabled(False)
         self.enable_img = QCheckBox()
         self.enable_img.setChecked(
             _nested_get(self.data, "visual.enable_gemini_image_generation").strip().lower() in {"1", "true", "yes", "on"}
         )
-        self.pollinations_key = QLineEdit(_nested_get(self.data, "visual.pollinations_api_key"))
-        self.pollinations_key.setPlaceholderText("sk_... (Pollinations Image API Key)")
-        self.pollinations_thumb_model = QLineEdit("gptimage")
-        self.pollinations_thumb_model.setReadOnly(True)
-        self.pollinations_content_model = QLineEdit("gptimage")
-        self.pollinations_content_model.setReadOnly(True)
+        self.gemini_image_model = QLineEdit(
+            (_nested_get(self.data, "visual.gemini_image_model") or "models/imagen-3.0-generate-001").strip()
+        )
+        self.gemini_image_model.setPlaceholderText("models/imagen-3.0-generate-001")
         self.target_images = QLineEdit("2")
         self.target_images.setReadOnly(True)
         form.addRow("이미지 공급자", self.image_provider)
         form.addRow("?대?吏 ?앹꽦 ?ъ슜", self.enable_img)
-        form.addRow("Pollinations API Key", self.pollinations_key)
-        form.addRow("Pollinations ?몃꽕??紐⑤뜽", self.pollinations_thumb_model)
-        form.addRow("Pollinations 蹂몃Ц 紐⑤뜽", self.pollinations_content_model)
+        form.addRow("Gemini 이미지 모델", self.gemini_image_model)
         form.addRow("寃뚯떆湲??紐⑺몴 ?대?吏", self.target_images)
         self._add_tab("?대?吏", self._wrap_scroll(page))
 
@@ -665,7 +657,6 @@ class SettingsDialog(QDialog):
 
     def save(self) -> None:
         api_key = self.gemini_key.text().strip()
-        pollinations_key = self.pollinations_key.text().strip()
         blog_id = self.blog_id.text().strip()
         token = self.token_path.text().strip()
 
@@ -712,9 +703,6 @@ class SettingsDialog(QDialog):
         elif api_key and (not _is_valid_gemini_key(api_key)):
             QMessageBox.warning(self, "?뺤떇 ?ㅻ쪟", "?낅젰??Gemini API Key ?뺤떇???щ컮瑜댁? ?딆뒿?덈떎.")
             return
-        # Pollinations key is optional (anonymous plan supported).
-        if pollinations_key.upper() in {"POLLINATIONS_API_KEY", "YOUR_POLLINATIONS_API_KEY"}:
-            pollinations_key = ""
         if not blog_id:
             QMessageBox.warning(self, "?낅젰 ?꾩슂", "Blogger Blog ID???꾩닔?낅땲??")
             return
@@ -734,11 +722,16 @@ class SettingsDialog(QDialog):
         if selected_model:
             _nested_set(self.data, "gemini.model", selected_model)
             _nested_set(self.data, "visual.gemini_prompt_model", selected_model)
-        _nested_set(self.data, "visual.image_provider", "pollinations")
-        _nested_set(self.data, "visual.pollinations_enabled", True)
-        _nested_set(self.data, "visual.pollinations_api_key", pollinations_key)
-        _nested_set(self.data, "visual.pollinations_thumbnail_model", "gptimage")
-        _nested_set(self.data, "visual.pollinations_content_model", "gptimage")
+        _nested_set(self.data, "visual.image_provider", "gemini")
+        _nested_set(self.data, "visual.pollinations_enabled", False)
+        _nested_set(self.data, "visual.pollinations_api_key", "")
+        _nested_set(self.data, "visual.pollinations_thumbnail_model", "")
+        _nested_set(self.data, "visual.pollinations_content_model", "")
+        _nested_set(
+            self.data,
+            "visual.gemini_image_model",
+            (self.gemini_image_model.text().strip() or "models/imagen-3.0-generate-001"),
+        )
         _nested_set(self.data, "blogger.blog_id", blog_id)
         _nested_set(self.data, "blogger.credentials_path", token)
         _nested_set(self.data, "integrations.enabled", integrations_enabled)
@@ -757,17 +750,17 @@ class SettingsDialog(QDialog):
         _nested_set(self.data, "visual.cache_dir", "storage/image_cache")
         _nested_set(self.data, "visual.fallback_banner", "assets/fallback/banner.png")
         _nested_set(self.data, "visual.fallback_inline", "assets/fallback/inline.png")
-        _nested_set(self.data, "images.provider", "pollinations")
+        _nested_set(self.data, "images.provider", "gemini")
         _nested_set(self.data, "images.banner_count", 1)
         _nested_set(self.data, "images.inline_count", 1)
         _nested_set(self.data, "images.cache_dir", "storage/image_cache")
         _nested_set(self.data, "images.fallback_banner", "assets/fallback/banner.png")
         _nested_set(self.data, "images.fallback_inline", "assets/fallback/inline.png")
-        _nested_set(self.data, "images.pollinations.model", "gptimage")
-        _nested_set(self.data, "images.pollinations.size", "1024x1024")
-        _nested_set(self.data, "images.pollinations.timeout_sec", 30)
+        _nested_set(self.data, "images.pollinations.model", "")
+        _nested_set(self.data, "images.pollinations.size", "")
+        _nested_set(self.data, "images.pollinations.timeout_sec", 0)
         _nested_set(self.data, "llm.provider", "gemini")
-        _nested_set(self.data, "llm.enable_image_generation", False)
+        _nested_set(self.data, "llm.enable_image_generation", True)
         _nested_set(self.data, "llm.enable_refine_loop", False)
         _nested_set(self.data, "llm.enable_judge_post", False)
         local_llm = self._local_llm_settings_from_ui()

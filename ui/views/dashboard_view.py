@@ -454,10 +454,8 @@ class MainWindow(QMainWindow):
     def _build_mascot_assets(self) -> None:
         self.mascot_assets = MascotAssetManager(
             runtime_root=self.root,
-            pollinations_api_key=str(getattr(self.controller.settings.visual, "pollinations_api_key", "") or ""),
-            pollinations_base_url=str(
-                getattr(self.controller.settings.visual, "pollinations_base_url", "") or "https://gen.pollinations.ai"
-            ),
+            pollinations_api_key="",
+            pollinations_base_url="",
             allow_ui_api_calls=False,
         )
         self.mascot_canvas.set_asset_manager(self.mascot_assets)

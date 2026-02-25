@@ -37,10 +37,8 @@ class PollinationsCache:
         out = self.cache_dir / f"{digest}.png"
         if out.exists():
             return out
-        if not self.allow_network:
-            return None
-        if not self.api_key:
-            return None
+        # Policy: UI asset generation never uses external image APIs at runtime.
+        return None
 
         endpoint = f"{self.base_url}/image/{quote(prompt, safe='')}"
         params = {

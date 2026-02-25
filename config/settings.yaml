@@ -237,18 +237,18 @@ visual:
   target_images_per_post: 2
   max_banner_images: 1
   max_inline_images: 1
-  image_provider: "pollinations"
+  image_provider: "gemini"
   enable_gemini_image_generation: true
   allow_chart_fallback: false
   gemini_prompt_model: "gemini-2.0-flash"
   gemini_image_model: "models/imagen-3.0-generate-001"
   image_request_interval_seconds: 20
-  pollinations_enabled: true
+  pollinations_enabled: false
   pollinations_api_key: ""
-  pollinations_base_url: "https://gen.pollinations.ai"
-  pollinations_thumbnail_model: "gptimage"
-  pollinations_content_model: "gptimage"
-  pollinations_timeout_sec: 30
+  pollinations_base_url: ""
+  pollinations_thumbnail_model: ""
+  pollinations_content_model: ""
+  pollinations_timeout_sec: 0
   prompt_suffix: "no text, no letters, no numbers, no logos, no watermark"
   thumbnail_ocr_verify: false
   screenshot_priority_keywords: []
@@ -263,11 +263,11 @@ indexing:
   daily_quota: 200
 
 images:
-  provider: "pollinations"
+  provider: "gemini"
   pollinations:
-    model: "gptimage"
-    size: "1024x1024"
-    timeout_sec: 30
+    model: ""
+    size: ""
+    timeout_sec: 0
   banner_count: 1
   inline_count: 1
   cache_dir: "storage/image_cache"

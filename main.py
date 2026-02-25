@@ -949,26 +949,20 @@ class AgentController:
                 changed = True
 
             provider = (_nested_get(raw, "visual.image_provider") or "").strip().lower()
-            if provider != "pollinations":
-                _nested_set(raw, "visual.image_provider", "pollinations")
+            if provider != "gemini":
+                _nested_set(raw, "visual.image_provider", "gemini")
                 changed = True
-            pollinations_raw = (
+            visual_raw = (
                 raw.get("visual", {}) if isinstance(raw.get("visual", {}), dict) else {}
             )
-            if "pollinations_enabled" not in pollinations_raw:
-                _nested_set(raw, "visual.pollinations_enabled", True)
+            if str(visual_raw.get("pollinations_enabled", "")).strip().lower() not in {"false", "0", "no", "off"}:
+                _nested_set(raw, "visual.pollinations_enabled", False)
                 changed = True
-            if str(pollinations_raw.get("pollinations_thumbnail_model", "")).strip() != "gptimage":
-                _nested_set(raw, "visual.pollinations_thumbnail_model", "gptimage")
-                changed = True
-            if str(pollinations_raw.get("pollinations_content_model", "")).strip() != "gptimage":
-                _nested_set(raw, "visual.pollinations_content_model", "gptimage")
-                changed = True
-            if "thumbnail_ocr_verify" not in pollinations_raw:
+            if "thumbnail_ocr_verify" not in visual_raw:
                 _nested_set(raw, "visual.thumbnail_ocr_verify", False)
                 changed = True
-            if str(_nested_get(raw, "visual.enable_gemini_image_generation") or "").strip().lower() not in {"false", "0", "no", "off"}:
-                _nested_set(raw, "visual.enable_gemini_image_generation", False)
+            if str(_nested_get(raw, "visual.enable_gemini_image_generation") or "").strip().lower() in {"false", "0", "no", "off", ""}:
+                _nested_set(raw, "visual.enable_gemini_image_generation", True)
                 changed = True
 
             try:
@@ -1121,11 +1115,6 @@ def _nested_set(data: dict, dotted: str, value) -> None:
 def _is_valid_gemini_key(value: str) -> bool:
     # Typical Google API key pattern.
     return bool(re.fullmatch(r"AIza[0-9A-Za-z_-]{20,}", value.strip()))
-
-
-def _is_valid_pollinations_key(value: str) -> bool:
-    # Pollinations secret key pattern (example: sk_xxx...)
-    return bool(re.fullmatch(r"sk_[0-9A-Za-z_-]{16,}", value.strip()))
 
 
 def _is_valid_blogger_blog_id(value: str) -> bool:

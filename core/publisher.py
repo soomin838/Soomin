@@ -530,7 +530,7 @@ class Publisher:
         )
         thumbnail = images[0]
         thumbnail_kind = (getattr(thumbnail, "source_kind", "") or "").strip().lower()
-        if thumbnail_kind not in {"gemini", "generated", "pollinations"}:
+        if thumbnail_kind not in {"gemini", "generated"}:
             raise RuntimeError("Thumbnail must be generated image. retry required")
         thumb_src = str(preflight_thumbnail_src or "").strip()
         thumb_is_data = thumb_src.lower().startswith("data:image/")
@@ -712,7 +712,7 @@ class Publisher:
             return ""
         for img in images:
             kind = (getattr(img, "source_kind", "") or "").strip().lower()
-            if kind not in {"gemini", "generated", "pollinations"}:
+            if kind not in {"gemini", "generated"}:
                 continue
             src = str(src_map.get(str(img.path), "") or "").strip()
             if src and self._is_blogger_media_url(src):

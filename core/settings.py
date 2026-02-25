@@ -57,19 +57,19 @@ class VisualSettings:
     target_images_per_post: int = 2
     max_banner_images: int = 1
     max_inline_images: int = 1
-    image_provider: str = "pollinations"
+    image_provider: str = "gemini"
     screenshot_priority_keywords: list[str] = field(default_factory=list)
-    enable_gemini_image_generation: bool = False
+    enable_gemini_image_generation: bool = True
     gemini_image_model: str = "models/imagen-3.0-generate-001"
     gemini_prompt_model: str = "gemini-2.0-flash"
     allow_chart_fallback: bool = False
     image_request_interval_seconds: int = 20
-    pollinations_enabled: bool = True
+    pollinations_enabled: bool = False
     pollinations_api_key: str = ""
-    pollinations_base_url: str = "https://gen.pollinations.ai"
-    pollinations_thumbnail_model: str = "gptimage"
-    pollinations_content_model: str = "gptimage"
-    pollinations_timeout_sec: int = 30
+    pollinations_base_url: str = ""
+    pollinations_thumbnail_model: str = ""
+    pollinations_content_model: str = ""
+    pollinations_timeout_sec: int = 0
     thumbnail_ocr_verify: bool = False
     cache_dir: str = "storage/image_cache"
     fallback_banner: str = "assets/fallback/banner.png"
@@ -355,7 +355,7 @@ class ImageSourcesPolicySettings:
 
 @dataclass
 class ImagesPolicySettings:
-    provider: str = "pollinations"
+    provider: str = "gemini"
     banner_count: int = 1
     inline_count: int = 1
     cache_dir: str = "storage/image_cache"
@@ -535,18 +535,15 @@ def load_settings(path: Path) -> AppSettings:
             "prompt_suffix",
             str(images_raw.get("prompt_suffix", "no text, no letters, no numbers, no logos, no watermark")),
         )
-        # Strict split: runtime image provider is always pollinations.
-        raw["visual"].setdefault("image_provider", "pollinations")
-        pollinations_raw = dict(images_raw.get("pollinations", {}) or {})
-        pollinations_model = str(pollinations_raw.get("model", "gptimage") or "gptimage").strip() or "gptimage"
-        forced_model = "gptimage" if pollinations_model.lower() != "gptimage" else pollinations_model
-        raw["visual"].setdefault("pollinations_thumbnail_model", forced_model)
-        raw["visual"].setdefault("pollinations_content_model", forced_model)
-        if "timeout_sec" in pollinations_raw:
-            try:
-                raw["visual"].setdefault("pollinations_timeout_sec", max(5, int(pollinations_raw.get("timeout_sec", 30))))
-            except Exception:
-                pass
+        # Runtime source of truth: Gemini-only image generation.
+        src_provider = str(images_raw.get("provider", "gemini") or "gemini").strip().lower()
+        if src_provider != "gemini":
+            settings_warnings.append(
+                f"images.provider={src_provider} is deprecated; runtime forces visual.image_provider=gemini."
+            )
+        raw["visual"]["image_provider"] = "gemini"
+        raw["visual"]["enable_gemini_image_generation"] = True
+        raw["visual"]["pollinations_enabled"] = False
     if publishing_raw:
         raw.setdefault("budget", {})
         raw.setdefault("publish", {})
