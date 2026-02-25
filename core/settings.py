@@ -116,6 +116,7 @@ class PublishSettings:
     allow_banner_fallback_publish: bool = True
     strict_thumbnail_blogger_media: bool = True
     thumbnail_data_uri_allowed: bool = False
+    auto_allow_data_uri_on_blogger_405: bool = True
     thumbnail_preflight_only: bool = False
 
 
@@ -579,6 +580,12 @@ def load_settings(path: Path) -> AppSettings:
         )
         raw["publish"]["thumbnail_data_uri_allowed"] = bool(
             publishing_raw.get("thumbnail_data_uri_allowed", raw["publish"].get("thumbnail_data_uri_allowed", False))
+        )
+        raw["publish"]["auto_allow_data_uri_on_blogger_405"] = bool(
+            publishing_raw.get(
+                "auto_allow_data_uri_on_blogger_405",
+                raw["publish"].get("auto_allow_data_uri_on_blogger_405", True),
+            )
         )
         raw["publish"]["thumbnail_preflight_only"] = bool(
             publishing_raw.get("thumbnail_preflight_only", raw["publish"].get("thumbnail_preflight_only", False))

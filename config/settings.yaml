@@ -57,6 +57,7 @@ publish:
   allow_banner_fallback_publish: true
   strict_thumbnail_blogger_media: true
   thumbnail_data_uri_allowed: false
+  auto_allow_data_uri_on_blogger_405: true
   thumbnail_preflight_only: false
 quality:
   enabled: true

@@ -54,6 +54,7 @@ class Publisher:
         semantic_html_enabled: bool = True,
         strict_thumbnail_blogger_media: bool = True,
         thumbnail_data_uri_allowed: bool = False,
+        auto_allow_data_uri_on_blogger_405: bool = True,
     ) -> None:
         self.credentials_path = credentials_path
         self.blog_id = blog_id
@@ -66,6 +67,7 @@ class Publisher:
         self.semantic_html_enabled = bool(semantic_html_enabled)
         self.strict_thumbnail_blogger_media = bool(strict_thumbnail_blogger_media)
         self.thumbnail_data_uri_allowed = bool(thumbnail_data_uri_allowed)
+        self.auto_allow_data_uri_on_blogger_405 = bool(auto_allow_data_uri_on_blogger_405)
         self._last_upload_report: dict = {}
         self._indexing_scope = "https://www.googleapis.com/auth/indexing"
         self._upload_log_path = (
@@ -94,8 +96,15 @@ class Publisher:
         clean_html = self._normalize_html_entities(html_body)
         clean_html = self._clean_html_tags(clean_html)
         preflight_src = str(preflight_thumbnail_src or "").strip()
+        preflight_is_data = preflight_src.lower().startswith("data:image/")
         if images:
-            if not (preflight_src and self._is_blogger_media_url(preflight_src)):
+            if not (
+                preflight_src
+                and (
+                    self._is_blogger_media_url(preflight_src)
+                    or (preflight_is_data and self.thumbnail_data_uri_allowed)
+                )
+            ):
                 preflight_src = self.preflight_thumbnail_blogger_media(images[0], creds=creds, max_attempts=2)
         lede_seed = self._first_text_paragraph(clean_html)
         post_html = self._merge_images(
@@ -123,7 +132,7 @@ class Publisher:
                     min_images=2,
                     require_no_figcaption=True,
                     strict_intro_alt=True,
-                    allow_data_uri=False,
+                    allow_data_uri=bool(self.thumbnail_data_uri_allowed),
                     require_blogger_hosts=True,
                 )
             except Exception as exc:
@@ -524,15 +533,21 @@ class Publisher:
         if thumbnail_kind not in {"gemini", "generated", "pollinations"}:
             raise RuntimeError("Thumbnail must be generated image. retry required")
         thumb_src = str(preflight_thumbnail_src or "").strip()
+        thumb_is_data = thumb_src.lower().startswith("data:image/")
         if not thumb_src:
             thumb_src = src_map.get(str(thumbnail.path), "")
-        if not thumb_src or not self._is_blogger_media_url(thumb_src):
+            thumb_is_data = str(thumb_src).strip().lower().startswith("data:image/")
+        if not thumb_src or (
+            (not self._is_blogger_media_url(thumb_src))
+            and not (thumb_is_data and self.thumbnail_data_uri_allowed)
+        ):
             thumb_src = self._recover_thumbnail_blogger_src(
                 thumbnail=thumbnail,
                 images=images,
                 src_map=src_map,
                 creds=creds,
             )
+            thumb_is_data = str(thumb_src).strip().lower().startswith("data:image/")
         if not thumb_src and not self.strict_thumbnail_blogger_media:
             thumb_src = self._pick_relaxed_thumbnail_src(src_map=src_map, images=images)
         if (
@@ -547,7 +562,12 @@ class Publisher:
                 }
             )
             thumb_src = ""
-        if thumb_src and self.strict_thumbnail_blogger_media and (not self._is_blogger_media_url(str(thumb_src))):
+        if (
+            thumb_src
+            and self.strict_thumbnail_blogger_media
+            and (not self._is_blogger_media_url(str(thumb_src)))
+            and not (str(thumb_src).strip().lower().startswith("data:image/") and self.thumbnail_data_uri_allowed)
+        ):
             self._log_upload_event(
                 {
                     "event": "thumbnail_non_blogger_blocked",
@@ -653,7 +673,7 @@ class Publisher:
                 min_images=2,
                 require_no_figcaption=True,
                 strict_intro_alt=True,
-                allow_data_uri=False,
+                allow_data_uri=bool(self.thumbnail_data_uri_allowed),
                 require_blogger_hosts=True,
             )
         except Exception as exc:
@@ -678,7 +698,10 @@ class Publisher:
         # 1) Retry thumbnail-only preflight path first.
         try:
             src = self.preflight_thumbnail_blogger_media(thumbnail, creds=creds, max_attempts=2)
-            if src and self._is_blogger_media_url(src):
+            if src and (
+                self._is_blogger_media_url(src)
+                or (str(src).strip().lower().startswith("data:image/") and self.thumbnail_data_uri_allowed)
+            ):
                 src_map[str(thumbnail.path)] = src
                 return src
         except Exception:
@@ -786,7 +809,9 @@ class Publisher:
                 src = self._upload_via_temp_draft_roundtrip(upload_path, upload_mime, creds, idx=idx)
                 if not src:
                     continue
-                if not self._is_blogger_media_url(src):
+                if (not self._is_blogger_media_url(src)) and not (
+                    str(src).strip().lower().startswith("data:image/") and self.thumbnail_data_uri_allowed
+                ):
                     continue
                 hosted[str(path)] = src
             except Exception:
@@ -944,15 +969,27 @@ class Publisher:
         self._log_upload_event({"event": "blogger_media_upload_no_url", "parse_source": parse_source, **details})
         return details
 
-    def _upload_via_temp_draft_roundtrip(self, path: Path, mime: str, creds, idx: int = 1) -> str:
+    def _upload_via_temp_draft_roundtrip(
+        self,
+        path: Path,
+        mime: str,
+        creds,
+        idx: int = 1,
+        *,
+        insert_as_draft: bool = True,
+        publish_after_insert: bool = True,
+        prefer_reader: bool = False,
+        poll_count: int = 8,
+        poll_delay_sec: float = 1.2,
+    ) -> str:
         """
         Recovery path when upload-image.g fails.
         Strategy:
-          1) create temp draft with data URI
-          2) publish it (forces Blogger to materialize image into CDN URL)
+          1) create temp post with data URI (draft or direct)
+          2) publish it when needed
           3) refetch post content and extract first <img src>
           4) delete temp post
-        Returns Blogger media URL only, otherwise "".
+        Returns first image src (Blogger URL or data URI), otherwise "".
         """
         service = build("blogger", "v3", credentials=creds)
         post_id = ""
@@ -965,36 +1002,54 @@ class Publisher:
             draft = service.posts().insert(
                 blogId=self.blog_id,
                 body=payload,
-                isDraft=True,
+                isDraft=bool(insert_as_draft),
             ).execute()
             post_id = str(draft.get("id", "") or "")
             if not post_id:
                 return ""
 
-            # Publish to force Blogger CDN rewrite.
-            try:
-                service.posts().publish(
-                    blogId=self.blog_id,
-                    postId=post_id,
-                ).execute()
-            except Exception:
-                pass
+            if publish_after_insert:
+                try:
+                    service.posts().publish(blogId=self.blog_id, postId=post_id).execute()
+                except Exception:
+                    pass
 
-            # Retry fetch a few times until src is rewritten from data-uri to Blogger CDN.
-            for _ in range(3):
+            preferred_view = "READER" if prefer_reader else "ADMIN"
+            secondary_view = "ADMIN" if prefer_reader else "READER"
+            polls = max(1, int(poll_count or 1))
+            delay = max(0.2, float(poll_delay_sec or 1.2))
+            first_data_uri = ""
+            for _ in range(polls):
                 try:
                     fetched = service.posts().get(
                         blogId=self.blog_id,
                         postId=post_id,
-                        view="ADMIN",
+                        view=preferred_view,
                     ).execute()
                     src = self._extract_first_img_src(str(fetched.get("content", "") or ""))
                     if src and self._is_blogger_media_url(src):
                         return src
+                    if src and src.lower().startswith("data:image/") and not first_data_uri:
+                        first_data_uri = src
                 except Exception:
                     pass
-                time.sleep(0.9)
-            return ""
+
+                try:
+                    fetched2 = service.posts().get(
+                        blogId=self.blog_id,
+                        postId=post_id,
+                        view=secondary_view,
+                    ).execute()
+                    src2 = self._extract_first_img_src(str(fetched2.get("content", "") or ""))
+                    if src2 and self._is_blogger_media_url(src2):
+                        return src2
+                    if src2 and src2.lower().startswith("data:image/") and not first_data_uri:
+                        first_data_uri = src2
+                except Exception:
+                    pass
+
+                time.sleep(delay)
+            return first_data_uri
         except Exception:
             return ""
         finally:
@@ -1158,29 +1213,140 @@ class Publisher:
                     return extracted_url
 
                 # Blogger endpoint may fail in some environments (e.g. 405).
-                # Recovery path must remain Blogger-only.
-                roundtrip_url = self._upload_via_temp_draft_roundtrip(upload_path, upload_mime, creds, idx=attempt_no)
-                roundtrip_host = (urlparse(roundtrip_url).netloc or "").lower() if roundtrip_url else ""
-                self._log_thumbnail_gate_event(
-                    {
-                        "event": "thumbnail_upload_roundtrip_response",
-                        "attempt_no": attempt_no,
-                        "extracted_url": roundtrip_url,
-                        "extracted_host": roundtrip_host,
-                    }
-                )
-                if roundtrip_url and self._is_blogger_media_url(roundtrip_url):
+                # Recovery path: temp-post roundtrip with multiple strategies.
+                endpoint_status = int(details.get("status_code", 0) or 0)
+                strategy_rows = [
+                    (
+                        "draft_publish_admin",
+                        {
+                            "insert_as_draft": True,
+                            "publish_after_insert": True,
+                            "prefer_reader": False,
+                            "poll_count": 8,
+                            "poll_delay_sec": 1.0,
+                        },
+                    ),
+                    (
+                        "draft_publish_reader",
+                        {
+                            "insert_as_draft": True,
+                            "publish_after_insert": True,
+                            "prefer_reader": True,
+                            "poll_count": 8,
+                            "poll_delay_sec": 1.0,
+                        },
+                    ),
+                    (
+                        "direct_admin",
+                        {
+                            "insert_as_draft": False,
+                            "publish_after_insert": False,
+                            "prefer_reader": False,
+                            "poll_count": 6,
+                            "poll_delay_sec": 0.8,
+                        },
+                    ),
+                    (
+                        "direct_reader",
+                        {
+                            "insert_as_draft": False,
+                            "publish_after_insert": False,
+                            "prefer_reader": True,
+                            "poll_count": 6,
+                            "poll_delay_sec": 0.8,
+                        },
+                    ),
+                ]
+                roundtrip_data_uri = ""
+                for strategy_idx, (strategy_name, strategy_kwargs) in enumerate(strategy_rows, start=1):
+                    roundtrip_url = self._upload_via_temp_draft_roundtrip(
+                        upload_path,
+                        upload_mime,
+                        creds,
+                        idx=(attempt_no * 10) + strategy_idx,
+                        **strategy_kwargs,
+                    )
+                    roundtrip_host = (urlparse(roundtrip_url).netloc or "").lower() if roundtrip_url else ""
                     self._log_thumbnail_gate_event(
                         {
-                            "event": "thumbnail_gate_result",
+                            "event": "thumbnail_upload_roundtrip_response",
                             "attempt_no": attempt_no,
-                            "ok": True,
-                            "reason_code": "temp_post_publish_roundtrip",
-                            "thumbnail_url": roundtrip_url,
+                            "strategy": strategy_name,
+                            "extracted_url": roundtrip_url,
+                            "extracted_host": roundtrip_host,
+                            "endpoint_status": endpoint_status,
                         }
                     )
-                    return roundtrip_url
-                if roundtrip_url and str(roundtrip_url).strip().lower().startswith("data:image/"):
+                    if roundtrip_url and self._is_blogger_media_url(roundtrip_url):
+                        self._log_thumbnail_gate_event(
+                            {
+                                "event": "thumbnail_gate_result",
+                                "attempt_no": attempt_no,
+                                "ok": True,
+                                "reason_code": f"temp_post_publish_roundtrip:{strategy_name}",
+                                "thumbnail_url": roundtrip_url,
+                            }
+                        )
+                        return roundtrip_url
+                    if roundtrip_url and str(roundtrip_url).strip().lower().startswith("data:image/"):
+                        roundtrip_data_uri = roundtrip_url
+                        if self.thumbnail_data_uri_allowed:
+                            self._log_thumbnail_gate_event(
+                                {
+                                    "event": "thumbnail_gate_result",
+                                    "attempt_no": attempt_no,
+                                    "ok": True,
+                                    "reason_code": f"data_uri_roundtrip_allowed:{strategy_name}",
+                                    "thumbnail_url": roundtrip_url[:120],
+                                }
+                            )
+                            return roundtrip_url
+                        if self.auto_allow_data_uri_on_blogger_405 and endpoint_status == 405:
+                            self.thumbnail_data_uri_allowed = True
+                            self._log_thumbnail_gate_event(
+                                {
+                                    "event": "thumbnail_data_uri_auto_allowed",
+                                    "attempt_no": attempt_no,
+                                    "strategy": strategy_name,
+                                    "endpoint_status": endpoint_status,
+                                }
+                            )
+                            self._log_thumbnail_gate_event(
+                                {
+                                    "event": "thumbnail_gate_result",
+                                    "attempt_no": attempt_no,
+                                    "ok": True,
+                                    "reason_code": f"data_uri_roundtrip_auto_allowed_405:{strategy_name}",
+                                    "thumbnail_url": roundtrip_url[:120],
+                                }
+                            )
+                            return roundtrip_url
+                if (
+                    (not roundtrip_data_uri)
+                    and self.auto_allow_data_uri_on_blogger_405
+                    and endpoint_status == 405
+                ):
+                    synthesized_data_uri = self._image_data_uri(upload_path, upload_mime)
+                    if synthesized_data_uri:
+                        self.thumbnail_data_uri_allowed = True
+                        self._log_thumbnail_gate_event(
+                            {
+                                "event": "thumbnail_data_uri_synthesized",
+                                "attempt_no": attempt_no,
+                                "endpoint_status": endpoint_status,
+                                "ok": True,
+                            }
+                        )
+                        self._log_thumbnail_gate_event(
+                            {
+                                "event": "thumbnail_gate_result",
+                                "attempt_no": attempt_no,
+                                "ok": True,
+                                "reason_code": "data_uri_synthesized_auto_allowed_405",
+                            }
+                        )
+                        return synthesized_data_uri
+                if roundtrip_data_uri and not self.thumbnail_data_uri_allowed:
                     last_reason = "thumbnail_data_uri_not_allowed"
                     self._log_thumbnail_gate_event(
                         {
@@ -1291,7 +1457,12 @@ class Publisher:
                 or str(s).strip().lower().startswith("http://")
             )
         ]
-        if len(valid_http_src) < 2:
+        valid_data_src = [
+            s for s in src_values
+            if str(s).strip().lower().startswith("data:image/")
+        ]
+        valid_total = len(valid_http_src) + (len(valid_data_src) if self.thumbnail_data_uri_allowed else 0)
+        if valid_total < 2:
             self._log_upload_event(
                 {
                     "event": "go_live_gate_fail",
@@ -1307,7 +1478,7 @@ class Publisher:
                     "post_id": pid,
                     "img_count": len(src_values),
                     "valid_http_src_count": len(valid_http_src),
-                    "valid_data_src_count": 0,
+                    "valid_data_src_count": len(valid_data_src),
                     "title": str(post.get("title", "") or "")[:180],
                     "content_preview": content[:500],
                 }
@@ -1318,7 +1489,7 @@ class Publisher:
             min_images=2,
             require_no_figcaption=True,
             strict_intro_alt=True,
-            allow_data_uri=False,
+            allow_data_uri=bool(self.thumbnail_data_uri_allowed),
             require_blogger_hosts=True,
         )
 

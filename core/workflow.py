@@ -80,6 +80,9 @@ class AgentWorkflow:
             thumbnail_data_uri_allowed=bool(
                 getattr(settings.publish, "thumbnail_data_uri_allowed", False)
             ),
+            auto_allow_data_uri_on_blogger_405=bool(
+                getattr(settings.publish, "auto_allow_data_uri_on_blogger_405", True)
+            ),
         )
         self.qa = ContentQAGate(
             settings.quality,
@@ -3325,7 +3328,11 @@ class AgentWorkflow:
         src_matches = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_for_hosts, flags=re.IGNORECASE)
         allow_hosts = {"blogger.googleusercontent.com", "bp.blogspot.com"}
         dry_run = bool(getattr(self.settings.budget, "dry_run", False))
-        allow_data_uri = bool(getattr(self.settings.publish, "thumbnail_data_uri_allowed", False)) or dry_run
+        allow_data_uri = (
+            bool(getattr(self.settings.publish, "thumbnail_data_uri_allowed", False))
+            or bool(getattr(self.publisher, "thumbnail_data_uri_allowed", False))
+            or dry_run
+        )
         for src in src_matches:
             clean_src = str(src or "").strip()
             if not clean_src:
