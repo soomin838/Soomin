@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ui.widgets.motion_button import MotionButton
@@ -16,18 +17,20 @@ class TopNav(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("TopNav")
-        self.setMinimumHeight(72)
+        self.setMinimumHeight(96)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(16, 10, 16, 10)
+        row.setContentsMargins(16, 12, 16, 12)
         row.setSpacing(10)
 
         brand = QVBoxLayout()
         brand.setSpacing(2)
-        title = QLabel("RezeroAgent")
-        title.setObjectName("Title")
+        self.title_label = QLabel("RezeroAgent")
+        self.title_label.setObjectName("Title")
+        self.title_label.setWordWrap(False)
         self.blog_name = QLabel("블로그: -")
         self.blog_name.setObjectName("Subtitle")
+        self.blog_name.setWordWrap(False)
         self.mascot_state = QLabel("◕‿◕")
         self.mascot_state.setObjectName("Subtitle")
 
@@ -38,12 +41,13 @@ class TopNav(QWidget):
         mascot_row.addWidget(self.mascot_state)
         mascot_row.addStretch(1)
 
-        sub = QLabel("macOS 글래스 감성 자동화 스튜디오")
-        sub.setObjectName("Subtitle")
-        brand.addWidget(title)
+        self.sub_label = QLabel("macOS 글래스 감성 자동화 스튜디오")
+        self.sub_label.setObjectName("Subtitle")
+        self.sub_label.setWordWrap(False)
+        brand.addWidget(self.title_label)
         brand.addLayout(mascot_row)
-        brand.addWidget(sub)
-        row.addLayout(brand, 1)
+        brand.addWidget(self.sub_label)
+        row.addLayout(brand, 2)
 
         center = QHBoxLayout()
         center.setContentsMargins(0, 0, 0, 0)
@@ -52,6 +56,7 @@ class TopNav(QWidget):
         self.status_chip.setObjectName("StatusChip")
         self.countdown_label = QLabel("다음 실행까지 00:00:00")
         self.countdown_label.setObjectName("Subtitle")
+        self.countdown_label.setWordWrap(False)
         center.addWidget(self.status_chip)
         center.addWidget(self.countdown_label)
         row.addLayout(center, 1)
@@ -77,6 +82,9 @@ class TopNav(QWidget):
         row.addWidget(self.theme_toggle_btn)
 
         self._mode = "auto"
+        self._full_blog_name = "블로그: -"
+        self._compact = False
+        self._apply_responsive_mode()
 
     def set_theme_mode(self, mode: str) -> None:
         clean = str(mode or "auto").strip().lower()
@@ -87,7 +95,8 @@ class TopNav(QWidget):
         self.status_chip.setText(clean_status)
         self.countdown_label.setText(str(countdown_text or "다음 실행까지 00:00:00"))
         if blog_name:
-            self.blog_name.setText(f"블로그: {blog_name}")
+            self._full_blog_name = f"블로그: {blog_name}"
+        self._apply_blog_elide()
 
         lower = clean_status.lower()
         if "running" in lower:
@@ -107,3 +116,24 @@ class TopNav(QWidget):
         else:
             self._mode = "dark"
         self.theme_mode_changed.emit(self._mode)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_mode()
+
+    def _apply_responsive_mode(self) -> None:
+        compact = self.width() < 1300
+        if compact != self._compact:
+            self._compact = compact
+            self.sub_label.setVisible(not compact)
+            self.help_btn.setText("도움" if compact else "도움말")
+            self.refresh_btn.setText("새로" if compact else "새로고침")
+            self.theme_toggle_btn.setText("테마" if compact else "라이트/다크")
+            self.setMinimumHeight(84 if compact else 96)
+        self._apply_blog_elide()
+
+    def _apply_blog_elide(self) -> None:
+        text = str(self._full_blog_name or "블로그: -")
+        width = max(120, self.blog_name.width() - 8)
+        fm = QFontMetrics(self.blog_name.font())
+        self.blog_name.setText(fm.elidedText(text, Qt.TextElideMode.ElideRight, width))

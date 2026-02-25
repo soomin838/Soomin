@@ -17,6 +17,7 @@ class TimelineStep(GlassCard):
         top = QHBoxLayout()
         self.title_label = QLabel(f"{icon} {title}".strip())
         self.title_label.setObjectName("Subtitle")
+        self.title_label.setWordWrap(False)
         self.badge = QLabel("pending")
         self.badge.setObjectName("Badge")
         top.addWidget(self.title_label, 1)
@@ -26,6 +27,7 @@ class TimelineStep(GlassCard):
         self.message_label.setWordWrap(True)
         root.addLayout(top)
         root.addWidget(self.message_label)
+        self.setMinimumHeight(76)
 
     def set_status(self, status: str, message: str = "") -> None:
         next_status = str(status or "pending").strip().lower()

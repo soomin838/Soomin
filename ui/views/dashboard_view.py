@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSequentialAnimationGroup, QTimer, Qt, QUrl
-from PySide6.QtGui import QBrush, QDesktopServices, QFont, QFontDatabase, QPalette, QPixmap
+from PySide6.QtGui import QBrush, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -54,7 +54,7 @@ class ToastManager(QWidget):
     def show_toast(self, message: str, level: str = "info", with_logs_button: bool = False) -> None:
         card = GlassCard(parent=self)
         card.set_state("error" if level == "error" else ("warning" if level == "warning" else "active"))
-        card.setFixedWidth(360)
+        card.setFixedWidth(min(420, max(280, int(self.width() * 0.95))))
         row = QHBoxLayout(card)
         row.setContentsMargins(10, 8, 10, 8)
         row.setSpacing(8)
@@ -134,7 +134,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("RezeroAgent Studio")
         self.resize(1360, 900)
-        self.setMinimumSize(1180, 760)
+        self.setMinimumSize(1080, 700)
         self._apply_cute_font()
         self._build_ui()
         self._bind_top_nav()
@@ -169,16 +169,18 @@ class MainWindow(QMainWindow):
             return
         font_dir = self.root / "storage" / "ui" / "fonts"
         font_dir.mkdir(parents=True, exist_ok=True)
-        loaded_family = ""
+        loaded_family = "Segoe UI"
         for fp in sorted(font_dir.glob("*.ttf")) + sorted(font_dir.glob("*.otf")):
             fid = QFontDatabase.addApplicationFont(str(fp))
             if fid != -1:
                 fams = QFontDatabase.applicationFontFamilies(fid)
                 if fams:
-                    loaded_family = fams[0]
-                    break
-        if not loaded_family:
-            loaded_family = "Segoe UI"
+                    candidate = QFont(fams[0], 10)
+                    metrics = QFontMetrics(candidate)
+                    # Guard against decorative fonts causing clipped text on compact layouts.
+                    if metrics.height() <= 22:
+                        loaded_family = fams[0]
+                        break
         app.setFont(QFont(loaded_family, 10))
 
     def _build_ui(self) -> None:
@@ -194,7 +196,7 @@ class MainWindow(QMainWindow):
 
         content_row = QHBoxLayout()
         content_row.setSpacing(10)
-        root.addLayout(content_row, 1)
+        root.addLayout(content_row, 5)
 
         # Left column
         left = QWidget()
@@ -212,7 +214,7 @@ class MainWindow(QMainWindow):
         hero_head.setSpacing(10)
 
         self.mascot_canvas = MascotCanvas()
-        self.mascot_canvas.setMinimumSize(300, 220)
+        self.mascot_canvas.setMinimumSize(260, 190)
         hero_head.addWidget(self.mascot_canvas, 1)
 
         right_info = QVBoxLayout()
@@ -223,6 +225,7 @@ class MainWindow(QMainWindow):
         self.hero_stage.setObjectName("Title")
         self.hero_task = QLabel("작업 준비 중")
         self.hero_task.setObjectName("ValueSmall")
+        self.hero_task.setWordWrap(True)
         self.hero_progress_value = QLabel("0%")
         self.hero_progress_value.setObjectName("Value")
         self.hero_progress = QProgressBar()
@@ -242,7 +245,8 @@ class MainWindow(QMainWindow):
         hero_head.addLayout(right_info, 1)
         hero_layout.addLayout(hero_head)
 
-        left_col.addWidget(self.hero_card, 1)
+        self.hero_card.setMinimumHeight(300)
+        left_col.addWidget(self.hero_card, 3)
 
         self.timeline_card = GlassCard()
         timeline_layout = QVBoxLayout(self.timeline_card)
@@ -260,15 +264,17 @@ class MainWindow(QMainWindow):
             TimelineStep("HTML", "</>"),
             TimelineStep("Publish", "✓"),
         ]
-        step_grid = QGridLayout()
-        step_grid.setHorizontalSpacing(8)
-        step_grid.setVerticalSpacing(8)
+        self.step_grid = QGridLayout()
+        self.step_grid.setHorizontalSpacing(8)
+        self.step_grid.setVerticalSpacing(8)
+        self._timeline_columns = 4
         for idx, step in enumerate(self.timeline_steps):
-            step_grid.addWidget(step, idx // 4, idx % 4)
+            self.step_grid.addWidget(step, idx // self._timeline_columns, idx % self._timeline_columns)
         timeline_layout.addWidget(t_title)
         timeline_layout.addWidget(self.pipeline_canvas)
-        timeline_layout.addLayout(step_grid)
-        left_col.addWidget(self.timeline_card, 1)
+        timeline_layout.addLayout(self.step_grid)
+        self.timeline_card.setMinimumHeight(290)
+        left_col.addWidget(self.timeline_card, 4)
 
         content_row.addWidget(left, 3)
 
@@ -284,11 +290,19 @@ class MainWindow(QMainWindow):
         err_layout.setSpacing(8)
         err_title = QLabel("Errors & Actions")
         err_title.setObjectName("Subtitle")
-        self.error_cards_wrap = QVBoxLayout()
+        self.error_cards_host = QWidget()
+        self.error_cards_wrap = QVBoxLayout(self.error_cards_host)
         self.error_cards_wrap.setSpacing(8)
+        self.error_cards_wrap.setContentsMargins(0, 0, 0, 0)
+        self.error_scroll = QScrollArea()
+        self.error_scroll.setWidgetResizable(True)
+        self.error_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.error_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.error_scroll.setWidget(self.error_cards_host)
         err_layout.addWidget(err_title)
-        err_layout.addLayout(self.error_cards_wrap)
-        right_col.addWidget(self.error_panel, 3)
+        err_layout.addWidget(self.error_scroll, 1)
+        self.error_panel.setMinimumHeight(210)
+        right_col.addWidget(self.error_panel, 4)
 
         self.usage_panel = GlassCard()
         usage_layout = QVBoxLayout(self.usage_panel)
@@ -301,7 +315,7 @@ class MainWindow(QMainWindow):
         self.usage_lines.setWordWrap(True)
         usage_layout.addWidget(usage_title)
         usage_layout.addWidget(self.usage_lines)
-        right_col.addWidget(self.usage_panel, 1)
+        right_col.addWidget(self.usage_panel, 2)
 
         self.schedule_panel = GlassCard()
         sched_layout = QVBoxLayout(self.schedule_panel)
@@ -309,11 +323,19 @@ class MainWindow(QMainWindow):
         sched_layout.setSpacing(8)
         sched_title = QLabel("Scheduled Queue (max 10)")
         sched_title.setObjectName("Subtitle")
-        self.schedule_rows = QVBoxLayout()
+        self.schedule_host = QWidget()
+        self.schedule_rows = QVBoxLayout(self.schedule_host)
         self.schedule_rows.setSpacing(6)
+        self.schedule_rows.setContentsMargins(0, 0, 0, 0)
+        self.schedule_scroll = QScrollArea()
+        self.schedule_scroll.setWidgetResizable(True)
+        self.schedule_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.schedule_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.schedule_scroll.setWidget(self.schedule_host)
         sched_layout.addWidget(sched_title)
-        sched_layout.addLayout(self.schedule_rows)
-        right_col.addWidget(self.schedule_panel, 2)
+        sched_layout.addWidget(self.schedule_scroll, 1)
+        self.schedule_panel.setMinimumHeight(180)
+        right_col.addWidget(self.schedule_panel, 3)
 
         content_row.addWidget(right, 2)
 
@@ -342,7 +364,7 @@ class MainWindow(QMainWindow):
 
         # Log panel
         self.log_panel = LogPanel()
-        root.addWidget(self.log_panel, 1)
+        root.addWidget(self.log_panel, 2)
 
         self.setCentralWidget(self.app_root)
 
@@ -353,17 +375,36 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._position_toast_layer()
+        self._relayout_timeline_steps()
         self._bg_apply_timer.start(80)
 
     def _position_toast_layer(self) -> None:
         if not hasattr(self, "toast_manager"):
             return
         margin = 18
-        w = 380
-        h = 260
+        w = min(420, max(280, int(self.app_root.width() * 0.30)))
+        h = min(300, max(180, int(self.app_root.height() * 0.32)))
         x = max(0, self.app_root.width() - w - margin)
         y = max(0, self.app_root.height() - h - margin)
         self.toast_manager.setGeometry(x, y, w, h)
+
+    def _relayout_timeline_steps(self) -> None:
+        if not hasattr(self, "step_grid"):
+            return
+        width = max(1, self.timeline_card.width())
+        if width < 620:
+            target_cols = 2
+        elif width < 900:
+            target_cols = 3
+        else:
+            target_cols = 4
+        if target_cols == getattr(self, "_timeline_columns", 4):
+            return
+        self._timeline_columns = target_cols
+        while self.step_grid.count():
+            self.step_grid.takeAt(0)
+        for idx, step in enumerate(self.timeline_steps):
+            self.step_grid.addWidget(step, idx // self._timeline_columns, idx % self._timeline_columns)
 
     def _bind_top_nav(self) -> None:
         self.top_nav.refresh_clicked.connect(self._on_refresh_clicked)

@@ -9,7 +9,7 @@ QWidget {
 }
 
 QLabel#Title {
-    font-size: 28px;
+    font-size: 24px;
     font-weight: 800;
     color: #EAF0FF;
 }
@@ -21,7 +21,7 @@ QLabel#Subtitle {
 }
 
 QLabel#Value {
-    font-size: 30px;
+    font-size: 26px;
     font-weight: 800;
     color: #EAF0FF;
 }
