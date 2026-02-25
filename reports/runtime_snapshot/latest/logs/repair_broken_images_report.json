@@ -1,0 +1,56 @@
+{
+  "ts_utc": "2026-02-20T13:36:08.157274+00:00",
+  "settings_path": "C:\\Users\\soomin\\AppData\\Roaming\\RezeroAgent\\config\\settings.yaml",
+  "post_count_scanned": 6,
+  "total_replaced": 0,
+  "rows": [
+    {
+      "post_id": "4146840881530444644",
+      "status": "scheduled",
+      "title": "Why Every Office Worker Needs to Know About Anthropic's Claude Today.",
+      "broken_count": 0,
+      "replaced_count": 0,
+      "skipped_reason": "all_ok"
+    },
+    {
+      "post_id": "1126152202000126195",
+      "status": "scheduled",
+      "title": "Why Everyone's Talking About Anthropic's AI for Office Productivity",
+      "broken_count": 0,
+      "replaced_count": 0,
+      "skipped_reason": "all_ok"
+    },
+    {
+      "post_id": "3350656637906695636",
+      "status": "scheduled",
+      "title": "Why everyone is talking about Anthropic’s surprising new approach to practical office productivity today.",
+      "broken_count": 0,
+      "replaced_count": 0,
+      "skipped_reason": "all_ok"
+    },
+    {
+      "post_id": "6276764931393389359",
+      "status": "scheduled",
+      "title": "Why Everyone Is Talking About OpenAI’s Breakthrough Workflows for Non-Technical Teams",
+      "broken_count": 0,
+      "replaced_count": 0,
+      "skipped_reason": "all_ok"
+    },
+    {
+      "post_id": "2858822674268189473",
+      "status": "live",
+      "title": "I Applied Supply Chain Principles to OpenAI for One Week. The Productivity Breakthrough Was Surprising.",
+      "broken_count": 0,
+      "replaced_count": 0,
+      "skipped_reason": "all_ok"
+    },
+    {
+      "post_id": "399748321457187179",
+      "status": "live",
+      "title": "Why everyone is talking about the massive productivity breakthrough hidden in Apple’s M-series chips.",
+      "broken_count": 0,
+      "replaced_count": 0,
+      "skipped_reason": "all_ok"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{"event": "ui_asset_probe", "state": "running", "model": "gemini-2.0-flash-exp", "status": 404, "ts": "2026-02-18T13:02:22.003587+00:00"}
+{"event": "ui_asset_probe", "state": "error", "model": "gemini-2.0-flash-exp", "status": 404, "ts": "2026-02-18T13:02:22.008612+00:00"}
+{"event": "ui_asset_probe", "state": "success", "model": "gemini-2.0-flash-exp", "status": 404, "ts": "2026-02-18T13:02:22.020600+00:00"}
+{"event": "ui_asset_probe", "state": "idle", "model": "gemini-2.0-flash-exp", "status": 404, "ts": "2026-02-18T13:02:22.098139+00:00"}
+{"event": "ui_asset_probe", "state": "success", "model": "gemini-2.5-flash-image", "status": 429, "ts": "2026-02-18T13:02:37.885398+00:00"}
+{"event": "ui_asset_probe", "state": "running", "model": "gemini-2.5-flash-image", "status": 429, "ts": "2026-02-18T13:02:37.911693+00:00"}
+{"event": "ui_asset_probe", "state": "error", "model": "gemini-2.5-flash-image", "status": 429, "ts": "2026-02-18T13:02:37.920428+00:00"}
+{"event": "ui_asset_probe", "state": "idle", "model": "gemini-2.5-flash-image", "status": 429, "ts": "2026-02-18T13:02:37.947387+00:00"}
+{"event": "ui_asset_probe", "state": "idle", "model": "gemini-2.0-flash-exp-image-generation", "status": 429, "ts": "2026-02-18T13:02:53.831520+00:00"}
+{"event": "ui_asset_probe", "state": "running", "model": "gemini-2.0-flash-exp-image-generation", "status": 429, "ts": "2026-02-18T13:02:53.842520+00:00"}
+{"event": "ui_asset_probe", "state": "error", "model": "gemini-2.0-flash-exp-image-generation", "status": 429, "ts": "2026-02-18T13:02:53.847954+00:00"}
+{"event": "ui_asset_probe", "state": "success", "model": "gemini-2.0-flash-exp-image-generation", "status": 429, "ts": "2026-02-18T13:02:53.848952+00:00"}
+{"event": "ui_asset_probe", "state": "running", "model": "gemini-3-pro-image-preview", "status": 429, "ts": "2026-02-18T13:03:09.661231+00:00"}
+{"event": "ui_asset_probe", "state": "idle", "model": "gemini-3-pro-image-preview", "status": 429, "ts": "2026-02-18T13:03:09.689752+00:00"}
+{"event": "ui_asset_probe", "state": "success", "model": "gemini-3-pro-image-preview", "status": 429, "ts": "2026-02-18T13:03:09.691757+00:00"}
+{"event": "ui_asset_probe", "state": "error", "model": "gemini-3-pro-image-preview", "status": 429, "ts": "2026-02-18T13:03:09.706480+00:00"}
+{"event": "ui_asset_fallback", "state": "running", "reason": "all_models_failed", "ts": "2026-02-18T13:03:10.276754+00:00"}
+{"event": "ui_asset_fallback", "state": "success", "reason": "all_models_failed", "ts": "2026-02-18T13:03:10.277921+00:00"}
+{"event": "ui_asset_fallback", "state": "idle", "reason": "all_models_failed", "ts": "2026-02-18T13:03:10.295510+00:00"}
+{"event": "ui_asset_fallback", "state": "error", "reason": "all_models_failed", "ts": "2026-02-18T13:03:10.436045+00:00"}
+{"event": "ui_asset_generated", "state": "idle", "path": "C:\\Users\\soomin\\AppData\\Roaming\\RezeroAgent\\storage\\ui\\mascot\\idle.png", "ts": "2026-02-22T11:20:14.879152+00:00"}
+{"event": "ui_asset_generated", "state": "running", "path": "C:\\Users\\soomin\\AppData\\Roaming\\RezeroAgent\\storage\\ui\\mascot\\running.png", "ts": "2026-02-22T11:20:41.815124+00:00"}
+{"event": "ui_asset_generated", "state": "warning", "path": "C:\\Users\\soomin\\AppData\\Roaming\\RezeroAgent\\storage\\ui\\mascot\\warning.png", "ts": "2026-02-22T11:21:51.592502+00:00"}
+{"event": "ui_asset_generated", "state": "error", "path": "C:\\Users\\soomin\\AppData\\Roaming\\RezeroAgent\\storage\\ui\\mascot\\error.png", "ts": "2026-02-22T11:22:26.131453+00:00"}
+{"event": "ui_asset_generated", "state": "success", "path": "C:\\Users\\soomin\\AppData\\Roaming\\RezeroAgent\\storage\\ui\\mascot\\success.png", "ts": "2026-02-22T11:23:00.035833+00:00"}

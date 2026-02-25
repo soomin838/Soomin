@@ -1,0 +1,17 @@
+[
+  {
+    "model": "imagen-3.0-generate-002",
+    "status": 404,
+    "body": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"models/imagen-3.0-generate-002 is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.\",\n    \"status\": \"NOT_F"
+  },
+  {
+    "model": "image-generation-006",
+    "status": 404,
+    "body": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"models/image-generation-006 is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.\",\n    \"status\": \"NOT_FOUN"
+  },
+  {
+    "model": "gemini-2.5-flash-image",
+    "status": 429,
+    "body": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to:"
+  }
+]

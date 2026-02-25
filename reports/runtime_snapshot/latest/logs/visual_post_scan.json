@@ -1,0 +1,17 @@
+{
+  "timestamp": "2026-02-18T11:31:48.626150+00:00",
+  "count": 1,
+  "findings": [
+    {
+      "post_id": "6612487327180846129",
+      "status": "scheduled",
+      "title": "Anthropic's latest move and 3 practical productivity lessons",
+      "url": "http://goundrich.blogspot.com/2026/02/anthropics-latest-move-and-3-practical.html",
+      "img_count": 0,
+      "placeholder_visual": true,
+      "markdown_image_text": false,
+      "data_uri_img": true,
+      "blogger_img": false
+    }
+  ]
+}

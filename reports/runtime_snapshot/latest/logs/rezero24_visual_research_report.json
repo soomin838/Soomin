@@ -1,0 +1,69 @@
+{
+  "timestamp": "2026-02-18T11:41:25.464553+00:00",
+  "trending_entities": [
+    "OpenAI",
+    "Apple",
+    "Anthropic",
+    "Meta",
+    "Tesla",
+    "Amazon",
+    "Google",
+    "xAI",
+    "Mistral",
+    "Scale AI"
+  ],
+  "model_candidates": [
+    "gemini-2.0-flash-exp",
+    "gemini-2.5-flash-image"
+  ],
+  "gemini_image_probe": [
+    {
+      "model": "gemini-2.5-flash-image",
+      "status": 429,
+      "ok": false,
+      "image_bytes": 0,
+      "detail": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_"
+    },
+    {
+      "model": "gemini-2.0-flash-exp-image-generation",
+      "status": 429,
+      "ok": false,
+      "image_bytes": 0,
+      "detail": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_"
+    },
+    {
+      "model": "gemini-3-pro-image-preview",
+      "status": 429,
+      "ok": false,
+      "image_bytes": 0,
+      "detail": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_"
+    }
+  ],
+  "blogger_media_endpoint_probe": {
+    "status": 405,
+    "content_type": "text/html; charset=UTF-8",
+    "detail": "<HTML>\n<HEAD>\n<TITLE>Method Not Allowed</TITLE>\n</HEAD>\n<BODY BGCOLOR=\"#FFFFFF\" TEXT=\"#000000\">\n<!-- GSE Default Error -->\n<H1>Method Not Allowed</H1>\n<H2>Error 405</H2>\n</BODY>\n</HTML>\n"
+  },
+  "blogger_data_uri_roundtrip_probe": {
+    "post_id": "1032929912794546174",
+    "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/1032929912794546174",
+    "contains_data_uri": true,
+    "contains_blogger_googleusercontent": false,
+    "html_preview": "<p><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABQAAABZZCAIAAADqMbfMAAEAAElEQVR4nOzdC1xT5f8H8IfrBsqYCoqJhpA6MHNYycwbliKmlnnph5d+Ti2dlUblZeUlUqx5y6Ul84ajFOmnmKnUBEvAS0NN5l+DpaGkGFNQYSpsXP+vc84YAzZugqD7vH++fm1n5zznOc95djjfPZdj8+b6cgIAAAAAAADwpLNt6QwAAAAAAAAAPAoIgAEAAAAAAMAqIAAGAAAAAAAAq4AAGAAAAAAAAKwCAmAAAAAAAACwCvY1F/3wUUtkBAAAAAAAAKBJ/eerKm/RAgwAAAAAAADW2gLcrE5dLk1KL8nMKcsvKM8vLLchxNXZxtXZ5mk320Bf+wE97B5xfgAAAAAAAMBKPKIA+J6ORJ8sOniuWFdc/aNb2vJb2vLLmrKjF0vasMhovsOUgY4u7EeTLwAAAAAAALAWz"
+  },
+  "oauth_scope_probe": {
+    "status": 200,
+    "scope": "https://www.googleapis.com/auth/blogger"
+  },
+  "photos_scope_probe": {
+    "status": 401,
+    "detail": "{\n  \"code\": 16,\n  \"message\": \"Authentication session is not defined.\"\n}"
+  },
+  "hot_topic_draft": {
+    "entity": "OpenAI",
+    "post_id": "8537156091471293772",
+    "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/8537156091471293772",
+    "img_tag_count": 2,
+    "html_source_excerpt": "<h2>Quick Take</h2>\n<p>OpenAI is the hottest company in today's trend scan. This draft is a visual rendering proof with explicit image tags.</p>\n<p><img src=\"https://upload.wikimedia.org/wikipedia/commons/thumb/4/4d/OpenAI_Logo.svg/512px-OpenAI_Logo.svg.png\" alt=\"OpenAI trend reference image\" loading=\"lazy\" /></p>\n<p><img src=\"https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png\" alt=\"comparison image for QA\" loading=\"lazy\" /></p>\n<p>End of QA draft body.</p>"
+  }
+}

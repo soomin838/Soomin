@@ -1,0 +1,326 @@
+﻿timezone: "America/New_York"
+
+schedule:
+  interval_hours: 2.4
+  min_interval_hours: 1.0
+  max_interval_hours: 4.5
+  jitter_minutes: 30
+  max_retry_backoff_minutes: 30
+
+windows:
+  use_task_scheduler: true
+
+budget:
+  free_mode: true
+  dry_run: false
+  daily_post_limit: 6
+  daily_gemini_call_limit: 50
+
+sync:
+  enabled: true
+  run_on_startup: true
+  interval_hours: 24
+  purge_deleted_after_days: 7
+  include_statuses: ["live", "scheduled"]
+  max_results_per_status: 500
+  max_pages: 20
+  strict_url_validation: true
+  log_path: "storage/logs/sync_blogger.jsonl"
+
+publish:
+  use_blogger_schedule: true
+  min_delay_minutes: 10
+  max_delay_minutes: 45
+  queue_horizon_hours: 120
+  target_queue_size: 25
+  random_min_gap_floor_minutes: 180
+  random_min_gap_ceiling_minutes: 360
+  daily_publish_cap: 5
+  image_hosting_backend: "blogger_media"
+  gcs_bucket_name: ""
+  gcs_public_base_url: ""
+  mobile_duplicate_block_enabled: true
+  enable_semantic_html: true
+  related_posts_min: 2
+  related_posts_max: 3
+  time_window_start: "09:00"
+  time_window_end: "23:00"
+  randomness_level: "medium"
+  min_gap_minutes: 180
+  quiet_hours_enabled: true
+  quiet_hours_start: "02:00"
+  quiet_hours_end: "07:00"
+  buffer_target_days: 5
+  buffer_min_days: 3
+  schedule_horizon_days: 14
+  allow_inline_fallback_publish: false
+  allow_banner_fallback_publish: true
+  strict_thumbnail_blogger_media: true
+  thumbnail_data_uri_allowed: false
+  thumbnail_preflight_only: false
+quality:
+  enabled: true
+  strict_mode: true
+  qa_mode: "quick"
+  min_quality_score: 91
+  qa_retry_max_passes: 0
+  humanity_enabled: true
+  humanity_weight_percent: 20
+  humanity_min_soft_score: 70
+  humanity_hard_fail_block: true
+  min_word_count: 1400
+  min_h2: 6
+  min_h3: 2
+  min_list_items: 6
+  min_external_links: 2
+  min_authority_links: 2
+  min_external_links_tech_troubleshoot: 1
+  min_authority_links_tech_troubleshoot: 1
+  banned_markers:
+    - "delve"
+    - "comprehensive"
+    - "cutting-edge"
+    - "in conclusion"
+  llm_judge_enabled: false
+  llm_judge_min_score: 70
+  prompt_leak_patterns:
+    - "real-time trend focus"
+    - "write plain business language"
+    - "you are a system that"
+    - "for generated image context"
+    - "for quick take you are"
+    - "section context visual"
+    - "concept visual"
+    - "supporting chart"
+  disallowed_terms_office_experiment:
+    - "rollback"
+    - "rollback criteria"
+    - "incident count"
+    - "staging"
+    - "prod parity"
+    - "sre"
+    - "deployment pipeline"
+    - "latency budget"
+    - "on-call"
+    - "incident severity"
+  disallowed_terms_tech_troubleshoot:
+    - "anthropic"
+    - "openai"
+    - "new ai"
+    - "this week"
+    - "trending"
+    - "everyone is talking"
+    - "why everyone is talking"
+    - "productivity breakthrough"
+    - "innovation culture"
+    - "team morale"
+    - "office influencer"
+    - "viral trend"
+    - "executive context"
+    - "authority snapshot"
+    - "action framework"
+    - "decision criteria"
+  require_story_block: true
+  require_story_block_min_count: 1
+  prompt_example_section_titles:
+    - "Prompt example"
+    - "Prompt examples"
+    - "Example prompt"
+    - "Try this"
+    - "Prompt snippets"
+  meta_block_start: "[[META]]"
+  meta_block_end: "[[/META]]"
+  partial_fix_enabled: true
+  partial_fix_story_first: true
+
+qa:
+  prompt_leak_patterns:
+    - "real-time trend focus"
+    - "write plain business language"
+    - "you are a system that"
+    - "for generated image context"
+    - "for quick take you are"
+    - "section context visual"
+    - "concept visual"
+    - "supporting chart"
+  disallowed_terms:
+    office_experiment:
+      - "rollback"
+      - "rollback criteria"
+      - "incident count"
+      - "staging"
+      - "prod parity"
+      - "sre"
+      - "deployment pipeline"
+      - "latency budget"
+      - "on-call"
+      - "incident severity"
+    tech_troubleshoot:
+      - "anthropic"
+      - "openai"
+      - "new ai"
+      - "this week"
+      - "trending"
+      - "everyone is talking"
+      - "why everyone is talking"
+      - "productivity breakthrough"
+      - "innovation culture"
+      - "team morale"
+      - "office influencer"
+      - "viral trend"
+      - "executive context"
+      - "authority snapshot"
+      - "action framework"
+      - "decision criteria"
+  require_story_block:
+    enabled: true
+    min_count: 1
+  fail_if_intro_matches_alt: true
+  alt_similarity_threshold: 0.75
+  banned_debug_patterns:
+    - "workflow checkpoint stage"
+    - "av reference context"
+    - "jobtitle"
+    - "sameas"
+    - "selected topic"
+    - "source trending_entities"
+
+topic_growth:
+  enabled: true
+  daily_new_topics: 10
+  min_seed_score: 75
+
+keyword_pool:
+  enabled: true
+  daily_target: 100
+  refill_threshold: 20
+  active_pool_max: 250
+  pick_per_run: 5
+  retry_per_run_when_under_target: 0
+
+integrations:
+  enabled: true
+  refresh_minutes: 15
+  adsense_enabled: true
+  analytics_enabled: true
+  search_console_enabled: true
+  ga4_property_id: ""
+  search_console_site_url: ""
+
+sources:
+  mode: "mixed"
+  seeds_path: "storage/seeds/seeds.json"
+  stackexchange_site: "superuser"
+  stackexchange_tagged: "windows-11;macos;iphone;android;audio;drivers;networking"
+  stackexchange_min_score: 5
+  hn_min_score: 30
+  github_repos: []
+  github_min_reactions: 2
+  github_token: ""
+  max_candidates: 20
+
+gemini:
+  api_key: "GEMINI_API_KEY"
+  model: "gemini-2.0-flash"
+  fallback_models:
+    - "gemini-2.0-flash"
+    - "gemini-2.5-flash-lite"
+    - "gemini-2.5-flash"
+  min_publish_score: 70
+  editor_persona: "You are a native English tech influencer writing for US/UK/global office workers. Your tone is human, clear, practical, and experience-driven."
+  max_calls_per_day: 50
+  max_calls_per_run: 4
+  min_request_interval_seconds: 30
+
+visual:
+  target_images_per_post: 2
+  max_banner_images: 1
+  max_inline_images: 1
+  image_provider: "pollinations"
+  enable_gemini_image_generation: true
+  allow_chart_fallback: false
+  gemini_prompt_model: "gemini-2.0-flash"
+  gemini_image_model: "models/imagen-3.0-generate-001"
+  image_request_interval_seconds: 20
+  pollinations_enabled: true
+  pollinations_api_key: ""
+  pollinations_base_url: "https://gen.pollinations.ai"
+  pollinations_thumbnail_model: "gptimage"
+  pollinations_content_model: "gptimage"
+  pollinations_timeout_sec: 30
+  prompt_suffix: "no text, no letters, no numbers, no logos, no watermark"
+  thumbnail_ocr_verify: false
+  screenshot_priority_keywords: []
+
+blogger:
+  blog_id: "BLOGGER_BLOG_ID"
+  credentials_path: "config/blogger_token.json"
+
+indexing:
+  enabled: true
+  service_account_path: "config/service_account.json"
+  daily_quota: 200
+
+images:
+  provider: "pollinations"
+  pollinations:
+    model: "gptimage"
+    size: "1024x1024"
+    timeout_sec: 30
+  banner_count: 1
+  inline_count: 1
+  cache_dir: "storage/image_cache"
+  prompt_suffix: "no text, no letters, no numbers, no logos, no watermark"
+  fallback_banner: "assets/fallback/banner.png"
+  fallback_inline: "assets/fallback/inline.png"
+
+llm:
+  provider: "gemini"
+  max_calls_per_post: 3
+  enable_refine_loop: false
+  enable_judge_post: false
+  enable_image_generation: true
+
+content_mode:
+  mode: "tech_troubleshoot_only"
+  allowed_devices: ["windows", "mac", "iphone", "galaxy"]
+  banned_topic_keywords:
+    - "anthropic"
+    - "openai"
+    - "new ai"
+    - "this week"
+    - "trending"
+    - "everyone is talking"
+    - "workflow experiment"
+  required_title_tokens_any:
+    - "not working"
+    - "fix"
+    - "error"
+    - "after update"
+
+local_llm:
+  enabled: true
+  provider: "ollama"
+  model: "qwen2.5:3b"
+  base_url: "http://127.0.0.1:11434"
+  num_ctx: 2048
+  num_thread: 2
+  max_loaded_models: 1
+  num_parallel: 1
+  install_if_missing: true
+  pull_model_if_missing: true
+  request_timeout_sec: 60
+  max_calls_per_post: 2
+
+authority_links:
+  - "https://developers.google.com/search/docs/fundamentals/creating-helpful-content"
+  - "https://api.stackexchange.com/docs"
+  - "https://github.com/HackerNews/API"
+  - "https://docs.github.com/en/rest"
+  - "https://docs.python.org/3/"
+
+
+
+
+
+

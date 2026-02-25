@@ -1,0 +1,2 @@
+{"ts_utc": "2026-02-22T21:41:49.184405+00:00", "event": "ollama_prepare", "enabled": true, "ready": true, "reason": "ready", "model": "qwen2.5:3b"}
+{"ts_utc": "2026-02-23T00:01:39.774168+00:00", "event": "ollama_prepare", "enabled": true, "ready": true, "reason": "ready", "model": "qwen2.5:3b"}

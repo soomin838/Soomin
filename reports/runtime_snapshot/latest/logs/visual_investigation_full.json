@@ -1,0 +1,316 @@
+{
+  "timestamp": "2026-02-18T11:46:18.921657+00:00",
+  "blog_id": "3798794568809192736",
+  "model_setting": "gemini-2.0-flash-exp",
+  "trending_entities_now": [
+    "OpenAI",
+    "Apple",
+    "Anthropic",
+    "Meta",
+    "Tesla",
+    "Amazon",
+    "Google",
+    "xAI",
+    "Mistral",
+    "Scale AI"
+  ],
+  "verification_generated_files": [
+    {
+      "model": "gemini-2.0-flash-exp",
+      "status": 404,
+      "file_created": false,
+      "path": "",
+      "size_bytes": 0,
+      "note": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"models/gemini-2.0-flash-exp is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.\",\n    \"status\": \"NOT_FOUND\"\n  }\n}\n"
+    },
+    {
+      "model": "gemini-2.5-flash-image",
+      "status": 429,
+      "file_created": false,
+      "path": "",
+      "size_bytes": 0,
+      "note": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota ex"
+    },
+    {
+      "model": "gemini-2.0-flash-exp-image-generation",
+      "status": 429,
+      "file_created": false,
+      "path": "",
+      "size_bytes": 0,
+      "note": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota ex"
+    }
+  ],
+  "comparison_trace": {
+    "visual_generated_path": "C:\\Users\\soomin\\AppData\\Roaming\\RezeroAgent\\storage\\temp_images\\qa_gen_fallback.png",
+    "visual_generated_size": 3042,
+    "visual_screenshot_path": "C:\\Users\\soomin\\AppData\\Roaming\\RezeroAgent\\storage\\temp_images\\qa_cmp_ss.png",
+    "visual_screenshot_size": 846422,
+    "publisher_hosted_map_count": 0,
+    "publisher_hosted_hosts": [],
+    "merge_result_has_img": false,
+    "merge_result_preview": "ERROR: Thumbnail must be hosted on Blogger media server. retry required"
+  },
+  "live_test_option_a_drafts": [
+    {
+      "index": 1,
+      "attempt": 1,
+      "post_id": "3288155995583490660",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/3288155995583490660",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    },
+    {
+      "index": 2,
+      "attempt": 2,
+      "post_id": "5665324229912933376",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/5665324229912933376",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    },
+    {
+      "index": 3,
+      "attempt": 3,
+      "post_id": "554952384303757954",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/554952384303757954",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    },
+    {
+      "index": 4,
+      "attempt": 4,
+      "post_id": "8056682308076233382",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/8056682308076233382",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    },
+    {
+      "index": 5,
+      "attempt": 5,
+      "post_id": "5215042181299771420",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/5215042181299771420",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    },
+    {
+      "index": 6,
+      "attempt": 6,
+      "post_id": "1644642495479515354",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/1644642495479515354",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    },
+    {
+      "index": 7,
+      "attempt": 7,
+      "post_id": "1013396946151377589",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/1013396946151377589",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    },
+    {
+      "index": 8,
+      "attempt": 8,
+      "post_id": "610034161643565804",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/610034161643565804",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    },
+    {
+      "index": 9,
+      "attempt": 9,
+      "post_id": "7795800987128473618",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/7795800987128473618",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    },
+    {
+      "index": 10,
+      "attempt": 10,
+      "post_id": "722345073945863332",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/722345073945863332",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "contains_about_blank": true,
+      "contains_data_uri": false,
+      "contains_focused_alt": true
+    }
+  ],
+  "live_test_option_b": {
+    "status": 401,
+    "detail": "{\n  \"code\": 16,\n  \"message\": \"Authentication session is not defined.\"\n}",
+    "optionA_media_body_probe": {
+      "supported": false,
+      "note": "Got an unexpected keyword argument media_body"
+    }
+  },
+  "root_cause": {
+    "metrics": {
+      "total": 26,
+      "with_img_tag": 0,
+      "with_focused_alt": 22,
+      "focused_alt_with_about_blank": 21,
+      "focused_alt_with_data_uri": 1,
+      "with_bracket_placeholder": 0
+    },
+    "examples": [
+      {
+        "post_id": "6612487327180846129",
+        "status": "scheduled",
+        "title": "Anthropic's latest move and 3 practical productivity lessons",
+        "url": "http://goundrich.blogspot.com/2026/02/anthropics-latest-move-and-3-practical.html",
+        "has_img": false,
+        "has_focused_alt": true,
+        "has_about_blank": false,
+        "has_data_uri": true,
+        "has_bracket_placeholder": false
+      },
+      {
+        "post_id": "722345073945863332",
+        "status": "draft",
+        "title": "[QA-LIVE-10] visual route test",
+        "url": "http://goundrich.blogspot.com/",
+        "has_img": false,
+        "has_focused_alt": true,
+        "has_about_blank": true,
+        "has_data_uri": false,
+        "has_bracket_placeholder": false
+      },
+      {
+        "post_id": "7795800987128473618",
+        "status": "draft",
+        "title": "[QA-LIVE-9] visual route test",
+        "url": "http://goundrich.blogspot.com/",
+        "has_img": false,
+        "has_focused_alt": true,
+        "has_about_blank": true,
+        "has_data_uri": false,
+        "has_bracket_placeholder": false
+      },
+      {
+        "post_id": "610034161643565804",
+        "status": "draft",
+        "title": "[QA-LIVE-8] visual route test",
+        "url": "http://goundrich.blogspot.com/",
+        "has_img": false,
+        "has_focused_alt": true,
+        "has_about_blank": true,
+        "has_data_uri": false,
+        "has_bracket_placeholder": false
+      },
+      {
+        "post_id": "1013396946151377589",
+        "status": "draft",
+        "title": "[QA-LIVE-7] visual route test",
+        "url": "http://goundrich.blogspot.com/",
+        "has_img": false,
+        "has_focused_alt": true,
+        "has_about_blank": true,
+        "has_data_uri": false,
+        "has_bracket_placeholder": false
+      },
+      {
+        "post_id": "1644642495479515354",
+        "status": "draft",
+        "title": "[QA-LIVE-6] visual route test",
+        "url": "http://goundrich.blogspot.com/",
+        "has_img": false,
+        "has_focused_alt": true,
+        "has_about_blank": true,
+        "has_data_uri": false,
+        "has_bracket_placeholder": false
+      },
+      {
+        "post_id": "5215042181299771420",
+        "status": "draft",
+        "title": "[QA-LIVE-5] visual route test",
+        "url": "http://goundrich.blogspot.com/",
+        "has_img": false,
+        "has_focused_alt": true,
+        "has_about_blank": true,
+        "has_data_uri": false,
+        "has_bracket_placeholder": false
+      },
+      {
+        "post_id": "8056682308076233382",
+        "status": "draft",
+        "title": "[QA-LIVE-4] visual route test",
+        "url": "http://goundrich.blogspot.com/",
+        "has_img": false,
+        "has_focused_alt": true,
+        "has_about_blank": true,
+        "has_data_uri": false,
+        "has_bracket_placeholder": false
+      }
+    ],
+    "diagnosis": "Primary cause: upload function fails to return permanent URL, so placeholders fall back to about:blank/data-uri; browser then shows alt text like \"Focused screenshot for...\". This is not HTML engine turning objects into strings."
+  },
+  "success_case": {
+    "post_id": "1402334720541931096",
+    "url": "https://goundrich.blogspot.com/2026/02/qa-public-openai-visual-proof-2026-02.html",
+    "http_status": 200,
+    "img_src_count_in_page": 2,
+    "sample_src": [
+      "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4d/OpenAI_Logo.svg/512px-OpenAI_Logo.svg.png",
+      "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png"
+    ],
+    "html_source_excerpt": "<!DOCTYPE html>\n<html dir='ltr' lang='en' xmlns='http://www.w3.org/1999/xhtml' xmlns:b='http://www.google.com/2005/gml/b' xmlns:data='http://www.google.com/2005/gml/data' xmlns:expr='http://www.google.com/2005/gml/expr'>\n<head>\n<!-- Google tag (gtag.js) -->\n<script async='async' src='https://www.googletagmanager.com/gtag/js?id=G-9F7L4EKLF7'></script>\n<script>\n  window.dataLayer = window.dataLayer || [];\n  function gtag(){dataLayer.push(arguments);}\n  gtag('js', new Date());\n\n  gtag('config', 'G-9F7L4EKLF7');\n</script>\n<script async='async' crossorigin='anonymous' src='https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3838577593271849'></script>\n<meta content='width=device-width, initial-scale=1' name='viewport'/>\n<title>[QA-PUBLIC] OpenAI visual proof 2026-02-18 20:53:58</title>\n<meta content='text/html; charset=UTF-8' http-equiv='Content-Type'/>\n<!-- Chrome, Firefox OS and Opera -->\n<meta content='#f4f4f4' name='theme-color'/>\n<!-- Windows Phone -->\n<meta content='#f4f4f4' name='msapplication-navbutton-color'/>\n<meta content='blogger' name='generator'/>\n<link href='https://goundrich.blogspot.com/favicon.ico' rel='icon' type='image/x-icon'/>\n<link href='https://goundrich.blogspot.com/2026/02/qa-public-openai-visual-proof-2026-02.html' rel='canonical'/>\n<link rel=\"alternate\" type=\"application/atom+xml\" title=\"goundrich - Atom\" href=\"https://goundrich.blogspot.com/feeds/posts/default\" />\n<link rel=\"alternate\" type=\"application/rss+xml\" title=\"goundric"
+  },
+  "errors": []
+}

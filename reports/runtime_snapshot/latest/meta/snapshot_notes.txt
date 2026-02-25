@@ -1,0 +1,4 @@
+TAILED visual_pipeline.jsonl: size=689.40452003479MB tail=4000
+TAILED qa_timing.jsonl: size=28.2108783721924MB tail=4000
+TAILED qa_runtime.jsonl: size=20.6935043334961MB tail=4000
+TAILED workflow_perf.jsonl: size=9.23765563964844MB tail=4000

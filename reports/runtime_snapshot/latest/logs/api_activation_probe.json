@@ -1,0 +1,17 @@
+[
+  {
+    "check": "generativelanguage_models_list",
+    "status": 200,
+    "message": "{\n  \"models\": [\n    {\n      \"name\": \"models/gemini-2.5-flash\",\n      \"version\": \"001\",\n      \"displayName\": \"Gemini 2.5 Flash\",\n      \"description\": \"Stable version of Gemini 2.5 Flash, our mid-size multimodal model that"
+  },
+  {
+    "check": "gemini_image_generateContent",
+    "status": 429,
+    "message": "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to:"
+  },
+  {
+    "check": "imagen_predict",
+    "status": 400,
+    "message": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Imagen API is only accessible to billed users at this time.\",\n    \"status\": \"INVALID_ARGUMENT\"\n  }\n}\n"
+  }
+]

@@ -1,0 +1,400 @@
+{
+  "timestamp": "2026-02-18T11:34:23.545320+00:00",
+  "blog_id": "3798794568809192736",
+  "model_image": "gemini-2.0-flash-exp",
+  "gen_file_tests": [
+    {
+      "index": 1,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    },
+    {
+      "index": 2,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    },
+    {
+      "index": 3,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    },
+    {
+      "index": 4,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    },
+    {
+      "index": 5,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    },
+    {
+      "index": 6,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    },
+    {
+      "index": 7,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    },
+    {
+      "index": 8,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    },
+    {
+      "index": 9,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    },
+    {
+      "index": 10,
+      "generated": false,
+      "path": "",
+      "size_bytes": 0,
+      "source_kind": ""
+    }
+  ],
+  "upload_route_a": [
+    {
+      "index": 1,
+      "attempt": 1,
+      "post_id": "9168498137594602493",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/9168498137594602493",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 1"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 1"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    },
+    {
+      "index": 2,
+      "attempt": 2,
+      "post_id": "8780243428497059407",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/8780243428497059407",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 2"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 2"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    },
+    {
+      "index": 3,
+      "attempt": 3,
+      "post_id": "6235476377621222964",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/6235476377621222964",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 3"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 3"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    },
+    {
+      "index": 4,
+      "attempt": 4,
+      "post_id": "7202391625821876077",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/7202391625821876077",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 4"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 4"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    },
+    {
+      "index": 5,
+      "attempt": 5,
+      "post_id": "8699677430967415019",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/8699677430967415019",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 5"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 5"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    },
+    {
+      "index": 6,
+      "attempt": 6,
+      "post_id": "2424977362678801531",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/2424977362678801531",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 6"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 6"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    },
+    {
+      "index": 7,
+      "attempt": 7,
+      "post_id": "2635060160022306201",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/2635060160022306201",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 7"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 7"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    },
+    {
+      "index": 8,
+      "attempt": 8,
+      "post_id": "830544884799589430",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/830544884799589430",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 8"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 8"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    },
+    {
+      "index": 9,
+      "attempt": 9,
+      "post_id": "364349022682140285",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/364349022682140285",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 9"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 9"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    },
+    {
+      "index": 10,
+      "attempt": 10,
+      "post_id": "7181685596655093535",
+      "edit_url": "https://www.blogger.com/blog/post/edit/3798794568809192736/7181685596655093535",
+      "gen_upload_ok": false,
+      "gen_host": "",
+      "ss_upload_ok": false,
+      "ss_host": "",
+      "img_tag_count": 0,
+      "img_tag_preview": [
+        [
+          "about:blank",
+          "Generated image QA 10"
+        ],
+        [
+          "about:blank",
+          "Focused screenshot for QA 10"
+        ]
+      ],
+      "has_placeholder_text": false,
+      "contains_data_uri": false
+    }
+  ],
+  "upload_route_b": {
+    "attempted": true,
+    "status_code": 401,
+    "ok": false,
+    "detail": "{\n  \"code\": 16,\n  \"message\": \"Authentication session is not defined.\"\n}"
+  },
+  "root_cause_scan": {
+    "metrics": {
+      "total": 13,
+      "posts_with_img_tag": 0,
+      "posts_with_focused_alt": 12,
+      "focused_alt_with_data_uri": 1,
+      "posts_with_data_uri_img": 2,
+      "posts_with_escaped_img_tag": 0
+    },
+    "examples": [
+      {
+        "post_id": "6612487327180846129",
+        "status": "scheduled",
+        "title": "Anthropic's latest move and 3 practical productivity lessons",
+        "url": "http://goundrich.blogspot.com/2026/02/anthropics-latest-move-and-3-practical.html",
+        "img_count": 0,
+        "has_data_uri": true,
+        "has_focused_alt": true
+      },
+      {
+        "post_id": "7181685596655093535",
+        "status": "draft",
+        "title": "[QA-Visual-10] Blogger media route test 203908",
+        "url": "http://goundrich.blogspot.com/",
+        "img_count": 0,
+        "has_data_uri": false,
+        "has_focused_alt": true
+      },
+      {
+        "post_id": "364349022682140285",
+        "status": "draft",
+        "title": "[QA-Visual-9] Blogger media route test 203849",
+        "url": "http://goundrich.blogspot.com/",
+        "img_count": 0,
+        "has_data_uri": false,
+        "has_focused_alt": true
+      },
+      {
+        "post_id": "830544884799589430",
+        "status": "draft",
+        "title": "[QA-Visual-8] Blogger media route test 203830",
+        "url": "http://goundrich.blogspot.com/",
+        "img_count": 0,
+        "has_data_uri": false,
+        "has_focused_alt": true
+      },
+      {
+        "post_id": "2635060160022306201",
+        "status": "draft",
+        "title": "[QA-Visual-7] Blogger media route test 203811",
+        "url": "http://goundrich.blogspot.com/",
+        "img_count": 0,
+        "has_data_uri": false,
+        "has_focused_alt": true
+      },
+      {
+        "post_id": "2424977362678801531",
+        "status": "draft",
+        "title": "[QA-Visual-6] Blogger media route test 203709",
+        "url": "http://goundrich.blogspot.com/",
+        "img_count": 0,
+        "has_data_uri": false,
+        "has_focused_alt": true
+      },
+      {
+        "post_id": "8699677430967415019",
+        "status": "draft",
+        "title": "[QA-Visual-5] Blogger media route test 203651",
+        "url": "http://goundrich.blogspot.com/",
+        "img_count": 0,
+        "has_data_uri": false,
+        "has_focused_alt": true
+      },
+      {
+        "post_id": "7202391625821876077",
+        "status": "draft",
+        "title": "[QA-Visual-4] Blogger media route test 203622",
+        "url": "http://goundrich.blogspot.com/",
+        "img_count": 0,
+        "has_data_uri": false,
+        "has_focused_alt": true
+      }
+    ]
+  },
+  "errors": []
+}
