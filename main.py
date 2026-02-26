@@ -641,8 +641,23 @@ class AgentController:
                     except Exception:
                         rotation_order = ["windows", "mac", "iphone", "galaxy"]
 
+                    def _recent_titles_provider() -> list[dict]:
+                        try:
+                            rows = self.workflow.publisher.fetch_recent_live_urls(days=3, limit=180)
+                            if isinstance(rows, list):
+                                return [x for x in rows if isinstance(x, dict)]
+                        except Exception:
+                            return []
+                        return []
+
                     try:
-                        run_daily_vector_if_needed(root=ROOT, rotation_order=rotation_order)
+                        run_daily_vector_if_needed(
+                            root=ROOT,
+                            rotation_order=rotation_order,
+                            titles_provider=_recent_titles_provider,
+                            ollama_manager=self.workflow.ollama_manager,
+                            ollama_client=self.workflow.ollama_client,
+                        )
                     except Exception:
                         pass
                     result = self.workflow.run_once(manual_trigger=is_manual_trigger)
