@@ -3384,14 +3384,14 @@ class AgentWorkflow:
         last_err = "thumbnail_preflight_failed:unknown"
         cfg_cycles = int(getattr(self.settings.publish, "thumbnail_preflight_max_cycles", max_attempts) or 0)
         retry_delay_sec = max(1, int(getattr(self.settings.publish, "thumbnail_preflight_retry_delay_sec", 8) or 8))
-        finite_cycles = max(1, cfg_cycles) if cfg_cycles > 0 else 0
+        finite_cycles = max(1, cfg_cycles if cfg_cycles > 0 else int(max_attempts or 3))
         attempt_no = 0
         while True:
             attempt_no += 1
             try:
                 self._progress(
                     "publish",
-                    f"썸네일 Blogger 업로드 재시도 중 ({attempt_no}{'' if finite_cycles == 0 else f'/{finite_cycles}'})",
+                    f"썸네일 Blogger 업로드 재시도 중 ({attempt_no}/{finite_cycles})",
                     85,
                 )
                 thumb_src = self.publisher.preflight_thumbnail_blogger_media(
@@ -3408,7 +3408,7 @@ class AgentWorkflow:
                         "max_cycles": int(finite_cycles),
                         "delay_sec": int(retry_delay_sec),
                         "error": str(last_err)[:260],
-                        "infinite": bool(finite_cycles == 0),
+                        "infinite": False,
                     },
                 )
                 # Image generation loops are disabled. Recovery rotates a different library image as thumbnail.
@@ -3418,7 +3418,7 @@ class AgentWorkflow:
                     self._optimize_thumbnail_alt(working, candidate)
                 else:
                     last_err = f"{last_err};thumbnail_rotation_exhausted"
-                if finite_cycles > 0 and attempt_no >= finite_cycles:
+                if attempt_no >= finite_cycles:
                     break
                 time.sleep(float(retry_delay_sec))
         raise RuntimeError(last_err)

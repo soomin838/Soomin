@@ -7,6 +7,7 @@ import html as html_lib
 import tempfile
 import json
 import time
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -950,22 +951,6 @@ class Publisher:
                 "files_key": "file",
                 "headers": {},
             },
-            {
-                "name": "image_field_xhr",
-                "params": {**base_params, "noredirect": "true"},
-                "files_key": "image",
-                "headers": {
-                    "Origin": "https://www.blogger.com",
-                    "Referer": "https://www.blogger.com/",
-                    "X-Requested-With": "XMLHttpRequest",
-                },
-            },
-            {
-                "name": "image_field_source_editor",
-                "params": {**base_params, "source": "editor"},
-                "files_key": "image",
-                "headers": {},
-            },
         ]
         last_details = dict(details)
         for variant in upload_variants:
@@ -1045,82 +1030,145 @@ class Publisher:
         poll_count: int = 8,
         poll_delay_sec: float = 1.2,
     ) -> str:
-        """
-        Recovery path when upload-image.g fails.
-        Strategy:
-          1) create temp post with data URI (draft or direct)
-          2) publish it when needed
-          3) refetch post content and extract first <img src>
-          4) delete temp post
-        Returns first image src (Blogger URL or data URI), otherwise "".
-        """
+        data_uri = self._image_data_uri(path, mime)
+        checks_a = max(1, int(1 if insert_as_draft else 0))
+        checks_b = max(1, int(poll_count or 3))
+        return self._temp_post_cdn_extract(
+            image_data_uri=data_uri,
+            title_hint=f"asset-{idx}",
+            creds=creds,
+            max_draft_checks=checks_a,
+            publish_checks=checks_b,
+        )
+
+    def _temp_post_cdn_extract(
+        self,
+        image_data_uri: str,
+        title_hint: str,
+        *,
+        creds,
+        max_draft_checks: int = 1,
+        publish_checks: int = 3,
+    ) -> str:
         service = build("blogger", "v3", credentials=creds)
         post_id = ""
+        draft_checks = max(0, int(max_draft_checks or 0))
+        publish_retries = max(1, int(publish_checks or 1))
+        safe_hint = re.sub(r"[^A-Za-z0-9._-]+", "-", str(title_hint or "asset")).strip("-")[:40] or "asset"
         try:
-            data_uri = self._image_data_uri(path, mime)
             payload = {
-                "title": f"[asset] {datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')} {idx}",
-                "content": f'<p><img src="{data_uri}" alt="asset {idx}" /></p>',
+                "title": f"[asset] {safe_hint} {datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+                "content": f'<p><img src="{str(image_data_uri or "").strip()}" alt="asset" /></p>',
             }
             draft = service.posts().insert(
                 blogId=self.blog_id,
                 body=payload,
-                isDraft=bool(insert_as_draft),
+                isDraft=True,
             ).execute()
             post_id = str(draft.get("id", "") or "")
+            self._log_thumbnail_gate_event(
+                {
+                    "event": "temp_post_insert_ok",
+                    "post_id": post_id,
+                    "title_hint": safe_hint,
+                }
+            )
             if not post_id:
                 return ""
 
-            if publish_after_insert:
-                try:
-                    service.posts().publish(blogId=self.blog_id, postId=post_id).execute()
-                except Exception:
-                    pass
-
-            preferred_view = "READER" if prefer_reader else "ADMIN"
-            secondary_view = "ADMIN" if prefer_reader else "READER"
-            polls = max(1, int(poll_count or 1))
-            delay = max(0.2, float(poll_delay_sec or 1.2))
-            first_data_uri = ""
-            for _ in range(polls):
+            for check_idx in range(1, draft_checks + 1):
                 try:
                     fetched = service.posts().get(
                         blogId=self.blog_id,
                         postId=post_id,
-                        view=preferred_view,
+                        view="ADMIN",
                     ).execute()
                     src = self._extract_first_img_src(str(fetched.get("content", "") or ""))
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "temp_post_get_admin_ok",
+                            "phase": "draft_check",
+                            "check_idx": check_idx,
+                            "post_id": post_id,
+                            "src_host": (urlparse(src).netloc or "").lower() if src else "",
+                        }
+                    )
                     if src and self._is_blogger_media_url(src):
                         return src
-                    if src and src.lower().startswith("data:image/") and not first_data_uri:
-                        first_data_uri = src
-                except Exception:
-                    pass
+                except Exception as exc:
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "temp_post_get_admin_error",
+                            "phase": "draft_check",
+                            "check_idx": check_idx,
+                            "post_id": post_id,
+                            "error": str(exc or "")[:220],
+                        }
+                    )
 
+            published = False
+            try:
+                service.posts().publish(blogId=self.blog_id, postId=post_id).execute()
+                published = True
+            except Exception:
+                published = False
+            self._log_thumbnail_gate_event(
+                {
+                    "event": "temp_post_publish_attempted",
+                    "post_id": post_id,
+                    "ok": bool(published),
+                }
+            )
+
+            for check_idx in range(1, publish_retries + 1):
+                time.sleep(random.uniform(0.8, 1.2))
                 try:
-                    fetched2 = service.posts().get(
+                    fetched = service.posts().get(
                         blogId=self.blog_id,
                         postId=post_id,
-                        view=secondary_view,
+                        view="ADMIN",
                     ).execute()
-                    src2 = self._extract_first_img_src(str(fetched2.get("content", "") or ""))
-                    if src2 and self._is_blogger_media_url(src2):
-                        return src2
-                    if src2 and src2.lower().startswith("data:image/") and not first_data_uri:
-                        first_data_uri = src2
-                except Exception:
-                    pass
-
-                time.sleep(delay)
-            return first_data_uri
-        except Exception:
+                    src = self._extract_first_img_src(str(fetched.get("content", "") or ""))
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "temp_post_get_admin_ok",
+                            "phase": "publish_check",
+                            "check_idx": check_idx,
+                            "post_id": post_id,
+                            "src_host": (urlparse(src).netloc or "").lower() if src else "",
+                        }
+                    )
+                    if src and self._is_blogger_media_url(src):
+                        return src
+                except Exception as exc:
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "temp_post_get_admin_error",
+                            "phase": "publish_check",
+                            "check_idx": check_idx,
+                            "post_id": post_id,
+                            "error": str(exc or "")[:220],
+                        }
+                    )
             return ""
         finally:
             if post_id:
                 try:
                     service.posts().delete(blogId=self.blog_id, postId=post_id).execute()
-                except Exception:
-                    pass
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "temp_post_delete_ok",
+                            "post_id": post_id,
+                        }
+                    )
+                except Exception as exc:
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "temp_post_delete_error",
+                            "post_id": post_id,
+                            "error": str(exc or "")[:220],
+                        }
+                    )
 
     def _extract_upload_url_from_response(self, text: str) -> tuple[str, str]:
         raw = str(text or "")
@@ -1275,136 +1323,45 @@ class Publisher:
                     )
                     return extracted_url
 
-                # Blogger endpoint may fail in some environments (e.g. 405).
-                # Recovery path: temp-post roundtrip with multiple strategies.
-                # In strict production mode (data URI not allowed), roundtrip is skipped
-                # because Blogger API preserves data:image and cannot satisfy host gate.
-                endpoint_status = int(details.get("status_code", 0) or 0)
-                if not bool(self.thumbnail_data_uri_allowed):
-                    last_reason = reason_code or ("http_4xx_or_5xx" if endpoint_status >= 400 else "missing_extracted_url")
-                    self._log_thumbnail_gate_event(
-                        {
-                            "event": "thumbnail_upload_roundtrip_skipped",
-                            "attempt_no": attempt_no,
-                            "endpoint_status": endpoint_status,
-                            "reason_code": str(last_reason),
-                            "strict_thumbnail_blogger_media": bool(self.strict_thumbnail_blogger_media),
-                            "thumbnail_data_uri_allowed": bool(self.thumbnail_data_uri_allowed),
-                        }
-                    )
-                    self._log_thumbnail_gate_event(
-                        {
-                            "event": "thumbnail_gate_result",
-                            "attempt_no": attempt_no,
-                            "ok": False,
-                            "reason_code": str(last_reason),
-                        }
-                    )
-                    continue
-                strategy_rows = [
-                    (
-                        "draft_publish_admin",
-                        {
-                            "insert_as_draft": True,
-                            "publish_after_insert": True,
-                            "prefer_reader": False,
-                            "poll_count": 8,
-                            "poll_delay_sec": 1.0,
-                        },
-                    ),
-                    (
-                        "draft_publish_reader",
-                        {
-                            "insert_as_draft": True,
-                            "publish_after_insert": True,
-                            "prefer_reader": True,
-                            "poll_count": 8,
-                            "poll_delay_sec": 1.0,
-                        },
-                    ),
-                    (
-                        "direct_admin",
-                        {
-                            "insert_as_draft": False,
-                            "publish_after_insert": False,
-                            "prefer_reader": False,
-                            "poll_count": 6,
-                            "poll_delay_sec": 0.8,
-                        },
-                    ),
-                    (
-                        "direct_reader",
-                        {
-                            "insert_as_draft": False,
-                            "publish_after_insert": False,
-                            "prefer_reader": True,
-                            "poll_count": 6,
-                            "poll_delay_sec": 0.8,
-                        },
-                    ),
-                ]
-                roundtrip_data_uri = ""
-                for strategy_idx, (strategy_name, strategy_kwargs) in enumerate(strategy_rows, start=1):
-                    roundtrip_url = self._upload_via_temp_draft_roundtrip(
-                        upload_path,
-                        upload_mime,
-                        creds,
-                        idx=(attempt_no * 10) + strategy_idx,
-                        **strategy_kwargs,
-                    )
-                    roundtrip_host = (urlparse(roundtrip_url).netloc or "").lower() if roundtrip_url else ""
-                    self._log_thumbnail_gate_event(
-                        {
-                            "event": "thumbnail_upload_roundtrip_response",
-                            "attempt_no": attempt_no,
-                            "strategy": strategy_name,
-                            "extracted_url": roundtrip_url,
-                            "extracted_host": roundtrip_host,
-                            "endpoint_status": endpoint_status,
-                        }
-                    )
-                    if roundtrip_url and self._is_blogger_media_url(roundtrip_url):
-                        self._log_thumbnail_gate_event(
-                            {
-                                "event": "thumbnail_gate_result",
-                                "attempt_no": attempt_no,
-                                "ok": True,
-                                "reason_code": f"temp_post_publish_roundtrip:{strategy_name}",
-                                "thumbnail_url": roundtrip_url,
-                            }
-                        )
-                        return roundtrip_url
-                    if roundtrip_url and str(roundtrip_url).strip().lower().startswith("data:image/"):
-                        roundtrip_data_uri = roundtrip_url
-                        if self.thumbnail_data_uri_allowed:
-                            self._log_thumbnail_gate_event(
-                                {
-                                    "event": "thumbnail_gate_result",
-                                    "attempt_no": attempt_no,
-                                    "ok": True,
-                                    "reason_code": f"data_uri_roundtrip_allowed:{strategy_name}",
-                                    "thumbnail_url": roundtrip_url[:120],
-                                }
-                            )
-                            return roundtrip_url
-                if roundtrip_data_uri and not self.thumbnail_data_uri_allowed:
-                    last_reason = "thumbnail_data_uri_not_allowed"
+                data_uri = self._image_data_uri(upload_path, upload_mime)
+                roundtrip_url = self._temp_post_cdn_extract(
+                    image_data_uri=data_uri,
+                    title_hint=upload_path.stem,
+                    creds=creds,
+                    max_draft_checks=1,
+                    publish_checks=3,
+                )
+                roundtrip_host = (urlparse(roundtrip_url).netloc or "").lower() if roundtrip_url else ""
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_upload_roundtrip_response",
+                        "attempt_no": attempt_no,
+                        "strategy": "temp_post_cdn_extract",
+                        "extracted_url": roundtrip_url,
+                        "extracted_host": roundtrip_host,
+                        "endpoint_status": int(details.get("status_code", 0) or 0),
+                    }
+                )
+                if roundtrip_url and self._is_blogger_media_url(roundtrip_url):
                     self._log_thumbnail_gate_event(
                         {
                             "event": "thumbnail_gate_result",
                             "attempt_no": attempt_no,
-                            "ok": False,
-                            "reason_code": last_reason,
+                            "ok": True,
+                            "reason_code": "temp_post_cdn_extract",
+                            "thumbnail_url": roundtrip_url,
                         }
                     )
-                    continue
+                    return roundtrip_url
 
-                if not extracted_url:
-                    last_reason = reason_code or "missing_extracted_url"
+                if str(reason_code or "").strip().lower() == "invalid_scope":
+                    last_reason = "invalid_scope"
+                elif not extracted_url:
+                    last_reason = "temp_post_cdn_extract_failed"
                 elif extracted_host and (not self._is_blogger_media_url(extracted_url)):
                     last_reason = "non_blogger_host"
                 else:
-                    last_reason = reason_code or "response_parse_failed"
+                    last_reason = reason_code or "temp_post_cdn_extract_failed"
 
                 self._log_thumbnail_gate_event(
                     {

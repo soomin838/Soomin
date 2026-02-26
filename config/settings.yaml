@@ -68,7 +68,7 @@ publish:
   thumbnail_data_uri_allowed: false
   auto_allow_data_uri_on_blogger_405: false
   thumbnail_preflight_only: false
-  thumbnail_preflight_max_cycles: 0
+  thumbnail_preflight_max_cycles: 6
   thumbnail_preflight_retry_delay_sec: 8
 quality:
   enabled: true

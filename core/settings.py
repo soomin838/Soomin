@@ -129,7 +129,7 @@ class PublishSettings:
     thumbnail_data_uri_allowed: bool = False
     auto_allow_data_uri_on_blogger_405: bool = False
     thumbnail_preflight_only: bool = False
-    thumbnail_preflight_max_cycles: int = 0  # 0 => infinite retry
+    thumbnail_preflight_max_cycles: int = 6
     thumbnail_preflight_retry_delay_sec: int = 8
 
 
@@ -603,7 +603,7 @@ def load_settings(path: Path) -> AppSettings:
             publishing_raw.get("thumbnail_preflight_only", raw["publish"].get("thumbnail_preflight_only", False))
         )
         raw["publish"]["thumbnail_preflight_max_cycles"] = int(
-            publishing_raw.get("thumbnail_preflight_max_cycles", raw["publish"].get("thumbnail_preflight_max_cycles", 0))
+            publishing_raw.get("thumbnail_preflight_max_cycles", raw["publish"].get("thumbnail_preflight_max_cycles", 6))
         )
         raw["publish"]["thumbnail_preflight_retry_delay_sec"] = int(
             publishing_raw.get("thumbnail_preflight_retry_delay_sec", raw["publish"].get("thumbnail_preflight_retry_delay_sec", 8))
