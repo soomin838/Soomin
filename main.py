@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 from core.onboarding import has_missing_required
 from core.preflight import validate_runtime_settings
 from core.qa_logger import QALogger, classify_error
+from core.daily_vector import run_daily_vector_if_needed
 from core.settings import load_settings
 from core.workflow import AgentWorkflow
 
@@ -632,6 +633,18 @@ class AgentController:
                             "model": self.settings.gemini.model,
                         },
                     )
+                    try:
+                        rotation_order = list(
+                            getattr(self.settings.topics, "rotation_order", ["windows", "mac", "iphone", "galaxy"])
+                            or []
+                        )
+                    except Exception:
+                        rotation_order = ["windows", "mac", "iphone", "galaxy"]
+
+                    try:
+                        run_daily_vector_if_needed(root=ROOT, rotation_order=rotation_order)
+                    except Exception:
+                        pass
                     result = self.workflow.run_once(manual_trigger=is_manual_trigger)
                     self.last_status = result.status
                     self.last_message = result.message

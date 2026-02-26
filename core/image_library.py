@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .image_optimizer import optimize_for_library
 from .visual import ImageAsset
 
 
@@ -74,6 +75,8 @@ def _fallback_paths(root: Path) -> list[Path]:
 def pick_images(title: str, min_count: int = 2, root: Path | None = None) -> list[ImageAsset]:
     project_root = (root or Path(__file__).resolve().parent.parent).resolve()
     lib_root = (project_root / LIB_ROOT).resolve()
+    cache_dir = (project_root / "storage" / "state" / "library_cache").resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
     category = detect_category(title)
     category_dir = (lib_root / category).resolve()
     generic_dir = (lib_root / "generic").resolve()
@@ -113,16 +116,30 @@ def pick_images(title: str, min_count: int = 2, root: Path | None = None) -> lis
     used_map = dict((usage.get("last_used", {}) or {}))
     assets: list[ImageAsset] = []
     for p in selected_paths[: max(2, int(min_count))]:
+        use_path = p
+        try:
+            if p.exists() and int(p.stat().st_size) > (2 * 1024 * 1024):
+                opt_path = optimize_for_library(
+                    p,
+                    cache_dir / f"{p.stem}_opt",
+                    max_width=1200,
+                    max_kb=220,
+                )
+                if opt_path.exists():
+                    use_path = opt_path
+        except Exception:
+            use_path = p
+
         key = _usage_key(p)
         counts[key] = int(counts.get(key, 0) or 0) + 1
         used_map[key] = now
         assets.append(
             ImageAsset(
-                path=p,
+                path=use_path,
                 alt=f"Troubleshooting process diagram for {str(title or '').strip()}.",
                 anchor_text="",
                 source_kind="library",
-                source_url=f"local://library/{category}/{p.name}",
+                source_url=f"local://library/{category}/{use_path.name}",
                 license_note="Local reusable asset",
             )
         )
@@ -131,4 +148,3 @@ def pick_images(title: str, min_count: int = 2, root: Path | None = None) -> lis
     usage["last_used"] = used_map
     _save_usage(usage_path, usage)
     return assets
-
