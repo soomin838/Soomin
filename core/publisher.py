@@ -77,8 +77,12 @@ class Publisher:
         self._thumbnail_gate_log_path = (
             self.credentials_path.parent.parent / "storage" / "logs" / "thumbnail_gate.jsonl"
         ).resolve()
+        self._upload_probe_log_path = (
+            self.credentials_path.parent.parent / "storage" / "logs" / "upload_probe.jsonl"
+        ).resolve()
         self._upload_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._thumbnail_gate_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._upload_probe_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_rotate_max_bytes = 50 * 1024 * 1024
         self._log_rotate_keep = 10
 
@@ -789,8 +793,8 @@ class Publisher:
         }
 
     def _upload_images_to_blogger_media(self, images: list[ImageAsset], creds) -> dict[str, str]:
-        # Blogger v3 has no public binary media endpoint; use a temporary draft-post
-        # roundtrip so Blogger stores images on its own media infrastructure.
+        # Blogger v3 has no public binary media endpoint; try bounded strategy matrix
+        # and keep only Blogger-hosted URLs.
         hosted: dict[str, str] = {}
         for idx, image in enumerate(images, start=1):
             path = image.path
@@ -809,14 +813,15 @@ class Publisher:
                 if uploaded:
                     hosted[str(path)] = uploaded
                     continue
-                src = self._upload_via_temp_draft_roundtrip(upload_path, upload_mime, creds, idx=idx)
-                if not src:
-                    continue
-                if (not self._is_blogger_media_url(src)) and not (
-                    str(src).strip().lower().startswith("data:image/") and self.thumbnail_data_uri_allowed
-                ):
-                    continue
-                hosted[str(path)] = src
+                probe = self.upload_probe_harness(
+                    image_path=upload_path,
+                    creds=creds,
+                    max_total_seconds=35,
+                    start_monotonic=time.perf_counter(),
+                )
+                src = str(probe.get("url", "") or "").strip()
+                if src and self._is_blogger_media_url(src):
+                    hosted[str(path)] = src
             except Exception:
                 continue
             finally:
@@ -1030,16 +1035,17 @@ class Publisher:
         poll_count: int = 8,
         poll_delay_sec: float = 1.2,
     ) -> str:
-        data_uri = self._image_data_uri(path, mime)
-        checks_a = max(1, int(1 if insert_as_draft else 0))
-        checks_b = max(1, int(poll_count or 3))
-        return self._temp_post_cdn_extract(
-            image_data_uri=data_uri,
-            title_hint=f"asset-{idx}",
-            creds=creds,
-            max_draft_checks=checks_a,
-            publish_checks=checks_b,
+        # Disabled as an upload mechanism: temp-post flow is validation-only and
+        # requires an already-hosted Blogger CDN URL.
+        self._log_thumbnail_gate_event(
+            {
+                "event": "temp_post_upload_disabled",
+                "reason": "requires_real_blogger_cdn_url",
+                "idx": int(idx),
+                "path": str(path),
+            }
         )
+        return ""
 
     def _temp_post_cdn_extract(
         self,
@@ -1050,6 +1056,16 @@ class Publisher:
         max_draft_checks: int = 1,
         publish_checks: int = 3,
     ) -> str:
+        image_src = str(image_data_uri or "").strip()
+        if (not image_src) or image_src.lower().startswith("data:image/") or (not self._is_blogger_media_url(image_src)):
+            self._log_thumbnail_gate_event(
+                {
+                    "event": "temp_post_reject_non_blogger_src",
+                    "title_hint": str(title_hint or "")[:80],
+                    "src_preview": image_src[:160],
+                }
+            )
+            return ""
         service = build("blogger", "v3", credentials=creds)
         post_id = ""
         draft_checks = max(0, int(max_draft_checks or 0))
@@ -1058,7 +1074,7 @@ class Publisher:
         try:
             payload = {
                 "title": f"[asset] {safe_hint} {datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-                "content": f'<p><img src="{str(image_data_uri or "").strip()}" alt="asset" /></p>',
+                "content": f'<p><img src="{image_src}" alt="asset" /></p>',
             }
             draft = service.posts().insert(
                 blogId=self.blog_id,
@@ -1323,23 +1339,24 @@ class Publisher:
                     )
                     return extracted_url
 
-                data_uri = self._image_data_uri(upload_path, upload_mime)
-                roundtrip_url = self._temp_post_cdn_extract(
-                    image_data_uri=data_uri,
-                    title_hint=upload_path.stem,
+                probe_started = time.perf_counter()
+                probe_result = self.upload_probe_harness(
+                    image_path=upload_path,
                     creds=creds,
-                    max_draft_checks=1,
-                    publish_checks=3,
+                    max_total_seconds=35,
+                    start_monotonic=probe_started,
                 )
-                roundtrip_host = (urlparse(roundtrip_url).netloc or "").lower() if roundtrip_url else ""
+                roundtrip_url = str(probe_result.get("url", "") or "").strip()
+                roundtrip_host = str(probe_result.get("host", "") or "").strip().lower()
                 self._log_thumbnail_gate_event(
                     {
                         "event": "thumbnail_upload_roundtrip_response",
                         "attempt_no": attempt_no,
-                        "strategy": "temp_post_cdn_extract",
+                        "strategy": str(probe_result.get("strategy", "") or "upload_probe_harness"),
                         "extracted_url": roundtrip_url,
                         "extracted_host": roundtrip_host,
                         "endpoint_status": int(details.get("status_code", 0) or 0),
+                        "probe_error": str(probe_result.get("error", "") or "")[:220],
                     }
                 )
                 if roundtrip_url and self._is_blogger_media_url(roundtrip_url):
@@ -1354,14 +1371,19 @@ class Publisher:
                     )
                     return roundtrip_url
 
-                if str(reason_code or "").strip().lower() == "invalid_scope":
+                probe_error = str(probe_result.get("error", "") or "").strip().lower()
+                if str(reason_code or "").strip().lower() == "invalid_scope" or "invalid_scope" in probe_error:
                     last_reason = "invalid_scope"
+                elif "upload_probe_timeout" in probe_error:
+                    last_reason = "upload_probe_timeout"
+                elif "upload_probe_no_working_strategy" in probe_error:
+                    last_reason = "upload_probe_no_working_strategy"
                 elif not extracted_url:
-                    last_reason = "temp_post_cdn_extract_failed"
+                    last_reason = "upload_probe_no_working_strategy"
                 elif extracted_host and (not self._is_blogger_media_url(extracted_url)):
                     last_reason = "non_blogger_host"
                 else:
-                    last_reason = reason_code or "temp_post_cdn_extract_failed"
+                    last_reason = reason_code or "upload_probe_no_working_strategy"
 
                 self._log_thumbnail_gate_event(
                     {
@@ -1406,6 +1428,286 @@ class Publisher:
 
         raise RuntimeError(f"thumbnail_preflight_failed:{last_reason}")
 
+    def _probe_upload_strategy(
+        self,
+        *,
+        image_path: Path,
+        payload: bytes,
+        mime: str,
+        creds,
+        strategy: str,
+        files_key: str = "image",
+        extra_params: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        include_auth: bool = True,
+        cookies: dict[str, str] | None = None,
+        timeout_sec: int = 18,
+    ) -> dict[str, Any]:
+        endpoint = "https://www.blogger.com/upload-image.g"
+        result: dict[str, Any] = {
+            "ok": False,
+            "strategy": str(strategy or "").strip() or "unknown",
+            "status": 0,
+            "url": "",
+            "host": "",
+            "error": "",
+            "response_snippet": "",
+            "allow_header": "",
+        }
+        token = ""
+        try:
+            self._ensure_valid_token(creds)
+            token = str(getattr(creds, "token", "") or "").strip()
+        except Exception as exc:
+            result["error"] = f"token_error:{str(exc or '')[:120]}"
+            return result
+
+        headers: dict[str, str] = {}
+        if include_auth and token:
+            headers["Authorization"] = f"Bearer {token}"
+        if isinstance(extra_headers, dict):
+            headers.update({str(k): str(v) for k, v in extra_headers.items()})
+
+        params = {
+            "blogID": self.blog_id,
+            "source": "post",
+            "zx": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
+        }
+        if isinstance(extra_params, dict):
+            params.update({str(k): str(v) for k, v in extra_params.items()})
+
+        try:
+            resp = requests.post(
+                endpoint,
+                params=params,
+                headers=headers,
+                files={str(files_key or "image"): (image_path.name, payload, mime)},
+                cookies=(cookies if isinstance(cookies, dict) else None),
+                timeout=max(5, int(timeout_sec or 18)),
+            )
+        except requests.Timeout:
+            result["error"] = "timeout"
+            return result
+        except Exception as exc:
+            result["error"] = f"request_exception:{str(exc or '')[:120]}"
+            return result
+
+        result["status"] = int(getattr(resp, "status_code", 0) or 0)
+        result["allow_header"] = str(getattr(resp, "headers", {}).get("Allow", "") or "").strip()
+        raw_text = str(getattr(resp, "text", "") or "")
+        result["response_snippet"] = raw_text[:200]
+        if result["status"] not in {200, 201}:
+            lower = raw_text.lower()
+            if "invalid_scope" in lower or "insufficientpermission" in lower:
+                result["error"] = "invalid_scope"
+            elif result["status"] == 405:
+                allow_hint = f"|allow={result['allow_header']}" if result["allow_header"] else ""
+                result["error"] = f"hard_fail_405{allow_hint}"
+            else:
+                result["error"] = f"http_{result['status']}"
+            return result
+
+        extracted, _source = self._extract_upload_url_from_response(raw_text)
+        result["url"] = str(extracted or "").strip()
+        result["host"] = (urlparse(result["url"]).netloc or "").lower() if result["url"] else ""
+        if result["url"] and self._is_blogger_media_url(result["url"]):
+            result["ok"] = True
+            return result
+        if result["url"]:
+            result["error"] = "non_blogger_host"
+        else:
+            result["error"] = "response_parse_failed"
+        return result
+
+    def _probe_temp_post_validate_cdn(
+        self,
+        *,
+        cdn_url: str,
+        creds,
+        title_hint: str,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "ok": False,
+            "strategy": "temp_post_validate_existing_cdn_url",
+            "status": 0,
+            "url": "",
+            "host": "",
+            "error": "",
+            "response_snippet": "",
+        }
+        safe_src = str(cdn_url or "").strip()
+        if not safe_src or not self._is_blogger_media_url(safe_src):
+            result["error"] = "no_real_cdn_url_available"
+            return result
+        validated = self._temp_post_cdn_extract(
+            image_data_uri=safe_src,
+            title_hint=str(title_hint or "asset"),
+            creds=creds,
+            max_draft_checks=1,
+            publish_checks=3,
+        )
+        result["url"] = str(validated or "").strip()
+        result["host"] = (urlparse(result["url"]).netloc or "").lower() if result["url"] else ""
+        if result["url"] and self._is_blogger_media_url(result["url"]):
+            result["ok"] = True
+            return result
+        result["error"] = "temp_post_validation_failed"
+        return result
+
+    def upload_probe_harness(
+        self,
+        *,
+        image_path: Path,
+        creds=None,
+        max_total_seconds: int = 90,
+        start_monotonic: float | None = None,
+    ) -> dict[str, Any]:
+        started = float(start_monotonic or time.perf_counter())
+        deadline = started + max(5.0, float(max_total_seconds or 90))
+        path = Path(image_path)
+        result: dict[str, Any] = {
+            "ok": False,
+            "strategy": "",
+            "status": 0,
+            "url": "",
+            "host": "",
+            "error": "",
+        }
+        if not path.exists():
+            result["error"] = "file_missing"
+            return result
+        if creds is None:
+            creds = self._oauth_credentials()
+
+        mime = mimetypes.guess_type(path.name)[0] or "image/png"
+        upload_path, upload_mime, cleanup_path = self._prepare_blogger_upload_asset(path, mime, role="thumbnail")
+        tried: list[str] = []
+        hard_405 = 0
+        allow_values: set[str] = set()
+        try:
+            try:
+                payload = upload_path.read_bytes()
+            except Exception:
+                result["error"] = "file_missing"
+                return result
+
+            strategies: list[dict[str, Any]] = [
+                {"name": "upload-image.g:file", "files_key": "file"},
+                {"name": "upload-image.g:image", "files_key": "image"},
+                {
+                    "name": "upload-image.g:image+source_editor+blogId",
+                    "files_key": "image",
+                    "extra_params": {"source": "editor", "blogId": self.blog_id},
+                },
+                {
+                    "name": "upload-image.g:image+xhr_headers",
+                    "files_key": "image",
+                    "extra_headers": {
+                        "Origin": "https://www.blogger.com",
+                        "Referer": "https://www.blogger.com/",
+                        "X-Requested-With": "XMLHttpRequest",
+                    },
+                },
+                {
+                    "name": "upload-image.g:image+accept_any",
+                    "files_key": "image",
+                    "extra_headers": {"Accept": "*/*"},
+                },
+                {
+                    "name": "upload-image.g:image+accept_json",
+                    "files_key": "image",
+                    "extra_headers": {"Accept": "application/json"},
+                },
+                {
+                    "name": "upload-image.g:image+no_auth",
+                    "files_key": "image",
+                    "include_auth": False,
+                },
+                {
+                    "name": "temp_post_validate_existing_cdn_url",
+                    "temp_post_validate": True,
+                },
+            ]
+
+            known_real_cdn_url = ""
+            for spec in strategies:
+                if time.perf_counter() > deadline:
+                    result["error"] = "upload_probe_timeout"
+                    break
+                strategy = str(spec.get("name", "") or "").strip() or "unknown"
+                tried.append(strategy)
+                if bool(spec.get("temp_post_validate", False)):
+                    out = self._probe_temp_post_validate_cdn(
+                        cdn_url=known_real_cdn_url,
+                        creds=creds,
+                        title_hint=path.stem,
+                    )
+                else:
+                    out = self._probe_upload_strategy(
+                        image_path=upload_path,
+                        payload=payload,
+                        mime=upload_mime,
+                        creds=creds,
+                        strategy=strategy,
+                        files_key=str(spec.get("files_key", "image") or "image"),
+                        extra_params=dict(spec.get("extra_params", {}) or {}),
+                        extra_headers=dict(spec.get("extra_headers", {}) or {}),
+                        include_auth=bool(spec.get("include_auth", True)),
+                        timeout_sec=12,
+                    )
+                    if str(out.get("url", "") or "").strip() and self._is_blogger_media_url(str(out.get("url", "") or "")):
+                        known_real_cdn_url = str(out.get("url", "") or "").strip()
+                out["strategy"] = strategy
+                self._log_upload_probe_event(
+                    {
+                        "image_path": str(path),
+                        "strategy": strategy,
+                        "status": int(out.get("status", 0) or 0),
+                        "ok": bool(out.get("ok", False)),
+                        "url": str(out.get("url", "") or ""),
+                        "host": str(out.get("host", "") or ""),
+                        "error": str(out.get("error", "") or ""),
+                        "response_snippet": str(out.get("response_snippet", "") or "")[:200],
+                    }
+                )
+                if int(out.get("status", 0) or 0) == 405 or "hard_fail_405" in str(out.get("error", "")):
+                    hard_405 += 1
+                allow_hint = str(out.get("allow_header", "") or "").strip()
+                if allow_hint:
+                    allow_values.add(allow_hint)
+                if bool(out.get("ok", False)) and self._is_blogger_media_url(str(out.get("url", "") or "")):
+                    return {
+                        "ok": True,
+                        "strategy": strategy,
+                        "status": int(out.get("status", 0) or 0),
+                        "url": str(out.get("url", "") or "").strip(),
+                        "host": str(out.get("host", "") or "").strip().lower(),
+                        "error": "",
+                    }
+                result = {
+                    "ok": False,
+                    "strategy": strategy,
+                    "status": int(out.get("status", 0) or 0),
+                    "url": str(out.get("url", "") or "").strip(),
+                    "host": str(out.get("host", "") or "").strip().lower(),
+                    "error": str(out.get("error", "") or ""),
+                }
+
+            if not str(result.get("error", "") or "").strip():
+                allow_text = ",".join(sorted(x for x in allow_values if x))
+                summary = (
+                    f"upload_probe_no_working_strategy;tried={','.join(tried)};http405={hard_405}"
+                    + (f";allow={allow_text}" if allow_text else "")
+                )
+                result["error"] = summary
+            return result
+        finally:
+            if cleanup_path and cleanup_path.exists():
+                try:
+                    cleanup_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     def _prepare_thumbnail_jpeg_asset(self, path: Path, quality: int = 82) -> tuple[Path, str, Path]:
         q = max(60, min(95, int(quality or 82)))
         with Image.open(path) as im:
@@ -1434,6 +1736,18 @@ class Publisher:
         try:
             self._rotate_log_if_needed(self._thumbnail_gate_log_path)
             with self._thumbnail_gate_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _log_upload_probe_event(self, payload: dict) -> None:
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            **(payload or {}),
+        }
+        try:
+            self._rotate_log_if_needed(self._upload_probe_log_path)
+            with self._upload_probe_log_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception:
             pass

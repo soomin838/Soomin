@@ -158,6 +158,7 @@ class AgentWorkflow:
         self._workflow_perf_heartbeat_sec = 20.0
         self._workflow_perf_phase_count = 0
         self._workflow_perf_slow_phases: list[dict[str, Any]] = []
+        self._manual_upload_probe_done = False
         self._start_posts_index_bootstrap()
 
     def set_progress_hook(self, hook) -> None:
@@ -201,6 +202,7 @@ class AgentWorkflow:
         self._workflow_perf_last_heartbeat_mono = 0.0
         self._workflow_perf_phase_count = 0
         self._workflow_perf_slow_phases = []
+        self._manual_upload_probe_done = False
         self._append_workflow_perf(
             "run_start",
             {
@@ -1659,6 +1661,7 @@ class AgentWorkflow:
                         images=images,
                         prompt_plan=image_prompt_plan,
                         max_attempts=3,
+                        manual_trigger=manual_trigger,
                     ),
                     slow_ms=8000,
                 )
@@ -1770,6 +1773,7 @@ class AgentWorkflow:
                         images=images,
                         prompt_plan=image_prompt_plan,
                         max_attempts=3,
+                        manual_trigger=manual_trigger,
                     ),
                     slow_ms=8000,
                 )
@@ -1866,6 +1870,7 @@ class AgentWorkflow:
                             images=images,
                             prompt_plan=image_prompt_plan,
                             max_attempts=3,
+                            manual_trigger=manual_trigger,
                         )
                         continue
                     except Exception as pre_exc:
@@ -2753,6 +2758,7 @@ class AgentWorkflow:
                         images=images,
                         prompt_plan=image_prompt_plan,
                         max_attempts=3,
+                        manual_trigger=manual_trigger,
                     ),
                     slow_ms=8000,
                 )
@@ -2814,6 +2820,7 @@ class AgentWorkflow:
                         images=images,
                         prompt_plan=image_prompt_plan,
                         max_attempts=3,
+                        manual_trigger=manual_trigger,
                     ),
                     slow_ms=8000,
                 )
@@ -3370,6 +3377,63 @@ class AgentWorkflow:
                     return False, "inline_image_generation_failed"
         return True, ""
 
+    def _run_manual_upload_probe_session(self, max_total_seconds: int = 90) -> dict[str, Any]:
+        started = time.perf_counter()
+        generic_dir = (self.root / "assets" / "library" / "generic").resolve()
+        if not generic_dir.exists():
+            raise RuntimeError("upload_probe_no_working_strategy:generic_library_missing")
+        candidates = [
+            p for p in sorted(generic_dir.iterdir())
+            if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+        ][:5]
+        if not candidates:
+            raise RuntimeError("upload_probe_no_working_strategy:no_generic_images")
+
+        tried: list[str] = []
+        hard_405 = 0
+        allow_values: set[str] = set()
+        last_error = ""
+        for image_path in candidates:
+            elapsed = time.perf_counter() - started
+            remaining = float(max_total_seconds) - float(elapsed)
+            if remaining <= 0:
+                raise RuntimeError("upload_probe_timeout")
+            probe = self.publisher.upload_probe_harness(
+                image_path=image_path,
+                max_total_seconds=max(5, int(max_total_seconds)),
+                start_monotonic=started,
+            )
+            strategy = str(probe.get("strategy", "") or "").strip()
+            if strategy:
+                tried.append(strategy)
+            err = str(probe.get("error", "") or "").strip()
+            if "hard_fail_405" in err:
+                hard_405 += 1
+            if "allow=" in err:
+                allow_values.add(err.split("allow=", 1)[-1].strip())
+            last_error = err or last_error
+            if bool(probe.get("ok", False)) and self.publisher._is_blogger_media_url(str(probe.get("url", "") or "")):  # noqa: SLF001
+                self._append_workflow_perf(
+                    "manual_upload_probe_success",
+                    {
+                        "strategy": strategy,
+                        "image_path": str(image_path),
+                        "host": str(probe.get("host", "") or ""),
+                    },
+                )
+                return probe
+
+        summary = "upload_probe_no_working_strategy"
+        if tried:
+            summary += f";tried={','.join(tried)}"
+        if hard_405:
+            summary += f";http405={hard_405}"
+        if allow_values:
+            summary += f";allow={','.join(sorted(allow_values))}"
+        if last_error:
+            summary += f";last_error={last_error[:180]}"
+        raise RuntimeError(summary)
+
     def _preflight_thumbnail_with_recovery(
         self,
         draft: DraftPost,
@@ -3377,10 +3441,20 @@ class AgentWorkflow:
         images: list[ImageAsset],
         prompt_plan: dict[str, Any] | None,
         max_attempts: int = 3,
+        manual_trigger: bool = False,
     ) -> tuple[list[ImageAsset], str]:
         working = self.visual.ensure_unique_assets(list(images or []))
         if not working:
             raise RuntimeError("thumbnail_preflight_failed:no_images")
+        if bool(manual_trigger) and (not bool(self._manual_upload_probe_done)):
+            probe = self._profile_call(
+                "manual_upload_probe_session",
+                lambda: self._run_manual_upload_probe_session(max_total_seconds=90),
+                slow_ms=12000,
+            )
+            self._manual_upload_probe_done = True
+            if not bool(probe.get("ok", False)):
+                raise RuntimeError(str(probe.get("error", "") or "upload_probe_no_working_strategy"))
         last_err = "thumbnail_preflight_failed:unknown"
         cfg_cycles = int(getattr(self.settings.publish, "thumbnail_preflight_max_cycles", max_attempts) or 0)
         retry_delay_sec = max(1, int(getattr(self.settings.publish, "thumbnail_preflight_retry_delay_sec", 8) or 8))
