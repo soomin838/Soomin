@@ -18,6 +18,17 @@ class ScheduleSettings:
 
 
 @dataclass
+class MonthlySchedulerSettings:
+    enabled: bool = True
+    timezone: str = "America/New_York"
+    output_dir: str = "storage/schedules"
+    publish_slots_per_day: int = 5
+    buffer_slots_min: int = 1
+    buffer_slots_max: int = 2
+    consume_hold_slots: bool = False
+
+
+@dataclass
 class SourceSettings:
     mode: str = "mixed"
     seeds_path: str = "storage/seeds/seeds.json"
@@ -57,7 +68,7 @@ class VisualSettings:
     target_images_per_post: int = 2
     max_banner_images: int = 1
     max_inline_images: int = 1
-    image_provider: str = "gemini"
+    image_provider: str = "library"
     screenshot_priority_keywords: list[str] = field(default_factory=list)
     enable_gemini_image_generation: bool = True
     gemini_image_model: str = "models/imagen-3.0-generate-001"
@@ -116,7 +127,7 @@ class PublishSettings:
     allow_banner_fallback_publish: bool = True
     strict_thumbnail_blogger_media: bool = True
     thumbnail_data_uri_allowed: bool = False
-    auto_allow_data_uri_on_blogger_405: bool = True
+    auto_allow_data_uri_on_blogger_405: bool = False
     thumbnail_preflight_only: bool = False
 
 
@@ -396,6 +407,7 @@ class SyncSettings:
 class AppSettings:
     timezone: str = "America/New_York"
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
+    monthly_scheduler: MonthlySchedulerSettings = field(default_factory=MonthlySchedulerSettings)
     sources: SourceSettings = field(default_factory=SourceSettings)
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
     visual: VisualSettings = field(default_factory=VisualSettings)
@@ -440,6 +452,7 @@ def load_settings(path: Path) -> AppSettings:
     content_raw = dict(raw.get("content", {}) or {})
     content_mode_raw = dict(raw.get("content_mode", {}) or {})
     topics_raw = dict(raw.get("topics", {}) or {})
+    monthly_scheduler_raw = dict(raw.get("monthly_scheduler", {}) or {})
     publishing_raw = dict(raw.get("publishing", {}) or {})
     llm_raw = dict(raw.get("llm", {}) or {})
     local_llm_raw = dict(raw.get("local_llm", {}) or {})
@@ -535,14 +548,14 @@ def load_settings(path: Path) -> AppSettings:
             "prompt_suffix",
             str(images_raw.get("prompt_suffix", "no text, no letters, no numbers, no logos, no watermark")),
         )
-        # Runtime source of truth: Gemini-only image generation.
-        src_provider = str(images_raw.get("provider", "gemini") or "gemini").strip().lower()
-        if src_provider != "gemini":
+        # Runtime source of truth: local library images + Blogger media upload.
+        src_provider = str(images_raw.get("provider", "library") or "library").strip().lower()
+        if src_provider not in {"library", "gemini"}:
             settings_warnings.append(
                 f"images.provider={src_provider} is deprecated; runtime forces visual.image_provider=gemini."
             )
-        raw["visual"]["image_provider"] = "gemini"
-        raw["visual"]["enable_gemini_image_generation"] = True
+        raw["visual"]["image_provider"] = "library"
+        raw["visual"]["enable_gemini_image_generation"] = False
         raw["visual"]["pollinations_enabled"] = False
     if publishing_raw:
         raw.setdefault("budget", {})
@@ -581,7 +594,7 @@ def load_settings(path: Path) -> AppSettings:
         raw["publish"]["auto_allow_data_uri_on_blogger_405"] = bool(
             publishing_raw.get(
                 "auto_allow_data_uri_on_blogger_405",
-                raw["publish"].get("auto_allow_data_uri_on_blogger_405", True),
+                raw["publish"].get("auto_allow_data_uri_on_blogger_405", False),
             )
         )
         raw["publish"]["thumbnail_preflight_only"] = bool(
@@ -610,6 +623,7 @@ def load_settings(path: Path) -> AppSettings:
     return AppSettings(
         timezone=raw.get("timezone", "America/New_York"),
         schedule=_construct_dc(ScheduleSettings, raw.get("schedule", {})),
+        monthly_scheduler=_construct_dc(MonthlySchedulerSettings, monthly_scheduler_raw),
         sources=_construct_dc(SourceSettings, raw.get("sources", {})),
         gemini=_construct_dc(GeminiSettings, raw.get("gemini", {})),
         visual=_construct_dc(VisualSettings, raw.get("visual", {})),

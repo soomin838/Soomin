@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from .brain import DraftPost, GeminiBrain
 from .budget import BudgetGuard
 from .asset_store import KeywordAssetStore, PostsIndexStore
+from .image_library import pick_images
 from .index_sync import BloggerIndexSync
 from .logstore import LogStore, RunRecord
 from .ollama_client import OllamaClient
@@ -27,6 +28,7 @@ from .patterns import PatternEngine
 from .publisher import Publisher
 from .quality import ContentQAGate
 from .reference_docs import ReferenceCorpus
+from .scheduler import MonthlyScheduler
 from .scout import SourceScout, TopicCandidate
 from .settings import AppSettings
 from .text_segmenter import section_bundle_for_llm
@@ -74,15 +76,9 @@ class AgentWorkflow:
             max_banner_images=settings.visual.max_banner_images,
             max_inline_images=settings.visual.max_inline_images,
             semantic_html_enabled=bool(getattr(settings.publish, "enable_semantic_html", True)),
-            strict_thumbnail_blogger_media=bool(
-                getattr(settings.publish, "strict_thumbnail_blogger_media", True)
-            ),
-            thumbnail_data_uri_allowed=bool(
-                getattr(settings.publish, "thumbnail_data_uri_allowed", False)
-            ),
-            auto_allow_data_uri_on_blogger_405=bool(
-                getattr(settings.publish, "auto_allow_data_uri_on_blogger_405", True)
-            ),
+            strict_thumbnail_blogger_media=True,
+            thumbnail_data_uri_allowed=False,
+            auto_allow_data_uri_on_blogger_405=False,
         )
         self.qa = ContentQAGate(
             settings.quality,
@@ -131,6 +127,11 @@ class AgentWorkflow:
             sync_settings=self.settings.sync,
             root=self.root,
         )
+        self.monthly_scheduler = MonthlyScheduler(
+            root=self.root,
+            config=self.settings.monthly_scheduler,
+        )
+        self._active_slot_id = ""
         self._image_pipeline_state: dict[str, Any] = {
             "status": "idle",
             "passed": 0,
@@ -846,6 +847,7 @@ class AgentWorkflow:
 
     def run_once(self, manual_trigger: bool = False) -> WorkflowResult:
         self._workflow_perf_start_run(manual_trigger=bool(manual_trigger))
+        self._active_slot_id = ""
         self._set_image_pipeline_state(
             "idle",
             0,
@@ -1544,64 +1546,29 @@ class AgentWorkflow:
         if draft_note:
             generation_degraded_note = self._append_note(generation_degraded_note, draft_note)
 
-        self._progress("visual", "이미지 생성/매칭", 74)
-        self._set_image_pipeline_state("running", 0, int(self.settings.visual.target_images_per_post or 5), "이미지 생성 시작")
-        image_prompt_plan = self._profile_call(
-            "image_prompt_plan",
-            lambda: self._build_image_prompt_plan_with_local_llm(draft, selected),
-            slow_ms=1500,
-        )
-        plan_source = str((image_prompt_plan or {}).get("source", "fallback") or "fallback")
-        if plan_source:
-            generation_degraded_note = self._append_note(
-                generation_degraded_note,
-                f"image_prompt_plan={plan_source}",
-            )
+        self._progress("visual", "이미지 라이브러리 선택", 74)
+        target_images = max(2, int(self.settings.visual.target_images_per_post or 2))
+        self._set_image_pipeline_state("running", 0, target_images, "이미지 라이브러리 선택 시작")
+        image_prompt_plan: dict[str, Any] = {"source": "library"}
         images = self._profile_call(
-            "visual_build",
-            lambda: self.visual.build(draft, prompt_plan=image_prompt_plan),
-            slow_ms=7000,
-        )
-        images = self._profile_call(
-            "visual_ensure_thumbnail",
-            lambda: self.visual.ensure_generated_thumbnail(draft, images, prompt_plan=image_prompt_plan),
-            slow_ms=2500,
-        )
-        images = self.visual.ensure_unique_assets(images)
-        target_images = max(2, int(self.settings.visual.target_images_per_post or 0))
-        if len(images) < target_images:
-            self._set_image_pipeline_state("retrying", len(images), target_images, "이미지 부족, 재시도 진행 중")
-            self._progress("visual", "이미지 부족, 재시도 진행 중", 76)
-            images = self._profile_call(
-                "visual_fill_missing",
-                lambda: self.visual.fill_missing_generated_images(
-                    draft,
-                    images,
-                    target_images,
-                    min_retry_attempts=5,
-                ),
-                slow_ms=12000,
-            )
-        images = self._profile_call(
-            "visual_force_floor",
-            lambda: self._force_image_floor(
-                draft=draft,
-                images=images,
-                target_images=target_images,
+            "image_library_pick",
+            lambda: pick_images(
+                title=draft.title,
+                min_count=target_images,
+                root=self.root,
             ),
-            slow_ms=3000,
+            slow_ms=2000,
         )
         images = self.visual.ensure_unique_assets(images)
-        if len(images) > target_images:
-            images = images[:target_images]
-        policy_ok, policy_reason = self._enforce_image_fallback_publish_policy(images)
-        if not policy_ok:
+        image_kind_counts = Counter((getattr(img, "source_kind", "") or "unknown") for img in images)
+        if len(images) < target_images:
             hold_labels = self._build_public_labels(
                 title=draft.title,
                 candidate=selected,
                 global_keywords=global_keywords,
                 max_labels=6,
             )
+            policy_reason = "image_library_shortage"
             working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
                 current_draft_post_id=working_draft_id,
                 stage="hold",
@@ -1613,52 +1580,11 @@ class AgentWorkflow:
             hold_msg = policy_reason
             if hold_note:
                 hold_msg += f" | {hold_note}"
+            self._set_image_pipeline_state("failed", len(images), target_images, hold_msg)
             self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
-        min_required_images = min(target_images, 2)
-        image_kind_counts = Counter((getattr(img, "source_kind", "") or "unknown") for img in images)
-        if not images:
-            raise RuntimeError("Image pipeline failed: no valid image assets were produced")
-        if len(images) < target_images and len(images) >= min_required_images:
-            generation_degraded_note = self._append_note(
-                generation_degraded_note,
-                f"image_target_relaxed={len(images)}/{target_images}",
-            )
-            self._set_image_pipeline_state(
-                "fallback",
-                len(images),
-                target_images,
-                f"최종 폴백({len(images)}장 발행)",
-            )
-            self._progress("visual", f"최종 폴백({len(images)}장 발행)", 79)
-        if len(images) < min_required_images:
-            self._set_image_pipeline_state(
-                "failed",
-                len(images),
-                target_images,
-                f"이미지 최소치 미달({len(images)}/{min_required_images})",
-            )
-            raise RuntimeError(
-                f"Generated-only image requirement not met ({len(images)}/{target_images}; min={min_required_images})"
-            )
-        non_generated = [
-            (getattr(img, "source_kind", "") or "unknown")
-            for img in images
-            if (getattr(img, "source_kind", "") or "").strip().lower() not in {"gemini", "generated"}
-        ]
-        if non_generated:
-            self._set_image_pipeline_state(
-                "failed",
-                len(images),
-                target_images,
-                "생성형 이미지 정책 위반",
-            )
-            raise RuntimeError(
-                "Generated-only image policy violated: "
-                + ",".join(sorted(set(non_generated)))
-            )
-        self._set_image_pipeline_state("validated", len(images), target_images, f"이미지 검증 통과 {len(images)}/{target_images}")
-        self._progress("visual", f"이미지 검증 통과 {len(images)}/{target_images}", 80)
+        self._set_image_pipeline_state("validated", len(images), target_images, f"이미지 선택 완료 {len(images)}/{target_images}")
+        self._progress("visual", f"이미지 선택 완료 {len(images)}/{target_images}", 80)
         self._ensure_min_long_tail_keywords(
             candidate=selected,
             title=draft.title,
@@ -1717,10 +1643,34 @@ class AgentWorkflow:
                 )
         draft.title = self._double_unescape(str(draft.title or "")).strip()
         gate_preview_html = ""
-        try:
-            gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
-        except Exception as exc:
-            raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
+        preflight_thumb_src = ""
+        if bool(self.settings.budget.dry_run):
+            try:
+                gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
+            except Exception as exc:
+                raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
+        else:
+            try:
+                images, preflight_thumb_src = self._profile_call(
+                    "thumbnail_preflight_with_recovery",
+                    lambda: self._preflight_thumbnail_with_recovery(
+                        draft=draft,
+                        candidate=selected,
+                        images=images,
+                        prompt_plan=image_prompt_plan,
+                        max_attempts=3,
+                    ),
+                    slow_ms=8000,
+                )
+                creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
+                gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
+                    final_html,
+                    images,
+                    creds_for_gate,
+                    preflight_thumbnail_src=preflight_thumb_src,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         go_live_errors, go_live_warnings = self._go_live_gate_checklist(
             title=draft.title,
             final_html=final_html,
@@ -1810,51 +1760,53 @@ class AgentWorkflow:
         self._progress("publish", "Blogger 예약 발행 처리", 92)
         published = None
         last_publish_err = ""
-        preflight_thumb_src = ""
-        try:
-            images, preflight_thumb_src = self._profile_call(
-                "thumbnail_preflight_with_recovery",
-                lambda: self._preflight_thumbnail_with_recovery(
-                    draft=draft,
-                    candidate=selected,
-                    images=images,
-                    prompt_plan=image_prompt_plan,
-                    max_attempts=3,
-                ),
-                slow_ms=8000,
-            )
-        except Exception as exc:
-            last_publish_err = str(exc)
-            draft_checkpoint_note = ""
+        if not preflight_thumb_src:
             try:
-                checkpoint = self.publisher.save_draft_checkpoint(
-                    title=draft.title,
-                    html_body=final_html,
-                    labels=labels,
-                    stage="hold",
-                    reason=last_publish_err,
-                    draft_post_id=(working_draft_id or None),
+                images, preflight_thumb_src = self._profile_call(
+                    "thumbnail_preflight_with_recovery",
+                    lambda: self._preflight_thumbnail_with_recovery(
+                        draft=draft,
+                        candidate=selected,
+                        images=images,
+                        prompt_plan=image_prompt_plan,
+                        max_attempts=3,
+                    ),
+                    slow_ms=8000,
                 )
-                if str(getattr(checkpoint, "post_id", "")).strip():
-                    draft_checkpoint_note = f";draft_checkpoint={checkpoint.post_id}"
-            except Exception as cp_exc:
-                draft_checkpoint_note = f";draft_checkpoint_failed={str(cp_exc)[:120]}"
-            self.logs.append_run(
-                RunRecord(
-                    status="hold",
-                    score=0,
-                    title=draft.title,
-                    source_url=draft.source_url,
-                    published_url="",
-                    note=f"requeued_to_tail: {last_publish_err}{draft_checkpoint_note}",
+            except Exception as exc:
+                last_publish_err = str(exc)
+                draft_checkpoint_note = ""
+                try:
+                    checkpoint = self.publisher.save_draft_checkpoint(
+                        title=draft.title,
+                        html_body=final_html,
+                        labels=labels,
+                        stage="hold",
+                        reason=last_publish_err,
+                        draft_post_id=(working_draft_id or None),
+                    )
+                    if str(getattr(checkpoint, "post_id", "")).strip():
+                        draft_checkpoint_note = f";draft_checkpoint={checkpoint.post_id}"
+                except Exception as cp_exc:
+                    draft_checkpoint_note = f";draft_checkpoint_failed={str(cp_exc)[:120]}"
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="",
+                        note=f"requeued_to_tail: {last_publish_err}{draft_checkpoint_note}",
+                    )
                 )
-            )
-            checkpoint_msg = ""
-            if "draft_checkpoint=" in draft_checkpoint_note:
-                checkpoint_msg = f" | {draft_checkpoint_note.lstrip(';')}"
-            hold_msg = f"requeued_to_tail: {last_publish_err}{checkpoint_msg}"
-            self._workflow_perf_finish_run("hold", hold_msg)
-            return WorkflowResult("hold", hold_msg)
+                checkpoint_msg = ""
+                if "draft_checkpoint=" in draft_checkpoint_note:
+                    checkpoint_msg = f" | {draft_checkpoint_note.lstrip(';')}"
+                grade = self._classify_error_grade(last_publish_err)
+                hold_msg = f"requeued_to_tail[{grade}]: {last_publish_err}{checkpoint_msg}"
+                self._mark_active_slot("hold", hold_msg)
+                self._workflow_perf_finish_run("hold", hold_msg)
+                return WorkflowResult("hold", hold_msg)
         if bool(getattr(self.settings.publish, "thumbnail_preflight_only", False)):
             self.logs.append_run(
                 RunRecord(
@@ -1866,6 +1818,7 @@ class AgentWorkflow:
                     note=f"thumbnail_preflight_only_ok:{preflight_thumb_src[:180]}",
                 )
             )
+            self._mark_active_slot("hold", "thumbnail_preflight_only_ok")
             self._workflow_perf_finish_run("hold", "thumbnail_preflight_only_ok")
             return WorkflowResult("hold", "thumbnail_preflight_only_ok")
         publish_backoff = [30, 300, 900]
@@ -1902,6 +1855,7 @@ class AgentWorkflow:
                         )
                     )
                     skip_reason = self._physical_block_reason(err)
+                    self._mark_active_slot("skipped", skip_reason)
                     self._workflow_perf_finish_run("skipped", skip_reason)
                     return WorkflowResult("skipped", skip_reason)
                 if ("thumbnail_preflight_failed" in err or "missing thumbnail image url" in err) and publish_try < 3:
@@ -1953,7 +1907,9 @@ class AgentWorkflow:
             checkpoint_msg = ""
             if "draft_checkpoint=" in draft_checkpoint_note:
                 checkpoint_msg = f" | {draft_checkpoint_note.lstrip(';')}"
-            hold_msg = f"requeued_to_tail: {last_publish_err}{checkpoint_msg}"
+            grade = self._classify_error_grade(last_publish_err)
+            hold_msg = f"requeued_to_tail[{grade}]: {last_publish_err}{checkpoint_msg}"
+            self._mark_active_slot("hold", hold_msg)
             self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
         self._progress("indexing", "인덱싱/후처리 반영", 97)
@@ -2046,6 +2002,7 @@ class AgentWorkflow:
             pass
         self._cleanup_local_image_files(images)
         self._progress("done", "회차 완료", 100)
+        self._mark_active_slot("consumed", "publish_success", post_id=str(getattr(published, "post_id", "") or ""))
         if publish_at:
             success_msg = f"{published.url} (scheduled: {publish_at.isoformat()})"
             self._workflow_perf_finish_run("success", success_msg)
@@ -2055,6 +2012,10 @@ class AgentWorkflow:
 
     def _cleanup_local_image_files(self, images: list[ImageAsset]) -> int:
         removed = 0
+        protected_roots = [
+            (self.root / "assets" / "library").resolve(),
+            (self.root / "assets" / "fallback").resolve(),
+        ]
         for img in (images or []):
             try:
                 p = Path(getattr(img, "path", ""))
@@ -2063,6 +2024,9 @@ class AgentWorkflow:
             if not str(p):
                 continue
             try:
+                rp = p.resolve()
+                if any(str(rp).startswith(str(pr)) for pr in protected_roots):
+                    continue
                 if p.exists():
                     p.unlink(missing_ok=True)
                     removed += 1
@@ -2619,6 +2583,7 @@ class AgentWorkflow:
                             note=self._physical_block_reason(last_err),
                         )
                     )
+                    self._mark_active_slot("skipped", self._physical_block_reason(last_err))
                     return WorkflowResult("skipped", self._physical_block_reason(last_err))
                 if attempt >= 3 or not self._is_retryable_error(last_err):
                     break
@@ -2635,7 +2600,9 @@ class AgentWorkflow:
                     note=f"resume_images_done_publish_failed: {last_err}",
                 )
             )
-            return WorkflowResult("hold", f"requeued_to_tail: {last_err}")
+            grade = self._classify_error_grade(last_err)
+            self._mark_active_slot("hold", f"resume_images_done_publish_failed[{grade}]:{last_err}")
+            return WorkflowResult("hold", f"requeued_to_tail[{grade}]: {last_err}")
 
         self.logs.add_scheduled_post(
             publish_at=publish_at.isoformat(),
@@ -2661,6 +2628,7 @@ class AgentWorkflow:
         if manual_trigger and str(getattr(published, "post_id", "")).strip():
             self.logs.add_excluded_post(str(published.post_id).strip(), reason="manual_trigger")
         self._progress("done", "중단 문서 재개 완료", 100)
+        self._mark_active_slot("consumed", "resume_images_done_publish_success", post_id=str(getattr(published, "post_id", "") or ""))
         return WorkflowResult("success", f"{published.url} (scheduled: {publish_at.isoformat()})")
 
     def _resume_draft_done(self, row: dict, manual_trigger: bool, queue_advisory: str = "") -> WorkflowResult:
@@ -2687,32 +2655,13 @@ class AgentWorkflow:
             url="",
         )
 
-        self._progress("visual", "중단 문서 재개: 이미지 생성/매칭", 74)
-        self._set_image_pipeline_state("running", 0, int(self.settings.visual.target_images_per_post or 5), "중단 작업 이미지 재개")
-        image_prompt_plan = self._build_image_prompt_plan_with_local_llm(draft, candidate)
-        images = self.visual.build(draft, prompt_plan=image_prompt_plan)
-        images = self.visual.ensure_generated_thumbnail(draft, images, prompt_plan=image_prompt_plan)
+        self._progress("visual", "중단 문서 재개: 이미지 라이브러리 선택", 74)
+        target_images = max(2, int(self.settings.visual.target_images_per_post or 2))
+        self._set_image_pipeline_state("running", 0, target_images, "중단 작업 이미지 선택")
+        image_prompt_plan: dict[str, Any] = {"source": "library"}
+        images = pick_images(title=title, min_count=target_images, root=self.root)
         images = self.visual.ensure_unique_assets(images)
-        target_images = max(2, int(self.settings.visual.target_images_per_post or 0))
         if len(images) < target_images:
-            self._set_image_pipeline_state("retrying", len(images), target_images, "이미지 부족, 재시도 진행 중")
-            self._progress("visual", "이미지 부족, 재시도 진행 중", 76)
-            images = self.visual.fill_missing_generated_images(
-                draft,
-                images,
-                target_images,
-                min_retry_attempts=5,
-            )
-        images = self._force_image_floor(
-            draft=draft,
-            images=images,
-            target_images=target_images,
-        )
-        images = self.visual.ensure_unique_assets(images)
-        if len(images) > target_images:
-            images = images[:target_images]
-        policy_ok, policy_reason = self._enforce_image_fallback_publish_policy(images)
-        if not policy_ok:
             hold_labels = self._normalize_resume_labels(row.get("labels", []))
             if not hold_labels:
                 hold_labels = self._build_public_labels(
@@ -2728,30 +2677,17 @@ class AgentWorkflow:
                 title=title,
                 html_body=draft.html,
                 labels=hold_labels,
-                reason=policy_reason,
+                reason="image_library_shortage",
             )
-            hold_msg = policy_reason
+            hold_msg = "image_library_shortage"
             if hold_note:
                 hold_msg += f" | {hold_note}"
             if updated_draft_id:
                 hold_msg += f" | draft_checkpoint={updated_draft_id}"
+            self._set_image_pipeline_state("failed", len(images), target_images, hold_msg)
             return WorkflowResult("hold", hold_msg)
-        min_required_images = min(target_images, 2)
-        if len(images) < target_images and len(images) >= min_required_images:
-            self._set_image_pipeline_state("fallback", len(images), target_images, f"최종 폴백({len(images)}장 발행)")
-            self._progress("visual", f"최종 폴백({len(images)}장 발행)", 79)
-        if len(images) < min_required_images:
-            self._set_image_pipeline_state(
-                "failed",
-                len(images),
-                target_images,
-                f"이미지 최소치 미달({len(images)}/{min_required_images})",
-            )
-            raise RuntimeError(
-                f"Generated-only image requirement not met ({len(images)}/{target_images}; min={min_required_images})"
-            )
-        self._set_image_pipeline_state("validated", len(images), target_images, f"이미지 검증 통과 {len(images)}/{target_images}")
-        self._progress("visual", f"이미지 검증 통과 {len(images)}/{target_images}", 80)
+        self._set_image_pipeline_state("validated", len(images), target_images, f"이미지 선택 완료 {len(images)}/{target_images}")
+        self._progress("visual", f"이미지 선택 완료 {len(images)}/{target_images}", 80)
 
         resume_domain = self._infer_domain_from_title(title)
         self._ensure_min_long_tail_keywords(candidate=candidate, title=title, global_keywords=self.last_global_keywords)
@@ -2801,10 +2737,34 @@ class AgentWorkflow:
                     hold_msg += f" | draft_checkpoint={updated_draft_id}"
                 return WorkflowResult("hold", hold_msg)
         gate_preview_html = ""
-        try:
-            gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
-        except Exception as exc:
-            raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
+        preflight_thumb_src = ""
+        if bool(self.settings.budget.dry_run):
+            try:
+                gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
+            except Exception as exc:
+                raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
+        else:
+            try:
+                images, preflight_thumb_src = self._profile_call(
+                    "resume_thumbnail_preflight_with_recovery",
+                    lambda: self._preflight_thumbnail_with_recovery(
+                        draft=draft,
+                        candidate=candidate,
+                        images=images,
+                        prompt_plan=image_prompt_plan,
+                        max_attempts=3,
+                    ),
+                    slow_ms=8000,
+                )
+                creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
+                gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
+                    final_html,
+                    images,
+                    creds_for_gate,
+                    preflight_thumbnail_src=preflight_thumb_src,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         go_live_errors, go_live_warnings = self._go_live_gate_checklist(
             title=title,
             final_html=final_html,
@@ -2844,43 +2804,45 @@ class AgentWorkflow:
             summary=summary_text,
             html=final_html,
         )
-        preflight_thumb_src = ""
-        try:
-            images, preflight_thumb_src = self._profile_call(
-                "resume_thumbnail_preflight_with_recovery",
-                lambda: self._preflight_thumbnail_with_recovery(
-                    draft=draft,
-                    candidate=candidate,
-                    images=images,
-                    prompt_plan=image_prompt_plan,
-                    max_attempts=3,
-                ),
-                slow_ms=8000,
-            )
-        except Exception as exc:
-            hold_labels = self._normalize_resume_labels(row.get("labels", []))
-            if not hold_labels:
-                hold_labels = self._build_public_labels(
-                    title=title,
-                    candidate=candidate,
-                    global_keywords=self.last_global_keywords,
-                    max_labels=6,
+        if not preflight_thumb_src:
+            try:
+                images, preflight_thumb_src = self._profile_call(
+                    "resume_thumbnail_preflight_with_recovery",
+                    lambda: self._preflight_thumbnail_with_recovery(
+                        draft=draft,
+                        candidate=candidate,
+                        images=images,
+                        prompt_plan=image_prompt_plan,
+                        max_attempts=3,
+                    ),
+                    slow_ms=8000,
                 )
-            post_id = str(row.get("post_id", "") or "").strip()
-            updated_draft_id, hold_note = self._sync_stage_draft_checkpoint(
-                current_draft_post_id=post_id,
-                stage="hold",
-                title=title,
-                html_body=final_html,
-                labels=hold_labels,
-                reason=str(exc),
-            )
-            hold_msg = f"thumbnail_preflight_failed: {str(exc)}"
-            if hold_note:
-                hold_msg += f" | {hold_note}"
-            if updated_draft_id:
-                hold_msg += f" | draft_checkpoint={updated_draft_id}"
-            return WorkflowResult("hold", hold_msg)
+            except Exception as exc:
+                hold_labels = self._normalize_resume_labels(row.get("labels", []))
+                if not hold_labels:
+                    hold_labels = self._build_public_labels(
+                        title=title,
+                        candidate=candidate,
+                        global_keywords=self.last_global_keywords,
+                        max_labels=6,
+                    )
+                post_id = str(row.get("post_id", "") or "").strip()
+                updated_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                    current_draft_post_id=post_id,
+                    stage="hold",
+                    title=title,
+                    html_body=final_html,
+                    labels=hold_labels,
+                    reason=str(exc),
+                )
+                grade = self._classify_error_grade(str(exc))
+                hold_msg = f"thumbnail_preflight_failed[{grade}]: {str(exc)}"
+                if hold_note:
+                    hold_msg += f" | {hold_note}"
+                if updated_draft_id:
+                    hold_msg += f" | draft_checkpoint={updated_draft_id}"
+                self._mark_active_slot("hold", hold_msg)
+                return WorkflowResult("hold", hold_msg)
         if bool(getattr(self.settings.publish, "thumbnail_preflight_only", False)):
             self.logs.append_run(
                 RunRecord(
@@ -2892,6 +2854,7 @@ class AgentWorkflow:
                     note=f"thumbnail_preflight_only_ok:{preflight_thumb_src[:180]}",
                 )
             )
+            self._mark_active_slot("hold", "thumbnail_preflight_only_ok")
             return WorkflowResult("hold", "thumbnail_preflight_only_ok")
         published = self._profile_call(
             "resume_publish_post",
@@ -2935,6 +2898,7 @@ class AgentWorkflow:
         if manual_trigger and str(getattr(published, "post_id", "")).strip():
             self.logs.add_excluded_post(str(published.post_id).strip(), reason="manual_trigger")
         self._progress("done", "중단 문서 재개 완료", 100)
+        self._mark_active_slot("consumed", "resume_publish_success", post_id=str(getattr(published, "post_id", "") or ""))
         return WorkflowResult("success", f"{published.url} (scheduled: {publish_at.isoformat()})")
 
     def _strip_wip_title_prefix(self, title: str) -> str:
@@ -3430,16 +3394,13 @@ class AgentWorkflow:
                 last_err = str(exc or "thumbnail_preflight_failed:unknown")
                 if attempt_no >= attempts:
                     break
-                try:
-                    working = self.visual.regenerate_thumbnail_once(
-                        draft,
-                        working,
-                        prompt_plan=prompt_plan,
-                    )
-                    working = self.visual.ensure_unique_assets(working)
+                # Image generation loops are disabled. Recovery rotates a different library image as thumbnail.
+                if len(working) > 1:
+                    rotated = list(working[1:]) + [working[0]]
+                    working = self.visual.ensure_unique_assets(rotated)
                     self._optimize_thumbnail_alt(working, candidate)
-                except Exception as regen_exc:
-                    last_err = f"{last_err};thumbnail_regen_failed:{regen_exc}"
+                    continue
+                last_err = f"{last_err};thumbnail_rotation_exhausted"
         raise RuntimeError(last_err)
 
     def _force_image_floor(
@@ -3929,14 +3890,77 @@ class AgentWorkflow:
             return 0.0
         return SequenceMatcher(None, html_text[:6000], source_text[:6000]).ratio()
 
+    def _classify_error_grade(self, message: str) -> str:
+        msg = str(message or "").lower()
+        hold_fatal = (
+            "invalid_scope",
+            "drive_backend_disabled",
+            "non_blogger_host",
+            "thumbnail_data_uri_not_allowed",
+            "english_only",
+            "data:image",
+        )
+        hold_recoverable = (
+            "405",
+            "http_4xx_or_5xx",
+            "timeout",
+            "qa below threshold",
+            "thumbnail_preflight_failed",
+            "image library shortage",
+            "upload timeout",
+        )
+        skip_keys = (
+            "duplicate title",
+            "buffer over target",
+            "entity diversity gate",
+        )
+        if any(k in msg for k in hold_fatal):
+            return "HOLD_FATAL"
+        if any(k in msg for k in hold_recoverable):
+            return "HOLD_RECOVERABLE"
+        if any(k in msg for k in skip_keys):
+            return "SKIP"
+        return "HOLD_RECOVERABLE"
+
+    def _mark_active_slot(self, status: str, reason: str = "", post_id: str = "") -> None:
+        key = str(self._active_slot_id or "").strip()
+        if not key:
+            return
+        try:
+            self.monthly_scheduler.mark_slot(
+                key,
+                status=str(status or "hold"),
+                reason=str(reason or "")[:200],
+                post_id=str(post_id or ""),
+                now_utc=datetime.now(timezone.utc),
+            )
+        except Exception:
+            pass
+        finally:
+            if str(status or "").strip().lower() in {"consumed", "hold", "skipped", "failed"}:
+                self._active_slot_id = ""
+
     def _compute_publish_at(self) -> datetime | None:
         if not self.settings.publish.use_blogger_schedule:
             return None
         now = datetime.now(timezone.utc)
+        min_delay = max(1, int(getattr(self.settings.publish, "min_delay_minutes", 10) or 10))
+        if bool(getattr(self.settings.monthly_scheduler, "enabled", True)):
+            slot = self.monthly_scheduler.acquire_next_pending_slot(now_utc=now, min_delay_minutes=min_delay)
+            if isinstance(slot, dict) and slot.get("publish_at_utc"):
+                self._active_slot_id = str(slot.get("slot_id", "") or "").strip()
+                try:
+                    dt = slot.get("publish_at_utc")
+                    if isinstance(dt, datetime):
+                        return dt.astimezone(timezone.utc).replace(microsecond=0)
+                except Exception:
+                    pass
+        return self._compute_publish_at_legacy(now=now, min_delay=min_delay)
+
+    def _compute_publish_at_legacy(self, now: datetime, min_delay: int) -> datetime | None:
         snapshot = self._blog_snapshot(force_refresh=True)
         times, day_count = self._build_publish_state(snapshot, now)
         daily_cap = max(1, int(self.settings.publish.daily_publish_cap))
-        min_delay = max(1, int(self.settings.publish.min_delay_minutes))
         anchor = times[-1] if times else now + timedelta(minutes=min_delay)
         if anchor < now + timedelta(minutes=min_delay):
             anchor = now + timedelta(minutes=min_delay)

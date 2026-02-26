@@ -56,6 +56,8 @@ class VisualPipeline:
         self.image_cache_dir.mkdir(parents=True, exist_ok=True)
         self._visual_log_path = self.temp_dir.parent / "logs" / "visual_pipeline.jsonl"
         self._visual_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_rotate_max_bytes = 50 * 1024 * 1024
+        self._log_rotate_keep = 10
         self._models_cache: tuple[datetime, dict[str, set[str]]] | None = None
         self._image_model_blocked_until: dict[str, datetime] = {}
         self._last_image_request_at: datetime | None = None
@@ -70,6 +72,14 @@ class VisualPipeline:
     def build(self, draft: DraftPost, prompt_plan: dict[str, Any] | None = None) -> list[ImageAsset]:
         self._current_run_hashes = set()
         self._current_run_embeddings = []
+        if not bool(getattr(self.visual_settings, "enable_gemini_image_generation", False)):
+            self._log_visual_event(
+                {
+                    "event": "visual_build_skipped",
+                    "reason": "gemini_image_generation_disabled",
+                }
+            )
+            return []
         provider = str(getattr(self.visual_settings, "image_provider", "gemini") or "gemini").strip().lower()
         target = max(1, int(self.visual_settings.target_images_per_post))
         body_slots = max(0, target - 1)
@@ -1447,10 +1457,32 @@ class VisualPipeline:
         try:
             row = dict(payload or {})
             row["ts"] = datetime.now(timezone.utc).isoformat()
+            self._rotate_log_if_needed(self._visual_log_path)
             with self._visual_log_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception:
             pass
+
+    def _rotate_log_if_needed(self, path: Path) -> None:
+        try:
+            if not path.exists():
+                return
+            if int(path.stat().st_size or 0) <= int(self._log_rotate_max_bytes):
+                return
+            first = path.with_suffix(path.suffix + ".1")
+            if first.exists():
+                for idx in range(self._log_rotate_keep, 0, -1):
+                    src = path.with_suffix(path.suffix + f".{idx}")
+                    dst = path.with_suffix(path.suffix + f".{idx + 1}")
+                    if not src.exists():
+                        continue
+                    if idx >= self._log_rotate_keep:
+                        src.unlink(missing_ok=True)
+                        continue
+                    src.replace(dst)
+            path.replace(first)
+        except Exception:
+            return
 
     def _resolve_image_model_candidates(self, role: str = "content") -> list[str]:
         preferred = str(getattr(self.visual_settings, "gemini_image_model", "") or "").strip()

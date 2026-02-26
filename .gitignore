@@ -23,6 +23,8 @@ storage/temp_images/
 storage/ui/
 storage/*.sqlite
 storage/*.sqlite-journal
+storage/schedules/
+storage/state/
 
 # Local secrets/tokens
 config/client_secrets.json

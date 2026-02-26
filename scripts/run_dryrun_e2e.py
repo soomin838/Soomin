@@ -5,6 +5,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -12,6 +13,8 @@ if str(ROOT) not in sys.path:
 
 from core.brain import DraftPost
 from core.publisher import Publisher
+from core.image_library import pick_images
+from core.scheduler import generate_month_schedule
 from core.scout import TopicCandidate
 from core.settings import load_settings
 from core.visual import ImageAsset
@@ -53,13 +56,23 @@ Reinstall audio driver and reboot.
 """.strip()
     canonical_html = workflow._canonicalize_html_payload(sample_markdown)
 
-    banner = ROOT / "assets" / "fallback" / "banner.png"
-    inline = ROOT / "assets" / "fallback" / "inline.png"
-    images = [
-        ImageAsset(path=banner, alt="Troubleshooting flow diagram for a Windows audio fix.", source_kind="pollinations", source_url="local://fallback"),
-        ImageAsset(path=inline, alt="Checklist diagram for microphone troubleshooting steps.", source_kind="pollinations", source_url="local://fallback"),
-    ]
+    images = pick_images(
+        title="Windows microphone not working after update",
+        min_count=2,
+        root=ROOT,
+    )
+    if len(images) < 2:
+        banner = ROOT / "assets" / "fallback" / "banner.png"
+        inline = ROOT / "assets" / "fallback" / "inline.png"
+        images = [
+            ImageAsset(path=banner, alt="Troubleshooting flow diagram for a Windows audio fix.", source_kind="library", source_url="local://fallback"),
+            ImageAsset(path=inline, alt="Checklist diagram for microphone troubleshooting steps.", source_kind="library", source_url="local://fallback"),
+        ]
     merged = publisher.build_dry_run_html(canonical_html, images)
+    now = datetime.now(timezone.utc)
+    now_et = now.astimezone(ZoneInfo("America/New_York"))
+    sched_path = ROOT / "storage" / "schedules" / f"monthly_slots_{now_et.year:04d}_{now_et.month:02d}.json"
+    schedule_rows = generate_month_schedule(now_et.year, now_et.month, sched_path)
 
     draft = DraftPost(
         title="Windows microphone not working after update",
@@ -79,14 +92,8 @@ Reinstall audio driver and reboot.
         main_entity="Windows",
         long_tail_keywords=["windows microphone not working", "windows mic fix after update"],
     )
-    prompt_plan = workflow._fallback_image_prompt_plan(draft, candidate)
-    prompt_blob = " ".join(
-        [
-            str(prompt_plan.get("banner_prompt", "")),
-            str(prompt_plan.get("inline_prompt", "")),
-        ]
-    ).lower()
-    banned_image_words = ("fire", "smoke", "explosion", "burning", "hazard", "injury", "blood", "damaged", "broken outlet", "electric")
+    prompt_blob = ""
+    banned_image_words = ()
     required_title_tokens = [
         str(x or "").strip().lower()
         for x in (getattr(settings.content_mode, "required_title_tokens_any", []) or [])
@@ -109,6 +116,7 @@ Reinstall audio driver and reboot.
         _check("google_links_zero", "google.com" not in merged.lower(), "google link absent"),
         _check("banned_image_words_zero", not any(w in prompt_blob for w in banned_image_words), "image prompt hazard words absent"),
         _check("title_has_required_token", any(tok in enforced_title.lower() for tok in required_title_tokens), f"title={enforced_title}"),
+        _check("monthly_schedule_generated", bool(schedule_rows), f"days={len(schedule_rows)}"),
     ]
 
     passed = sum(1 for item in checks if item["passed"])
@@ -120,8 +128,8 @@ Reinstall audio driver and reboot.
         "sample": {
             "title": enforced_title,
             "keyword": candidate.long_tail_keywords[0],
-            "banner_prompt": str(prompt_plan.get("banner_prompt", ""))[:220],
-            "inline_prompt": str(prompt_plan.get("inline_prompt", ""))[:220],
+            "banner_prompt": "library://selected",
+            "inline_prompt": "library://selected",
         },
     }
     out_path = ROOT / "storage" / "logs" / "dryrun_e2e_report.json"

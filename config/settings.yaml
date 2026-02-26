@@ -7,6 +7,15 @@ schedule:
   jitter_minutes: 30
   max_retry_backoff_minutes: 30
 
+monthly_scheduler:
+  enabled: true
+  timezone: "America/New_York"
+  output_dir: "storage/schedules"
+  publish_slots_per_day: 5
+  buffer_slots_min: 1
+  buffer_slots_max: 2
+  consume_hold_slots: false
+
 windows:
   use_task_scheduler: true
 
@@ -57,7 +66,7 @@ publish:
   allow_banner_fallback_publish: true
   strict_thumbnail_blogger_media: true
   thumbnail_data_uri_allowed: false
-  auto_allow_data_uri_on_blogger_405: true
+  auto_allow_data_uri_on_blogger_405: false
   thumbnail_preflight_only: false
 quality:
   enabled: true
@@ -237,8 +246,8 @@ visual:
   target_images_per_post: 2
   max_banner_images: 1
   max_inline_images: 1
-  image_provider: "gemini"
-  enable_gemini_image_generation: true
+  image_provider: "library"
+  enable_gemini_image_generation: false
   allow_chart_fallback: false
   gemini_prompt_model: "gemini-2.0-flash"
   gemini_image_model: "models/imagen-3.0-generate-001"
@@ -263,7 +272,7 @@ indexing:
   daily_quota: 200
 
 images:
-  provider: "gemini"
+  provider: "library"
   pollinations:
     model: ""
     size: ""
@@ -280,7 +289,7 @@ llm:
   max_calls_per_post: 3
   enable_refine_loop: false
   enable_judge_post: false
-  enable_image_generation: true
+  enable_image_generation: false
 
 content_mode:
   mode: "tech_troubleshoot_only"

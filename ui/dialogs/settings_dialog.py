@@ -253,13 +253,12 @@ class SettingsDialog(QDialog):
         form = QFormLayout(page)
         form.setSpacing(10)
         self.image_provider = QComboBox()
-        self.image_provider.addItems(["gemini"])
-        self.image_provider.setCurrentText("gemini")
+        self.image_provider.addItems(["library"])
+        self.image_provider.setCurrentText("library")
         self.image_provider.setEnabled(False)
         self.enable_img = QCheckBox()
-        self.enable_img.setChecked(
-            _nested_get(self.data, "visual.enable_gemini_image_generation").strip().lower() in {"1", "true", "yes", "on"}
-        )
+        self.enable_img.setChecked(False)
+        self.enable_img.setEnabled(False)
         self.gemini_image_model = QLineEdit(
             (_nested_get(self.data, "visual.gemini_image_model") or "models/imagen-3.0-generate-001").strip()
         )
@@ -683,9 +682,7 @@ class SettingsDialog(QDialog):
         free_mode = bool(self.free_mode.isChecked()) if not self.required_only else (
             _nested_get(self.data, "budget.free_mode").strip().lower() in {"1", "true", "yes", "on"}
         )
-        enable_img = bool(self.enable_img.isChecked()) if not self.required_only else (
-            _nested_get(self.data, "visual.enable_gemini_image_generation").strip().lower() in {"1", "true", "yes", "on"}
-        )
+        enable_img = False
         gen_per_day = int(getattr(self, "posts_to_generate_per_day", QSpinBox()).value() if hasattr(self, "posts_to_generate_per_day") else int(_nested_get(self.data, "publishing.posts_to_generate_per_day") or "3"))
         pub_per_day = int(getattr(self, "posts_to_publish_per_day", QSpinBox()).value() if hasattr(self, "posts_to_publish_per_day") else int(_nested_get(self.data, "publishing.posts_to_publish_per_day") or "2"))
         if pub_per_day > gen_per_day:
@@ -722,7 +719,7 @@ class SettingsDialog(QDialog):
         if selected_model:
             _nested_set(self.data, "gemini.model", selected_model)
             _nested_set(self.data, "visual.gemini_prompt_model", selected_model)
-        _nested_set(self.data, "visual.image_provider", "gemini")
+        _nested_set(self.data, "visual.image_provider", "library")
         _nested_set(self.data, "visual.pollinations_enabled", False)
         _nested_set(self.data, "visual.pollinations_api_key", "")
         _nested_set(self.data, "visual.pollinations_thumbnail_model", "")
@@ -743,14 +740,14 @@ class SettingsDialog(QDialog):
         _nested_set(self.data, "integrations.refresh_minutes", max(3, integrations_refresh))
         _nested_set(self.data, "budget.dry_run", bool(self.dry_run.isChecked()))
         _nested_set(self.data, "budget.free_mode", bool(self.free_mode.isChecked()))
-        _nested_set(self.data, "visual.enable_gemini_image_generation", bool(self.enable_img.isChecked()))
+        _nested_set(self.data, "visual.enable_gemini_image_generation", False)
         _nested_set(self.data, "visual.target_images_per_post", 2)
         _nested_set(self.data, "visual.max_banner_images", 1)
         _nested_set(self.data, "visual.max_inline_images", 1)
         _nested_set(self.data, "visual.cache_dir", "storage/image_cache")
         _nested_set(self.data, "visual.fallback_banner", "assets/fallback/banner.png")
         _nested_set(self.data, "visual.fallback_inline", "assets/fallback/inline.png")
-        _nested_set(self.data, "images.provider", "gemini")
+        _nested_set(self.data, "images.provider", "library")
         _nested_set(self.data, "images.banner_count", 1)
         _nested_set(self.data, "images.inline_count", 1)
         _nested_set(self.data, "images.cache_dir", "storage/image_cache")
@@ -760,7 +757,7 @@ class SettingsDialog(QDialog):
         _nested_set(self.data, "images.pollinations.size", "")
         _nested_set(self.data, "images.pollinations.timeout_sec", 0)
         _nested_set(self.data, "llm.provider", "gemini")
-        _nested_set(self.data, "llm.enable_image_generation", True)
+        _nested_set(self.data, "llm.enable_image_generation", False)
         _nested_set(self.data, "llm.enable_refine_loop", False)
         _nested_set(self.data, "llm.enable_judge_post", False)
         local_llm = self._local_llm_settings_from_ui()

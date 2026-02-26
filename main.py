@@ -949,8 +949,8 @@ class AgentController:
                 changed = True
 
             provider = (_nested_get(raw, "visual.image_provider") or "").strip().lower()
-            if provider != "gemini":
-                _nested_set(raw, "visual.image_provider", "gemini")
+            if provider != "library":
+                _nested_set(raw, "visual.image_provider", "library")
                 changed = True
             visual_raw = (
                 raw.get("visual", {}) if isinstance(raw.get("visual", {}), dict) else {}
@@ -961,8 +961,23 @@ class AgentController:
             if "thumbnail_ocr_verify" not in visual_raw:
                 _nested_set(raw, "visual.thumbnail_ocr_verify", False)
                 changed = True
-            if str(_nested_get(raw, "visual.enable_gemini_image_generation") or "").strip().lower() in {"false", "0", "no", "off", ""}:
-                _nested_set(raw, "visual.enable_gemini_image_generation", True)
+            if str(_nested_get(raw, "visual.enable_gemini_image_generation") or "").strip().lower() not in {"false", "0", "no", "off"}:
+                _nested_set(raw, "visual.enable_gemini_image_generation", False)
+                changed = True
+            if str(_nested_get(raw, "publish.thumbnail_data_uri_allowed") or "").strip().lower() not in {"false", "0", "no", "off"}:
+                _nested_set(raw, "publish.thumbnail_data_uri_allowed", False)
+                changed = True
+            if str(_nested_get(raw, "publish.auto_allow_data_uri_on_blogger_405") or "").strip().lower() not in {"false", "0", "no", "off"}:
+                _nested_set(raw, "publish.auto_allow_data_uri_on_blogger_405", False)
+                changed = True
+            if (_nested_get(raw, "images.provider") or "").strip().lower() != "library":
+                _nested_set(raw, "images.provider", "library")
+                changed = True
+            if not (_nested_get(raw, "monthly_scheduler.timezone") or "").strip():
+                _nested_set(raw, "monthly_scheduler.timezone", "America/New_York")
+                changed = True
+            if str(_nested_get(raw, "monthly_scheduler.enabled") or "").strip().lower() in {"", "0", "false", "no", "off"}:
+                _nested_set(raw, "monthly_scheduler.enabled", True)
                 changed = True
 
             try:

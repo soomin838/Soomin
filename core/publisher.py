@@ -54,7 +54,7 @@ class Publisher:
         semantic_html_enabled: bool = True,
         strict_thumbnail_blogger_media: bool = True,
         thumbnail_data_uri_allowed: bool = False,
-        auto_allow_data_uri_on_blogger_405: bool = True,
+        auto_allow_data_uri_on_blogger_405: bool = False,
     ) -> None:
         self.credentials_path = credentials_path
         self.blog_id = blog_id
@@ -78,6 +78,8 @@ class Publisher:
         ).resolve()
         self._upload_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._thumbnail_gate_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_rotate_max_bytes = 50 * 1024 * 1024
+        self._log_rotate_keep = 10
 
     def publish_post(
         self,
@@ -1301,51 +1303,6 @@ class Publisher:
                                 }
                             )
                             return roundtrip_url
-                        if self.auto_allow_data_uri_on_blogger_405 and endpoint_status == 405:
-                            self.thumbnail_data_uri_allowed = True
-                            self._log_thumbnail_gate_event(
-                                {
-                                    "event": "thumbnail_data_uri_auto_allowed",
-                                    "attempt_no": attempt_no,
-                                    "strategy": strategy_name,
-                                    "endpoint_status": endpoint_status,
-                                }
-                            )
-                            self._log_thumbnail_gate_event(
-                                {
-                                    "event": "thumbnail_gate_result",
-                                    "attempt_no": attempt_no,
-                                    "ok": True,
-                                    "reason_code": f"data_uri_roundtrip_auto_allowed_405:{strategy_name}",
-                                    "thumbnail_url": roundtrip_url[:120],
-                                }
-                            )
-                            return roundtrip_url
-                if (
-                    (not roundtrip_data_uri)
-                    and self.auto_allow_data_uri_on_blogger_405
-                    and endpoint_status == 405
-                ):
-                    synthesized_data_uri = self._image_data_uri(upload_path, upload_mime)
-                    if synthesized_data_uri:
-                        self.thumbnail_data_uri_allowed = True
-                        self._log_thumbnail_gate_event(
-                            {
-                                "event": "thumbnail_data_uri_synthesized",
-                                "attempt_no": attempt_no,
-                                "endpoint_status": endpoint_status,
-                                "ok": True,
-                            }
-                        )
-                        self._log_thumbnail_gate_event(
-                            {
-                                "event": "thumbnail_gate_result",
-                                "attempt_no": attempt_no,
-                                "ok": True,
-                                "reason_code": "data_uri_synthesized_auto_allowed_405",
-                            }
-                        )
-                        return synthesized_data_uri
                 if roundtrip_data_uri and not self.thumbnail_data_uri_allowed:
                     last_reason = "thumbnail_data_uri_not_allowed"
                     self._log_thumbnail_gate_event(
@@ -1434,6 +1391,7 @@ class Publisher:
             **(payload or {}),
         }
         try:
+            self._rotate_log_if_needed(self._thumbnail_gate_log_path)
             with self._thumbnail_gate_log_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception:
@@ -1499,8 +1457,31 @@ class Publisher:
             **(payload or {}),
         }
         try:
+            self._rotate_log_if_needed(self._upload_log_path)
             with self._upload_log_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _rotate_log_if_needed(self, path: Path) -> None:
+        try:
+            if not path.exists():
+                return
+            size = int(path.stat().st_size or 0)
+            if size <= int(self._log_rotate_max_bytes):
+                return
+            base = path.with_suffix(path.suffix + ".1")
+            if base.exists():
+                for idx in range(self._log_rotate_keep, 0, -1):
+                    src = path.with_suffix(path.suffix + f".{idx}")
+                    dst = path.with_suffix(path.suffix + f".{idx + 1}")
+                    if not src.exists():
+                        continue
+                    if idx >= self._log_rotate_keep:
+                        src.unlink(missing_ok=True)
+                        continue
+                    src.replace(dst)
+            path.replace(base)
         except Exception:
             return
 
