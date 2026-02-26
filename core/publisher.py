@@ -906,7 +906,6 @@ class Publisher:
 
     def _upload_via_blogger_endpoint_detailed(self, path: Path, mime: str, creds) -> dict[str, Any]:
         endpoint = "https://www.blogger.com/upload-image.g"
-        response = None
         details: dict[str, Any] = {
             "endpoint": endpoint,
             "file": str(getattr(path, "name", "")),
@@ -917,59 +916,121 @@ class Publisher:
             "extracted_host": "",
             "reason_code": "",
             "ok": False,
+            "variant": "",
         }
         try:
             self._ensure_valid_token(creds)
-            with path.open("rb") as fh:
-                response = requests.post(
-                    endpoint,
-                    params={
-                        "blogID": self.blog_id,
-                        "source": "post",
-                        "zx": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
-                    },
-                    headers={"Authorization": f"Bearer {creds.token}"},
-                    files={"image": (path.name, fh, mime)},
-                    timeout=60,
-                )
+            payload = path.read_bytes()
         except Exception as exc:
             msg = str(exc or "")
             details["status_code"] = "exception"
             details["response_preview"] = msg[:800]
-            lower = msg.lower()
-            if "invalid_scope" in lower:
-                details["reason_code"] = "invalid_scope"
-            elif "timeout" in lower:
-                details["reason_code"] = "timeout"
-            else:
-                details["reason_code"] = "http_4xx_or_5xx"
+            details["reason_code"] = "file_missing" if not path.exists() else "http_4xx_or_5xx"
             self._last_upload_report = dict(details)
             self._log_upload_event({"event": "blogger_media_upload_exception", **details})
             return details
-        details["status_code"] = int(getattr(response, "status_code", 0) or 0)
-        details["response_preview"] = str(getattr(response, "text", "") or "")[:800]
-        if response.status_code not in {200, 201}:
-            lower = str(response.text or "").lower()
-            details["reason_code"] = "invalid_scope" if ("invalid_scope" in lower or "insufficientpermission" in lower) else "http_4xx_or_5xx"
-            self._last_upload_report = dict(details)
-            self._log_upload_event({"event": "blogger_media_upload_failed", **details})
-            return details
-        extracted, parse_source = self._extract_upload_url_from_response(str(response.text or ""))
-        details["extracted_url"] = extracted
-        details["extracted_host"] = (urlparse(extracted).netloc or "").lower() if extracted else ""
-        if extracted:
-            details["ok"] = True
-            if self._is_blogger_media_url(extracted):
-                details["reason_code"] = ""
-            else:
-                details["reason_code"] = "non_blogger_host"
-            self._last_upload_report = dict(details)
-            self._log_upload_event({"event": "blogger_media_upload_ok", "parse_source": parse_source, **details})
-            return details
-        details["reason_code"] = "response_parse_failed"
-        self._last_upload_report = dict(details)
-        self._log_upload_event({"event": "blogger_media_upload_no_url", "parse_source": parse_source, **details})
-        return details
+
+        token = str(getattr(creds, "token", "") or "").strip()
+        base_params = {
+            "blogID": self.blog_id,
+            "source": "post",
+            "zx": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
+        }
+        base_headers = {"Authorization": f"Bearer {token}"}
+        upload_variants = [
+            {
+                "name": "image_field_default",
+                "params": dict(base_params),
+                "files_key": "image",
+                "headers": {},
+            },
+            {
+                "name": "file_field_default",
+                "params": dict(base_params),
+                "files_key": "file",
+                "headers": {},
+            },
+            {
+                "name": "image_field_xhr",
+                "params": {**base_params, "noredirect": "true"},
+                "files_key": "image",
+                "headers": {
+                    "Origin": "https://www.blogger.com",
+                    "Referer": "https://www.blogger.com/",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            },
+            {
+                "name": "image_field_source_editor",
+                "params": {**base_params, "source": "editor"},
+                "files_key": "image",
+                "headers": {},
+            },
+        ]
+        last_details = dict(details)
+        for variant in upload_variants:
+            v_name = str(variant.get("name", "") or "").strip() or "unknown"
+            v_params = dict(variant.get("params", {}) or {})
+            files_key = str(variant.get("files_key", "image") or "image").strip() or "image"
+            headers = {**base_headers, **dict(variant.get("headers", {}) or {})}
+            try:
+                response = requests.post(
+                    endpoint,
+                    params=v_params,
+                    headers=headers,
+                    files={files_key: (path.name, payload, mime)},
+                    timeout=60,
+                )
+            except Exception as exc:
+                msg = str(exc or "")
+                out = dict(details)
+                out["variant"] = v_name
+                out["status_code"] = "exception"
+                out["response_preview"] = msg[:800]
+                lower = msg.lower()
+                if "invalid_scope" in lower:
+                    out["reason_code"] = "invalid_scope"
+                elif "timeout" in lower:
+                    out["reason_code"] = "timeout"
+                else:
+                    out["reason_code"] = "http_4xx_or_5xx"
+                self._log_upload_event({"event": "blogger_media_upload_probe_exception", **out})
+                last_details = out
+                continue
+
+            out = dict(details)
+            out["variant"] = v_name
+            out["status_code"] = int(getattr(response, "status_code", 0) or 0)
+            out["response_preview"] = str(getattr(response, "text", "") or "")[:800]
+            if response.status_code not in {200, 201}:
+                lower = str(response.text or "").lower()
+                out["reason_code"] = "invalid_scope" if ("invalid_scope" in lower or "insufficientpermission" in lower) else "http_4xx_or_5xx"
+                self._log_upload_event({"event": "blogger_media_upload_probe_failed", **out})
+                last_details = out
+                continue
+
+            extracted, parse_source = self._extract_upload_url_from_response(str(response.text or ""))
+            out["extracted_url"] = extracted
+            out["extracted_host"] = (urlparse(extracted).netloc or "").lower() if extracted else ""
+            if extracted:
+                out["ok"] = True
+                if self._is_blogger_media_url(extracted):
+                    out["reason_code"] = ""
+                    self._last_upload_report = dict(out)
+                    self._log_upload_event({"event": "blogger_media_upload_ok", "parse_source": parse_source, **out})
+                    return out
+                out["reason_code"] = "non_blogger_host"
+                self._log_upload_event({"event": "blogger_media_upload_probe_non_blogger_host", "parse_source": parse_source, **out})
+                last_details = out
+                continue
+
+            out["reason_code"] = "response_parse_failed"
+            self._log_upload_event({"event": "blogger_media_upload_probe_no_url", "parse_source": parse_source, **out})
+            last_details = out
+
+        self._last_upload_report = dict(last_details)
+        self._log_upload_event({"event": "blogger_media_upload_failed", **last_details})
+        return last_details
 
     def _upload_via_temp_draft_roundtrip(
         self,
@@ -1216,7 +1277,30 @@ class Publisher:
 
                 # Blogger endpoint may fail in some environments (e.g. 405).
                 # Recovery path: temp-post roundtrip with multiple strategies.
+                # In strict production mode (data URI not allowed), roundtrip is skipped
+                # because Blogger API preserves data:image and cannot satisfy host gate.
                 endpoint_status = int(details.get("status_code", 0) or 0)
+                if not bool(self.thumbnail_data_uri_allowed):
+                    last_reason = reason_code or ("http_4xx_or_5xx" if endpoint_status >= 400 else "missing_extracted_url")
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "thumbnail_upload_roundtrip_skipped",
+                            "attempt_no": attempt_no,
+                            "endpoint_status": endpoint_status,
+                            "reason_code": str(last_reason),
+                            "strict_thumbnail_blogger_media": bool(self.strict_thumbnail_blogger_media),
+                            "thumbnail_data_uri_allowed": bool(self.thumbnail_data_uri_allowed),
+                        }
+                    )
+                    self._log_thumbnail_gate_event(
+                        {
+                            "event": "thumbnail_gate_result",
+                            "attempt_no": attempt_no,
+                            "ok": False,
+                            "reason_code": str(last_reason),
+                        }
+                    )
+                    continue
                 strategy_rows = [
                     (
                         "draft_publish_admin",

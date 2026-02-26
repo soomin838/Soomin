@@ -3382,9 +3382,18 @@ class AgentWorkflow:
         if not working:
             raise RuntimeError("thumbnail_preflight_failed:no_images")
         last_err = "thumbnail_preflight_failed:unknown"
-        attempts = max(1, int(max_attempts or 1))
-        for attempt_no in range(1, attempts + 1):
+        cfg_cycles = int(getattr(self.settings.publish, "thumbnail_preflight_max_cycles", max_attempts) or 0)
+        retry_delay_sec = max(1, int(getattr(self.settings.publish, "thumbnail_preflight_retry_delay_sec", 8) or 8))
+        finite_cycles = max(1, cfg_cycles) if cfg_cycles > 0 else 0
+        attempt_no = 0
+        while True:
+            attempt_no += 1
             try:
+                self._progress(
+                    "publish",
+                    f"썸네일 Blogger 업로드 재시도 중 ({attempt_no}{'' if finite_cycles == 0 else f'/{finite_cycles}'})",
+                    85,
+                )
                 thumb_src = self.publisher.preflight_thumbnail_blogger_media(
                     working[0],
                     max_attempts=2,
@@ -3392,15 +3401,26 @@ class AgentWorkflow:
                 return working, str(thumb_src or "").strip()
             except Exception as exc:
                 last_err = str(exc or "thumbnail_preflight_failed:unknown")
-                if attempt_no >= attempts:
-                    break
+                self._append_workflow_perf(
+                    "thumbnail_preflight_retry",
+                    {
+                        "attempt_no": int(attempt_no),
+                        "max_cycles": int(finite_cycles),
+                        "delay_sec": int(retry_delay_sec),
+                        "error": str(last_err)[:260],
+                        "infinite": bool(finite_cycles == 0),
+                    },
+                )
                 # Image generation loops are disabled. Recovery rotates a different library image as thumbnail.
                 if len(working) > 1:
                     rotated = list(working[1:]) + [working[0]]
                     working = self.visual.ensure_unique_assets(rotated)
                     self._optimize_thumbnail_alt(working, candidate)
-                    continue
-                last_err = f"{last_err};thumbnail_rotation_exhausted"
+                else:
+                    last_err = f"{last_err};thumbnail_rotation_exhausted"
+                if finite_cycles > 0 and attempt_no >= finite_cycles:
+                    break
+                time.sleep(float(retry_delay_sec))
         raise RuntimeError(last_err)
 
     def _force_image_floor(
