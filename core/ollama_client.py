@@ -367,6 +367,114 @@ class OllamaClient:
             "summary": summary,
         }
 
+    def build_draft_html(
+        self,
+        *,
+        plan: TroubleshootingPlan | dict[str, Any],
+        internal_links_block: str = "",
+        images_plan: dict[str, Any] | None = None,
+        style_variant_id: str = "v1",
+        title_hint: str = "",
+    ) -> str:
+        """
+        Local-first full draft generator.
+        Returns HTML body fragment only.
+        """
+        if isinstance(plan, TroubleshootingPlan):
+            plan_payload = {
+                "primary_keyword": plan.primary_keyword,
+                "device_family": plan.device_family,
+                "issue_summary": plan.issue_summary,
+                "symptom_phrases": plan.symptom_phrases,
+                "likely_causes": plan.likely_causes,
+                "fix_steps": plan.fix_steps,
+                "verification": plan.verification,
+                "when_to_stop": plan.when_to_stop,
+                "safe_warnings": plan.safe_warnings,
+                "faq": plan.faq,
+                "internal_links_anchor_ideas": plan.internal_links_anchor_ideas,
+                "meta_description_seed": plan.meta_description_seed,
+            }
+        else:
+            plan_payload = dict(plan or {})
+
+        system_prompt = (
+            "You write practical US-English troubleshooting guides.\n"
+            "Output HTML body fragment only. No markdown. No JSON wrapper.\n"
+            "Use this exact H2 order:\n"
+            "Quick Take\n"
+            "Symptoms (How you know it's this issue)\n"
+            "Why This Happens\n"
+            "Fix 1\nFix 2\nFix 3\nFix 4\nFix 5\n"
+            "If None Worked (Safe escalation)\n"
+            "Prevention Checklist\n"
+            "Each Fix section must include:\n"
+            "- 3-5 concise bullet steps\n"
+            "- 'Expected result:' line\n"
+            "- 'If not:' line\n"
+            "- 'Time to try:' line\n"
+            "Software troubleshooting only. No dangerous physical hazards.\n"
+            "No internal metadata, no debug strings, no Korean."
+        )
+        user_payload = {
+            "title_hint": str(title_hint or ""),
+            "style_variant_id": str(style_variant_id or "v1"),
+            "plan": plan_payload,
+            "images_plan": dict(images_plan or {}),
+            "internal_links_block": str(internal_links_block or "")[:3000],
+        }
+        data = self.generate_json(
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            purpose="draft_html",
+        )
+        html = ""
+        if isinstance(data, dict):
+            html = str(
+                data.get("content_html", "")
+                or data.get("html", "")
+                or data.get("draft_html", "")
+                or ""
+            ).strip()
+        if not html:
+            # Minimal deterministic fallback to keep local-first resilient.
+            keyword = self._clean_plan_text(str(plan_payload.get("primary_keyword", "") or title_hint), max_len=100)
+            device = self._normalize_device_family(str(plan_payload.get("device_family", "") or "windows"))
+            summary = self._clean_plan_text(str(plan_payload.get("issue_summary", "") or ""), max_len=200)
+            checks = plan_payload.get("verification", []) if isinstance(plan_payload.get("verification", []), list) else []
+            checks = [self._clean_plan_text(str(x or ""), max_len=120) for x in checks if str(x or "").strip()][:6]
+            if not checks:
+                checks = ["Verify the issue does not return after reboot.", "Confirm the setting remains stable."]
+            html = (
+                f"<h2>Quick Take</h2><p>{summary or f'Use this checklist to fix {keyword} on {device}.'}</p>"
+                f"<h2>Symptoms (How you know it's this issue)</h2><ul>"
+                + "".join(f"<li>{self._clean_plan_text(str(x or ''), max_len=120)}</li>" for x in plan_payload.get("symptom_phrases", [])[:5])
+                + "</ul>"
+                "<h2>Why This Happens</h2><ul>"
+                + "".join(f"<li>{self._clean_plan_text(str(x or ''), max_len=150)}</li>" for x in plan_payload.get("likely_causes", [])[:4])
+                + "</ul>"
+            )
+            for idx, row in enumerate(list(plan_payload.get("fix_steps", []))[:5], start=1):
+                if not isinstance(row, dict):
+                    continue
+                step_title = self._clean_plan_text(str(row.get("step_title", "") or f"Fix step {idx}"), max_len=80)
+                action = self._clean_plan_text(str(row.get("action", "") or "Apply the next safe software fix."), max_len=220)
+                expected = self._clean_plan_text(str(row.get("expected_result", "") or "Expected result: the issue improves."), max_len=180)
+                fallback = self._clean_plan_text(str(row.get("if_not_worked_next", "") or "If not: continue to the next fix."), max_len=180)
+                html += (
+                    f"<h2>Fix {idx}</h2>"
+                    f"<p><strong>{step_title}</strong></p>"
+                    f"<ul><li>{action}</li><li>Expected result: {expected}</li><li>If not: {fallback}</li><li>Time to try: 2 to 5 minutes.</li></ul>"
+                )
+            html += (
+                "<h2>If None Worked (Safe escalation)</h2>"
+                "<ul><li>Capture exact error text and timestamp.</li><li>Revert risky changes and contact official support.</li></ul>"
+                "<h2>Prevention Checklist</h2><ul>"
+                + "".join(f"<li>{x}</li>" for x in checks[:6])
+                + "</ul>"
+            )
+        return re.sub(r"\s+", " ", html).replace("> <", "><").strip()
+
     def _normalize_troubleshooting_plan(
         self,
         *,
