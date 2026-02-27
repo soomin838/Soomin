@@ -59,7 +59,7 @@ sources:
   github_token: ''
   max_candidates: 20
 gemini:
-  api_key: AIzaSyCmf9lSyn8Yug7yx0sVGgO2DUyoWtNLFos
+  api_key: GEMINI_API_KEY
   model: gemini-2.0-flash
   min_publish_score: 70
   editor_persona: You are a native English tech influencer writing for US/UK/global
@@ -94,7 +94,7 @@ visual:
   pollinations_thumbnail_model: gptimage
   pollinations_content_model: flux
   thumbnail_ocr_verify: false
-  pollinations_api_key: sk_sfHKDNAmHFEJGCGjlMNAQviaWr8iVWdz
+  pollinations_api_key: ""
 blogger:
   blog_id: '3798794568809192736'
   credentials_path: config/blogger_token.json

@@ -272,6 +272,13 @@ class ActionabilityGateSettings:
 
 
 @dataclass
+class GenerationSettings:
+    mode: str = "hybrid"  # local_first | hybrid | cloud_first
+    gemini_daily_budget_calls: int = 12
+    gemini_only_on_fail: bool = True
+
+
+@dataclass
 class TopicGrowthSettings:
     enabled: bool = True
     daily_new_topics: int = 10
@@ -439,6 +446,7 @@ class AppSettings:
     publish: PublishSettings = field(default_factory=PublishSettings)
     quality: QualitySettings = field(default_factory=QualitySettings)
     actionability_gate: ActionabilityGateSettings = field(default_factory=ActionabilityGateSettings)
+    generation: GenerationSettings = field(default_factory=GenerationSettings)
     topic_growth: TopicGrowthSettings = field(default_factory=TopicGrowthSettings)
     keyword_pool: KeywordPoolSettings = field(default_factory=KeywordPoolSettings)
     integrations: IntegrationSettings = field(default_factory=IntegrationSettings)
@@ -474,6 +482,7 @@ def load_settings(path: Path) -> AppSettings:
     settings_warnings: list[str] = []
     quality_raw = dict(raw.get("quality", {}) or {})
     actionability_raw = dict(raw.get("actionability_gate", {}) or {})
+    generation_raw = dict(raw.get("generation", {}) or {})
     qa_raw = raw.get("qa", {}) or {}
     content_raw = dict(raw.get("content", {}) or {})
     content_mode_raw = dict(raw.get("content_mode", {}) or {})
@@ -686,6 +695,7 @@ def load_settings(path: Path) -> AppSettings:
         publish=publish_obj,
         quality=_construct_dc(QualitySettings, quality_raw),
         actionability_gate=_construct_dc(ActionabilityGateSettings, actionability_raw),
+        generation=_construct_dc(GenerationSettings, generation_raw),
         topic_growth=_construct_dc(TopicGrowthSettings, raw.get("topic_growth", {})),
         keyword_pool=_construct_dc(KeywordPoolSettings, raw.get("keyword_pool", {})),
         integrations=_construct_dc(IntegrationSettings, raw.get("integrations", {})),

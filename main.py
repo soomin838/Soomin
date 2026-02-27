@@ -942,11 +942,16 @@ class AgentController:
             if not (_nested_get(raw, "publish.r2.bucket") or "").strip():
                 _nested_set(raw, "publish.r2.bucket", "rezero-images")
                 changed = True
-            if not (_nested_get(raw, "publish.r2.access_key_id") or "").strip():
-                _nested_set(raw, "publish.r2.access_key_id", "c011e641f61dc0cfc69ab94c271d2c6f")
+            # Never inject credentials into persisted config. ENV-only for secrets.
+            if (_nested_get(raw, "publish.r2.access_key_id") or "").strip():
+                pass
+            else:
+                _nested_set(raw, "publish.r2.access_key_id", "")
                 changed = True
-            if not (_nested_get(raw, "publish.r2.secret_access_key") or "").strip():
-                _nested_set(raw, "publish.r2.secret_access_key", "1255ea2592e4c2a67db768df0c3542cda348bb7270fce3190fa266eb9d6eddfd")
+            if (_nested_get(raw, "publish.r2.secret_access_key") or "").strip():
+                pass
+            else:
+                _nested_set(raw, "publish.r2.secret_access_key", "")
                 changed = True
             if not (_nested_get(raw, "publish.r2.public_base_url") or "").strip():
                 _nested_set(raw, "publish.r2.public_base_url", "https://pub-524e94bbdde74f518124321d92bc6937.r2.dev")
@@ -1033,6 +1038,20 @@ class AgentController:
                 changed = True
             if str(_nested_get(raw, "publish.auto_allow_data_uri_on_blogger_405") or "").strip().lower() not in {"false", "0", "no", "off"}:
                 _nested_set(raw, "publish.auto_allow_data_uri_on_blogger_405", False)
+                changed = True
+            gen_mode = (_nested_get(raw, "generation.mode") or "").strip().lower()
+            if gen_mode not in {"local_first", "hybrid", "cloud_first"}:
+                _nested_set(raw, "generation.mode", "hybrid")
+                changed = True
+            try:
+                gen_budget = int(_nested_get(raw, "generation.gemini_daily_budget_calls") or "0")
+            except Exception:
+                gen_budget = 0
+            if gen_budget <= 0:
+                _nested_set(raw, "generation.gemini_daily_budget_calls", 12)
+                changed = True
+            if str(_nested_get(raw, "generation.gemini_only_on_fail") or "").strip().lower() in {"", "none"}:
+                _nested_set(raw, "generation.gemini_only_on_fail", True)
                 changed = True
             if (_nested_get(raw, "images.provider") or "").strip().lower() != "library":
                 _nested_set(raw, "images.provider", "library")

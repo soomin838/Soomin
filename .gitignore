@@ -25,6 +25,7 @@ storage/*.sqlite
 storage/*.sqlite-journal
 storage/schedules/
 storage/state/
+storage/prompt_packs/
 
 # Local secrets/tokens
 config/client_secrets.json

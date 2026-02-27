@@ -1,4 +1,17 @@
-﻿# RezeroAgent (윈도우 우선)
+﻿## Security (ENV-only Secrets)
+
+- Never commit cloud/API secrets into repository files.
+- Set secrets via environment variables only:
+  - R2_ENDPOINT_URL, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_PUBLIC_BASE_URL
+  - GEMINI_API_KEY
+- config/settings.yaml should keep secret fields empty by default.
+
+## Invalid Traffic Safety (AdSense)
+
+- Do not buy traffic, use traffic exchanges, run click bots, or click your own ads.
+- Keep growth organic via useful troubleshooting content and internal linking.
+- If quality/hold metrics degrade, reduce publish rate automatically.
+# RezeroAgent (윈도우 우선)
 
 윈도우 환경에서 동작하는 블로그 자동화 에이전트입니다.
 목표는 고품질 기술형 글을 자동 생성/발행하고, 무료 티어 한도 내에서 안정적으로 운영하는 것입니다.
@@ -231,3 +244,4 @@ GCS 전용 모드가 필요하면:
 3. `config/service_account.json` 배치
 4. 서비스 계정에 Storage Object Admin(또는 업로드+공개 권한) 부여
 5. 버킷 퍼블릭 읽기 정책(또는 CDN 공개 경로) 설정
+

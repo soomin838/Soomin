@@ -21,6 +21,7 @@ class BudgetGuard:
         self,
         today_posts: int | None = None,
         enforce_post_limit: bool = True,
+        enforce_gemini_limit: bool = True,
     ) -> BudgetCheck:
         if not self.settings.free_mode:
             return BudgetCheck(True, "free mode disabled")
@@ -30,6 +31,6 @@ class BudgetGuard:
 
         if enforce_post_limit and posts >= self.settings.daily_post_limit:
             return BudgetCheck(False, f"daily post limit reached ({posts})")
-        if calls >= self.settings.daily_gemini_call_limit:
+        if enforce_gemini_limit and calls >= self.settings.daily_gemini_call_limit:
             return BudgetCheck(False, f"daily gemini call limit reached ({calls})")
         return BudgetCheck(True, "ok")
