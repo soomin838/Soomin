@@ -253,9 +253,9 @@ gemini:
   min_request_interval_seconds: 30
 
 visual:
-  target_images_per_post: 2
+  target_images_per_post: 5
   max_banner_images: 1
-  max_inline_images: 1
+  max_inline_images: 4
   image_provider: "library"
   enable_gemini_image_generation: false
   allow_chart_fallback: false
@@ -288,7 +288,7 @@ images:
     size: ""
     timeout_sec: 0
   banner_count: 1
-  inline_count: 1
+  inline_count: 4
   cache_dir: "storage/image_cache"
   prompt_suffix: "no text, no letters, no numbers, no logos, no watermark"
   fallback_banner: "assets/fallback/banner.png"

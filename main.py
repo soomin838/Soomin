@@ -657,6 +657,7 @@ class AgentController:
                             titles_provider=_recent_titles_provider,
                             ollama_manager=self.workflow.ollama_manager,
                             ollama_client=self.workflow.ollama_client,
+                            r2_config=getattr(self.settings.publish, "r2", None),
                         )
                     except Exception:
                         pass
@@ -985,8 +986,22 @@ class AgentController:
                 cur_target_images = int(_nested_get(raw, "visual.target_images_per_post") or "0")
             except Exception:
                 cur_target_images = 0
-            if cur_target_images <= 0:
-                _nested_set(raw, "visual.target_images_per_post", 2)
+            if cur_target_images < 5:
+                _nested_set(raw, "visual.target_images_per_post", 5)
+                changed = True
+            try:
+                cur_max_banner = int(_nested_get(raw, "visual.max_banner_images") or "0")
+            except Exception:
+                cur_max_banner = 0
+            if cur_max_banner != 1:
+                _nested_set(raw, "visual.max_banner_images", 1)
+                changed = True
+            try:
+                cur_max_inline = int(_nested_get(raw, "visual.max_inline_images") or "0")
+            except Exception:
+                cur_max_inline = 0
+            if cur_max_inline < 4:
+                _nested_set(raw, "visual.max_inline_images", 4)
                 changed = True
 
             try:
@@ -1021,6 +1036,20 @@ class AgentController:
                 changed = True
             if (_nested_get(raw, "images.provider") or "").strip().lower() != "library":
                 _nested_set(raw, "images.provider", "library")
+                changed = True
+            try:
+                cur_banner_count = int(_nested_get(raw, "images.banner_count") or "0")
+            except Exception:
+                cur_banner_count = 0
+            if cur_banner_count != 1:
+                _nested_set(raw, "images.banner_count", 1)
+                changed = True
+            try:
+                cur_inline_count = int(_nested_get(raw, "images.inline_count") or "0")
+            except Exception:
+                cur_inline_count = 0
+            if cur_inline_count < 4:
+                _nested_set(raw, "images.inline_count", 4)
                 changed = True
             if not (_nested_get(raw, "monthly_scheduler.timezone") or "").strip():
                 _nested_set(raw, "monthly_scheduler.timezone", "America/New_York")

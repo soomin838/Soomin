@@ -6,11 +6,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import re
 from typing import Any, Callable
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from .image_optimizer import optimize_for_library
 from .image_prompts import month_primary_category
 from .pollinations_client import generate_image
+from .r2_uploader import R2Config, upload_file as r2_upload_file
 
 
 UTC = ZoneInfo("UTC")
@@ -18,6 +20,7 @@ ET = ZoneInfo("America/New_York")
 
 STATE_REL = Path("storage/state/daily_vector_state.json")
 LIB_ROOT = Path("assets/library")
+MANIFEST_REL = Path("storage/state/r2_library_manifest.json")
 
 
 def _state_path(root: Path) -> Path:
@@ -39,6 +42,107 @@ def _save_state(root: Path, data: dict) -> None:
     path = _state_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _manifest_path(root: Path) -> Path:
+    return (root / MANIFEST_REL).resolve()
+
+
+def _load_manifest(root: Path) -> list[dict[str, Any]]:
+    path = _manifest_path(root)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            return [row for row in raw if isinstance(row, dict)]
+    except Exception:
+        pass
+    return []
+
+
+def _save_manifest(root: Path, rows: list[dict[str, Any]]) -> None:
+    path = _manifest_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _upsert_manifest_row(
+    root: Path,
+    *,
+    local_path: Path,
+    category: str,
+    r2_url: str,
+    uploaded_at: str,
+) -> None:
+    rows = _load_manifest(root)
+    local_rel = str(local_path.resolve().relative_to(root)).replace("\\", "/")
+    out: list[dict[str, Any]] = []
+    replaced = False
+    for row in rows:
+        key = str(row.get("local_path", "") or "").replace("\\", "/").strip()
+        if key == local_rel:
+            out.append(
+                {
+                    "local_path": local_rel,
+                    "category": str(category or "generic"),
+                    "r2_url": str(r2_url),
+                    "uploaded_at": str(uploaded_at),
+                }
+            )
+            replaced = True
+        else:
+            out.append(row)
+    if not replaced:
+        out.append(
+            {
+                "local_path": local_rel,
+                "category": str(category or "generic"),
+                "r2_url": str(r2_url),
+                "uploaded_at": str(uploaded_at),
+            }
+        )
+    _save_manifest(root, out)
+
+
+def _normalize_r2_config(raw: Any | None) -> R2Config | None:
+    if isinstance(raw, R2Config):
+        return raw
+    if isinstance(raw, dict):
+        src = dict(raw or {})
+    elif raw is not None:
+        src = {
+            "endpoint_url": getattr(raw, "endpoint_url", ""),
+            "bucket": getattr(raw, "bucket", ""),
+            "access_key_id": getattr(raw, "access_key_id", ""),
+            "secret_access_key": getattr(raw, "secret_access_key", ""),
+            "public_base_url": getattr(raw, "public_base_url", ""),
+            "prefix": getattr(raw, "prefix", "library"),
+            "cache_control": getattr(raw, "cache_control", "public, max-age=31536000, immutable"),
+        }
+    else:
+        src = {}
+    cfg = R2Config(
+        endpoint_url=str(src.get("endpoint_url", "") or "").strip(),
+        bucket=str(src.get("bucket", "") or "").strip(),
+        access_key_id=str(src.get("access_key_id", "") or "").strip(),
+        secret_access_key=str(src.get("secret_access_key", "") or "").strip(),
+        public_base_url=str(src.get("public_base_url", "") or "").strip().rstrip("/"),
+        prefix=str(src.get("prefix", "library") or "library").strip() or "library",
+        cache_control=str(src.get("cache_control", "public, max-age=31536000, immutable") or "public, max-age=31536000, immutable").strip(),
+    )
+    required = [
+        cfg.endpoint_url,
+        cfg.bucket,
+        cfg.access_key_id,
+        cfg.secret_access_key,
+        cfg.public_base_url,
+    ]
+    if not all(str(x or "").strip() for x in required):
+        return None
+    return cfg
+
+
+def _host(url: str) -> str:
+    return (urlparse(str(url or "")).netloc or "").lower()
 
 
 def _parse_iso_dt(value: str) -> datetime | None:
@@ -171,6 +275,7 @@ def run_daily_vector_if_needed(
     titles_provider: Callable[[], list[dict[str, Any]]] | None = None,
     ollama_manager: Any = None,
     ollama_client: Any = None,
+    r2_config: Any | None = None,
 ) -> Path | None:
     """
     root: project root (same as AgentWorkflow.root)
@@ -225,6 +330,26 @@ def run_daily_vector_if_needed(
     state["last_category"] = month_cat
     state["yesterday_title_count"] = int(len(yesterday_titles))
     state["last_saved_path"] = str(saved)
+    state["last_r2_url"] = ""
+    state["last_uploaded_at_utc"] = ""
     state["last_error"] = ""
+    cfg = _normalize_r2_config(r2_config)
+    if cfg is not None:
+        try:
+            r2_url = r2_upload_file(root=root, cfg=cfg, file_path=saved, category=month_cat)
+            if _host(r2_url) != _host(cfg.public_base_url):
+                raise RuntimeError("daily_vector_r2_host_mismatch")
+            uploaded_at = datetime.now(UTC).isoformat()
+            state["last_r2_url"] = str(r2_url)
+            state["last_uploaded_at_utc"] = uploaded_at
+            _upsert_manifest_row(
+                root,
+                local_path=saved,
+                category=month_cat,
+                r2_url=str(r2_url),
+                uploaded_at=uploaded_at,
+            )
+        except Exception as exc:
+            state["last_error"] = str(exc)[:240]
     _save_state(root, state)
     return saved

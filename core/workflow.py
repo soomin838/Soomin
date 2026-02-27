@@ -209,7 +209,7 @@ class AgentWorkflow:
             {
                 "manual_trigger": bool(manual_trigger),
                 "qa_mode": str(getattr(self.settings.quality, "qa_mode", "quick") or "quick"),
-                "target_images_per_post": int(getattr(self.settings.visual, "target_images_per_post", 2) or 2),
+                "target_images_per_post": int(getattr(self.settings.visual, "target_images_per_post", 5) or 5),
             },
         )
 
@@ -1550,7 +1550,7 @@ class AgentWorkflow:
             generation_degraded_note = self._append_note(generation_degraded_note, draft_note)
 
         self._progress("visual", "이미지 라이브러리 선택", 74)
-        target_images = max(2, int(self.settings.visual.target_images_per_post or 2))
+        target_images = max(5, int(self.settings.visual.target_images_per_post or 5))
         self._set_image_pipeline_state("running", 0, target_images, "이미지 라이브러리 선택 시작")
         image_prompt_plan: dict[str, Any] = {"source": "library"}
         images = self._profile_call(
@@ -1571,7 +1571,7 @@ class AgentWorkflow:
                 global_keywords=global_keywords,
                 max_labels=6,
             )
-            policy_reason = "image_library_shortage"
+            policy_reason = f"image_library_shortage({len(images)}/{target_images})"
             working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
                 current_draft_post_id=working_draft_id,
                 stage="hold",
@@ -1719,8 +1719,10 @@ class AgentWorkflow:
             dry_log_dir.mkdir(parents=True, exist_ok=True)
             dry_html_path = dry_log_dir / f"dry_run_final_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.html"
             dry_html_path.write_text(dry_html, encoding="utf-8")
-            if len(re.findall(r"<img\b[^>]*\bsrc=", dry_html, flags=re.IGNORECASE)) < 2:
-                raise RuntimeError("dry-run regression failed: missing required <img> count (need 2)")
+            if len(re.findall(r"<img\b[^>]*\bsrc=", dry_html, flags=re.IGNORECASE)) < target_images:
+                raise RuntimeError(
+                    f"dry-run regression failed: missing required <img> count (need {target_images})"
+                )
             published_url = "dry-run://not-published"
             self.logs.append_run(
                 RunRecord(
@@ -2662,7 +2664,7 @@ class AgentWorkflow:
         )
 
         self._progress("visual", "중단 문서 재개: 이미지 라이브러리 선택", 74)
-        target_images = max(2, int(self.settings.visual.target_images_per_post or 2))
+        target_images = max(5, int(self.settings.visual.target_images_per_post or 5))
         self._set_image_pipeline_state("running", 0, target_images, "중단 작업 이미지 선택")
         image_prompt_plan: dict[str, Any] = {"source": "library"}
         images = pick_images(title=title, min_count=target_images, root=self.root)
@@ -2683,9 +2685,9 @@ class AgentWorkflow:
                 title=title,
                 html_body=draft.html,
                 labels=hold_labels,
-                reason="image_library_shortage",
+                reason=f"image_library_shortage({len(images)}/{target_images})",
             )
-            hold_msg = "image_library_shortage"
+            hold_msg = f"image_library_shortage({len(images)}/{target_images})"
             if hold_note:
                 hold_msg += f" | {hold_note}"
             if updated_draft_id:
@@ -3257,11 +3259,11 @@ class AgentWorkflow:
         if re.search(r"\billustration\s+showing\b", merged):
             errors.append("illustration_placeholder_leak")
 
+        target_required = max(5, int(getattr(self.settings.visual, "target_images_per_post", 5) or 5))
         if not images:
             errors.append("images_missing")
         else:
-            target_required = max(2, int(getattr(self.settings.visual, "target_images_per_post", 2) or 2))
-            min_required = 2
+            min_required = 5
             if len(images) < min_required:
                 errors.append(f"insufficient_images_min(<{min_required})")
             elif len(images) < target_required:
@@ -3289,8 +3291,8 @@ class AgentWorkflow:
                 errors.append("intro_alt_similarity_high")
                 warnings.append(intro_alt_detail)
         html_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", str(gate_html or final_html or ""), flags=re.IGNORECASE))
-        if html_img_count < 2:
-            errors.append(f"insufficient_html_images({html_img_count}/2)")
+        if html_img_count < target_required:
+            errors.append(f"insufficient_html_images({html_img_count}/{target_required})")
         # Enforce runtime backend image hosts in production mode.
         html_for_hosts = str(gate_html or final_html or "")
         src_matches = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_for_hosts, flags=re.IGNORECASE)
@@ -3507,7 +3509,7 @@ class AgentWorkflow:
         Ensure we always hand at least `target_images` assets to publisher.
         If generation misses, inject role-based local fallback assets.
         """
-        target = max(2, int(target_images or 0))
+        target = max(5, int(target_images or 0))
         out = self.visual.ensure_unique_assets(list(images or []))
         if len(out) >= target:
             return out[:target]

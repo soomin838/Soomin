@@ -53,7 +53,7 @@ class Publisher:
         gcs_public_base_url: str = "",
         r2_config: Any | None = None,
         max_banner_images: int = 1,
-        max_inline_images: int = 2,
+        max_inline_images: int = 4,
         semantic_html_enabled: bool = True,
         strict_thumbnail_blogger_media: bool = True,
         thumbnail_data_uri_allowed: bool = False,
@@ -62,7 +62,7 @@ class Publisher:
         self.credentials_path = credentials_path
         self.blog_id = blog_id
         self.service_account_path = service_account_path
-        self.image_hosting_backend = (image_hosting_backend or "blogger_media").strip().lower()
+        self.image_hosting_backend = (image_hosting_backend or "r2").strip().lower()
         self.gcs_bucket_name = (gcs_bucket_name or "").strip()
         self.gcs_public_base_url = (gcs_public_base_url or "").strip().rstrip("/")
         self.r2_config = self._normalize_r2_config(r2_config)
@@ -164,6 +164,9 @@ class Publisher:
                 pass
         return "generic"
 
+    def _required_images_count(self) -> int:
+        return max(1, int(self.max_banner_images) + int(self.max_inline_images))
+
     def publish_post(
         self,
         title: str,
@@ -198,9 +201,11 @@ class Publisher:
             creds,
             preflight_thumbnail_src=preflight_src,
         )
-        pre_semantic_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", post_html, flags=re.IGNORECASE))
+        required_images = self._required_images_count()
+        pre_semantic_html = str(post_html or "")
+        pre_semantic_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", pre_semantic_html, flags=re.IGNORECASE))
         if self.semantic_html_enabled:
-            post_html = self._semanticize_article_html(post_html, lede_hint=lede_seed)
+            post_html = self._semanticize_article_html(pre_semantic_html, lede_hint=lede_seed)
             post_semantic_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", post_html, flags=re.IGNORECASE))
             if post_semantic_img_count == 0 or post_semantic_img_count < pre_semantic_img_count:
                 self._log_upload_event(
@@ -210,10 +215,19 @@ class Publisher:
                         "after_img_count": int(post_semantic_img_count),
                     }
                 )
+            if post_semantic_img_count < required_images:
+                # Semantic transform must not reduce required image floor.
+                self._log_upload_event(
+                    {
+                        "event": "semanticize_image_repair_restore",
+                        "reason": f"semanticize_removed_images({post_semantic_img_count}/{required_images})",
+                    }
+                )
+                post_html = pre_semantic_html
             try:
                 self._assert_html_image_integrity(
                     post_html,
-                    min_images=2,
+                    min_images=required_images,
                     require_no_figcaption=True,
                     strict_intro_alt=True,
                     allow_data_uri=bool(self.thumbnail_data_uri_allowed),
@@ -299,24 +313,29 @@ class Publisher:
     def build_dry_run_html(self, html_body: str, images: list[ImageAsset]) -> str:
         """
         Build a deterministic preview HTML in dry-run mode without network upload.
-        Ensures regression checks can verify at least one <img> tag exists.
+        Dry-run must mirror production insertion count/policy to prevent regressions.
         """
         out = str(html_body or "")
         if not images:
             return out
-        intro_text = self._first_paragraph_text(out)
-        first = images[0]
-        src1 = self._file_to_data_uri(first.path)
-        if src1:
-            alt1 = self._regen_alt_if_too_similar(first.alt, intro_text)
-            out = self._insert_banner_at_top(out, self._image_block(src1, alt1))
-        if len(images) > 1:
-            second = images[1]
-            src2 = self._file_to_data_uri(second.path)
-            if src2:
-                alt2 = self._regen_alt_if_too_similar(second.alt, intro_text)
-                out = self._insert_inline_between_fix2_fix3(out, self._image_block(src2, alt2))
-        self._assert_html_image_integrity(out, min_images=2, require_no_figcaption=True, strict_intro_alt=True)
+        required_images = self._required_images_count()
+        entries: list[tuple[str, str]] = []
+        for image in images[:required_images]:
+            src = self._file_to_data_uri(Path(getattr(image, "path", "")))
+            if not src:
+                continue
+            entries.append((src, str(getattr(image, "alt", "") or "")))
+        if len(entries) < required_images:
+            raise RuntimeError(f"dry-run failed - missing images ({len(entries)}/{required_images})")
+        out = self._compose_image_enriched_html(out, entries)
+        self._assert_html_image_integrity(
+            out,
+            min_images=required_images,
+            require_no_figcaption=True,
+            strict_intro_alt=True,
+            allow_data_uri=True,
+            require_backend_hosts=False,
+        )
         return out
 
     def publish_existing_draft(
@@ -586,6 +605,7 @@ class Publisher:
     ) -> str:
         if not images:
             raise RuntimeError("이미지 자산이 비어 있습니다. retry required")
+        required_images = self._required_images_count()
 
         self._log_upload_event(
             {
@@ -670,46 +690,50 @@ class Publisher:
                 }
             )
 
-        # Never render the same image URL repeatedly in one post.
-        unique_images: list[ImageAsset] = []
+        selected_entries: list[tuple[str, str]] = []
         seen_src: set[str] = set()
-        for image in images:
+        selected_entries.append((thumb_src, str(getattr(thumbnail, "alt", "") or "")))
+        seen_src.add(thumb_src)
+        for image in images[1:]:
             src = str(src_map.get(str(image.path), "") or "").strip()
             if not src:
                 continue
             if src in seen_src:
                 continue
+            if not self._is_allowed_image_url(src, allow_data_uri=bool(self.thumbnail_data_uri_allowed)):
+                continue
             seen_src.add(src)
-            unique_images.append(image)
-        images = unique_images
+            selected_entries.append((src, str(getattr(image, "alt", "") or "")))
+            if len(selected_entries) >= required_images:
+                break
 
-        # Final insertion policy (fixed):
-        # - banner image: exactly 1 (top, before first H2)
-        # - inline image: exactly 1 (between Fix 2 and Fix 3 if possible)
-        html = str(html_body or "")
-        intro_text = self._first_paragraph_text(html)
-        thumbnail.alt = self._regen_alt_if_too_similar(thumbnail.alt, intro_text)
-        banner_block = self._image_block(thumb_src, thumbnail.alt)
-        html = self._insert_banner_at_top(html, banner_block)
+        if len(selected_entries) < required_images:
+            self._log_upload_event(
+                {
+                    "event": "go_live_gate_fail",
+                    "reason": "insufficient_html_images_before_submit",
+                    "html_img_count": len(selected_entries),
+                    "required_images": int(required_images),
+                    "html_preview_500chars": str(html_body or "")[:500],
+                }
+            )
+            raise RuntimeError(
+                f"publish failed - missing images before submit ({len(selected_entries)}/{required_images})"
+            )
 
-        if len(images) > 1:
-            inline = images[1]
-            inline_src = str(src_map.get(str(inline.path), "") or "").strip()
-            if inline_src and self._is_allowed_image_url(inline_src, allow_data_uri=bool(self.thumbnail_data_uri_allowed)):
-                inline.alt = self._regen_alt_if_too_similar(inline.alt, intro_text)
-                inline_block = self._image_block(inline_src, inline.alt)
-                html = self._insert_inline_between_fix2_fix3(html, inline_block)
+        html = self._compose_image_enriched_html(str(html_body or ""), selected_entries[:required_images])
 
         img_count = len(re.findall(r"<img\b[^>]*\bsrc=", html, flags=re.IGNORECASE))
+        banner_block = self._image_block(selected_entries[0][0], selected_entries[0][1])
         self._log_upload_event(
             {
                 "event": "merge_images_inserted",
                 "img_count_after_insert": img_count,
                 "banner_inserted": bool(re.search(r"<img\b[^>]*\bsrc=", banner_block, flags=re.IGNORECASE)),
-                "inline_inserted": img_count >= 2,
+                "inline_inserted": img_count >= required_images,
             }
         )
-        if img_count < 2:
+        if img_count < required_images:
             self._log_upload_event(
                 {
                     "event": "go_live_gate_fail",
@@ -718,11 +742,11 @@ class Publisher:
                     "html_preview_500chars": str(html or "")[:500],
                 }
             )
-            raise RuntimeError(f"publish failed - missing images before submit ({img_count}/2)")
+            raise RuntimeError(f"publish failed - missing images before submit ({img_count}/{required_images})")
         try:
             self._assert_html_image_integrity(
                 html,
-                min_images=2,
+                min_images=required_images,
                 require_no_figcaption=True,
                 strict_intro_alt=True,
                 allow_data_uri=bool(self.thumbnail_data_uri_allowed),
@@ -1907,6 +1931,7 @@ class Publisher:
         pid = str(post_id or "").strip()
         if not pid:
             raise RuntimeError("publish failed - missing post id")
+        required_images = self._required_images_count()
         post = service.posts().get(
             blogId=self.blog_id,
             postId=pid,
@@ -1926,7 +1951,7 @@ class Publisher:
             if str(s).strip().lower().startswith("data:image/")
         ]
         valid_total = len(valid_http_src) + (len(valid_data_src) if self.thumbnail_data_uri_allowed else 0)
-        if valid_total < 2:
+        if valid_total < required_images:
             self._log_upload_event(
                 {
                     "event": "go_live_gate_fail",
@@ -1950,7 +1975,7 @@ class Publisher:
             raise RuntimeError("publish failed - missing images")
         self._assert_html_image_integrity(
             content,
-            min_images=2,
+            min_images=required_images,
             require_no_figcaption=True,
             strict_intro_alt=True,
             allow_data_uri=bool(self.thumbnail_data_uri_allowed),
@@ -2089,6 +2114,75 @@ class Publisher:
             if m:
                 return src[: m.end()] + "\n" + block + "\n" + src[m.end() :]
         return block + "\n" + src
+
+    def _insert_banner_after_quick_take_or_first_paragraph(self, html: str, block: str) -> str:
+        src = str(html or "")
+        quick_take = re.search(
+            r"<h[23]\b[^>]*>\s*.*?quick\s*take.*?</h[23]>",
+            src,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if quick_take:
+            pos = quick_take.end()
+            return src[:pos] + "\n" + block + "\n" + src[pos:]
+        first_p = re.search(r"</p>", src, flags=re.IGNORECASE)
+        if first_p:
+            pos = first_p.end()
+            return src[:pos] + "\n" + block + "\n" + src[pos:]
+        return self._insert_banner_at_top(src, block)
+
+    def _insert_after_heading(self, html: str, block: str, heading_pattern: str) -> tuple[str, bool]:
+        src = str(html or "")
+        if not heading_pattern:
+            return src, False
+        m = re.search(
+            rf"<h[23]\b[^>]*>.*?{heading_pattern}.*?</h[23]>",
+            src,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not m:
+            return src, False
+        pos = m.end()
+        return src[:pos] + "\n" + block + "\n" + src[pos:], True
+
+    def _insert_after_paragraph_slot(self, html: str, block: str, order: int, total: int) -> str:
+        src = str(html or "")
+        closers = list(re.finditer(r"</p>", src, flags=re.IGNORECASE))
+        if not closers:
+            return src + "\n" + block
+        total = max(1, int(total))
+        order = max(0, int(order))
+        slot = int(round(((order + 1) * len(closers)) / float(total + 1))) - 1
+        slot = max(0, min(len(closers) - 1, slot))
+        pos = closers[slot].end()
+        return src[:pos] + "\n" + block + "\n" + src[pos:]
+
+    def _compose_image_enriched_html(self, html_body: str, entries: list[tuple[str, str]]) -> str:
+        html = str(html_body or "")
+        if not entries:
+            return html
+        intro_text = self._first_paragraph_text(html)
+        banner_src, banner_alt = entries[0]
+        safe_banner_alt = self._regen_alt_if_too_similar(str(banner_alt or ""), intro_text)
+        banner_block = self._image_block(str(banner_src or ""), safe_banner_alt)
+        html = self._insert_banner_after_quick_take_or_first_paragraph(html, banner_block)
+
+        inline_patterns = [
+            r"\bFix\s*1\b",
+            r"\bFix\s*2\b",
+            r"\b(Advanced(?:\s+Fix)?|More\s+fix(?:es)?)\b",
+            r"\bChecklist\b",
+        ]
+        inline_total = max(0, min(int(self.max_inline_images), len(entries) - 1))
+        for idx in range(inline_total):
+            src, alt = entries[idx + 1]
+            safe_alt = self._regen_alt_if_too_similar(str(alt or ""), intro_text)
+            block = self._image_block(str(src or ""), safe_alt)
+            pattern = inline_patterns[idx] if idx < len(inline_patterns) else ""
+            html, inserted = self._insert_after_heading(html, block, pattern)
+            if not inserted:
+                html = self._insert_after_paragraph_slot(html, block, idx, inline_total)
+        return html
 
     def _insert_inline_between_fix2_fix3(self, html: str, block: str) -> str:
         src = str(html or "")

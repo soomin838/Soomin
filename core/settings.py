@@ -66,9 +66,9 @@ class GeminiSettings:
 
 @dataclass
 class VisualSettings:
-    target_images_per_post: int = 2
+    target_images_per_post: int = 5
     max_banner_images: int = 1
-    max_inline_images: int = 1
+    max_inline_images: int = 4
     image_provider: str = "library"
     screenshot_priority_keywords: list[str] = field(default_factory=list)
     enable_gemini_image_generation: bool = True
@@ -383,7 +383,7 @@ class ImageSourcesPolicySettings:
 class ImagesPolicySettings:
     provider: str = "gemini"
     banner_count: int = 1
-    inline_count: int = 1
+    inline_count: int = 4
     cache_dir: str = "storage/image_cache"
     fallback_banner: str = "assets/fallback/banner.png"
     fallback_inline: str = "assets/fallback/inline.png"
