@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,6 +98,17 @@ class BudgetSettings:
 
 
 @dataclass
+class PublishR2Settings:
+    endpoint_url: str = ""
+    bucket: str = ""
+    access_key_id: str = ""
+    secret_access_key: str = ""
+    public_base_url: str = ""
+    prefix: str = "library"
+    cache_control: str = "public, max-age=31536000, immutable"
+
+
+@dataclass
 class PublishSettings:
     use_blogger_schedule: bool = True
     min_delay_minutes: int = 10
@@ -106,7 +118,7 @@ class PublishSettings:
     random_min_gap_floor_minutes: int = 180
     random_min_gap_ceiling_minutes: int = 360
     daily_publish_cap: int = 5
-    image_hosting_backend: str = "blogger_media"
+    image_hosting_backend: str = "r2"
     gcs_bucket_name: str = ""
     gcs_public_base_url: str = ""
     mobile_duplicate_block_enabled: bool = False
@@ -131,6 +143,7 @@ class PublishSettings:
     thumbnail_preflight_only: bool = False
     thumbnail_preflight_max_cycles: int = 6
     thumbnail_preflight_retry_delay_sec: int = 8
+    r2: PublishR2Settings = field(default_factory=PublishR2Settings)
 
 
 @dataclass
@@ -608,6 +621,23 @@ def load_settings(path: Path) -> AppSettings:
         raw["publish"]["thumbnail_preflight_retry_delay_sec"] = int(
             publishing_raw.get("thumbnail_preflight_retry_delay_sec", raw["publish"].get("thumbnail_preflight_retry_delay_sec", 8))
         )
+    raw.setdefault("publish", {})
+    publish_raw = dict(raw.get("publish", {}) or {})
+    publish_raw.setdefault("r2", {})
+    r2_raw = dict(publish_raw.get("r2", {}) or {})
+    # ENV-first override policy for secrets.
+    r2_raw["endpoint_url"] = str(os.getenv("R2_ENDPOINT_URL") or r2_raw.get("endpoint_url", "")).strip()
+    r2_raw["bucket"] = str(os.getenv("R2_BUCKET") or r2_raw.get("bucket", "")).strip()
+    r2_raw["access_key_id"] = str(os.getenv("R2_ACCESS_KEY_ID") or r2_raw.get("access_key_id", "")).strip()
+    r2_raw["secret_access_key"] = str(os.getenv("R2_SECRET_ACCESS_KEY") or r2_raw.get("secret_access_key", "")).strip()
+    r2_raw["public_base_url"] = str(os.getenv("R2_PUBLIC_BASE_URL") or r2_raw.get("public_base_url", "")).strip()
+    r2_raw["prefix"] = str(os.getenv("R2_PREFIX") or r2_raw.get("prefix", "library")).strip() or "library"
+    r2_raw["cache_control"] = (
+        str(os.getenv("R2_CACHE_CONTROL") or r2_raw.get("cache_control", "public, max-age=31536000, immutable")).strip()
+        or "public, max-age=31536000, immutable"
+    )
+    publish_raw["r2"] = r2_raw
+    raw["publish"] = publish_raw
     if internal_links_raw:
         raw.setdefault("publish", {})
         raw["publish"]["related_posts_min"] = int(internal_links_raw.get("related_link_count", 2))
@@ -628,6 +658,12 @@ def load_settings(path: Path) -> AppSettings:
         except Exception:
             pass
 
+    publish_obj = _construct_dc(PublishSettings, raw.get("publish", {}))
+    if isinstance(getattr(publish_obj, "r2", None), dict):
+        publish_obj.r2 = _construct_dc(PublishR2Settings, publish_obj.r2)
+    elif not isinstance(getattr(publish_obj, "r2", None), PublishR2Settings):
+        publish_obj.r2 = PublishR2Settings()
+
     return AppSettings(
         timezone=raw.get("timezone", "America/New_York"),
         schedule=_construct_dc(ScheduleSettings, raw.get("schedule", {})),
@@ -636,7 +672,7 @@ def load_settings(path: Path) -> AppSettings:
         gemini=_construct_dc(GeminiSettings, raw.get("gemini", {})),
         visual=_construct_dc(VisualSettings, raw.get("visual", {})),
         budget=_construct_dc(BudgetSettings, raw.get("budget", {})),
-        publish=_construct_dc(PublishSettings, raw.get("publish", {})),
+        publish=publish_obj,
         quality=_construct_dc(QualitySettings, quality_raw),
         topic_growth=_construct_dc(TopicGrowthSettings, raw.get("topic_growth", {})),
         keyword_pool=_construct_dc(KeywordPoolSettings, raw.get("keyword_pool", {})),

@@ -72,6 +72,35 @@ def _fallback_paths(root: Path) -> list[Path]:
     return out
 
 
+def _r2_manifest_path(root: Path) -> Path:
+    return (root / "storage" / "state" / "r2_library_manifest.json").resolve()
+
+
+def _load_r2_manifest(root: Path) -> dict[str, str]:
+    path = _r2_manifest_path(root)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            out: dict[str, str] = {}
+            for row in raw:
+                if not isinstance(row, dict):
+                    continue
+                lp = str(row.get("local_path", "") or "").replace("\\", "/").strip()
+                ru = str(row.get("r2_url", "") or "").strip()
+                if lp and ru.startswith("https://"):
+                    out[lp] = ru
+            return out
+        if isinstance(raw, dict):
+            out: dict[str, str] = {}
+            for k, v in raw.items():
+                if str(v or "").startswith("https://"):
+                    out[str(k).replace("\\", "/")] = str(v)
+            return out
+    except Exception:
+        pass
+    return {}
+
+
 def pick_images(title: str, min_count: int = 2, root: Path | None = None) -> list[ImageAsset]:
     project_root = (root or Path(__file__).resolve().parent.parent).resolve()
     lib_root = (project_root / LIB_ROOT).resolve()
@@ -89,6 +118,7 @@ def pick_images(title: str, min_count: int = 2, root: Path | None = None) -> lis
     usage_path = _usage_state_path(project_root)
     usage = _load_usage(usage_path)
     counts = dict((usage.get("counts", {}) or {}))
+    r2_manifest = _load_r2_manifest(project_root)
 
     def _usage_key(p: Path) -> str:
         try:
@@ -139,7 +169,11 @@ def pick_images(title: str, min_count: int = 2, root: Path | None = None) -> lis
                 alt=f"Troubleshooting process diagram for {str(title or '').strip()}.",
                 anchor_text="",
                 source_kind="library",
-                source_url=f"local://library/{category}/{use_path.name}",
+                source_url=str(
+                    r2_manifest.get(_usage_key(p), "")
+                    or r2_manifest.get(str(p.resolve()).replace("\\", "/"), "")
+                    or f"local://library/{category}/{use_path.name}"
+                ),
                 license_note="Local reusable asset",
             )
         )

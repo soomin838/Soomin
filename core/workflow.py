@@ -73,12 +73,13 @@ class AgentWorkflow:
             image_hosting_backend=settings.publish.image_hosting_backend,
             gcs_bucket_name=settings.publish.gcs_bucket_name,
             gcs_public_base_url=settings.publish.gcs_public_base_url,
+            r2_config=getattr(settings.publish, "r2", None),
             max_banner_images=settings.visual.max_banner_images,
             max_inline_images=settings.visual.max_inline_images,
             semantic_html_enabled=bool(getattr(settings.publish, "enable_semantic_html", True)),
-            strict_thumbnail_blogger_media=True,
-            thumbnail_data_uri_allowed=False,
-            auto_allow_data_uri_on_blogger_405=False,
+            strict_thumbnail_blogger_media=bool(getattr(settings.publish, "strict_thumbnail_blogger_media", True)),
+            thumbnail_data_uri_allowed=bool(getattr(settings.publish, "thumbnail_data_uri_allowed", False)),
+            auto_allow_data_uri_on_blogger_405=bool(getattr(settings.publish, "auto_allow_data_uri_on_blogger_405", False)),
         )
         self.qa = ContentQAGate(
             settings.quality,
@@ -3290,10 +3291,9 @@ class AgentWorkflow:
         html_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", str(gate_html or final_html or ""), flags=re.IGNORECASE))
         if html_img_count < 2:
             errors.append(f"insufficient_html_images({html_img_count}/2)")
-        # Enforce Blogger-media-only image hosts in production mode.
+        # Enforce runtime backend image hosts in production mode.
         html_for_hosts = str(gate_html or final_html or "")
         src_matches = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_for_hosts, flags=re.IGNORECASE)
-        allow_hosts = {"blogger.googleusercontent.com", "bp.blogspot.com"}
         dry_run = bool(getattr(self.settings.budget, "dry_run", False))
         allow_data_uri = (
             bool(getattr(self.settings.publish, "thumbnail_data_uri_allowed", False))
@@ -3314,8 +3314,8 @@ class AgentWorkflow:
             if not host:
                 errors.append("image_host_missing")
                 continue
-            if not any(host.endswith(h) for h in allow_hosts):
-                errors.append(f"non_blogger_host:{host}")
+            if not self.publisher._is_allowed_image_url(clean_src, allow_data_uri=False):  # noqa: SLF001
+                errors.append(f"invalid_image_host:{host}")
 
         # Troubleshooting title quality check.
         title_lower = str(title or "").lower()
@@ -3446,7 +3446,7 @@ class AgentWorkflow:
         working = self.visual.ensure_unique_assets(list(images or []))
         if not working:
             raise RuntimeError("thumbnail_preflight_failed:no_images")
-        if bool(manual_trigger) and (not bool(self._manual_upload_probe_done)):
+        if bool(manual_trigger) and (not bool(self._manual_upload_probe_done)) and str(getattr(self.settings.publish, "image_hosting_backend", "")).strip().lower() in {"blogger_media", "blogger", "blogger_server"}:
             probe = self._profile_call(
                 "manual_upload_probe_session",
                 lambda: self._run_manual_upload_probe_session(max_total_seconds=90),
@@ -3465,7 +3465,7 @@ class AgentWorkflow:
             try:
                 self._progress(
                     "publish",
-                    f"썸네일 Blogger 업로드 재시도 중 ({attempt_no}/{finite_cycles})",
+                    f"썸네일 업로드 재시도 중 ({attempt_no}/{finite_cycles})",
                     85,
                 )
                 thumb_src = self.publisher.preflight_thumbnail_blogger_media(
@@ -3990,6 +3990,9 @@ class AgentWorkflow:
             "invalid_scope",
             "drive_backend_disabled",
             "non_blogger_host",
+            "invalid_image_host",
+            "r2_missing_config",
+            "r2_url_invalid_host",
             "thumbnail_data_uri_not_allowed",
             "english_only",
             "data:image",
@@ -4002,6 +4005,7 @@ class AgentWorkflow:
             "thumbnail_preflight_failed",
             "image library shortage",
             "upload timeout",
+            "r2_upload_failed",
         )
         skip_keys = (
             "duplicate title",

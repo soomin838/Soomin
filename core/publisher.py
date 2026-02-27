@@ -21,6 +21,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from zoneinfo import ZoneInfo
 
+from .r2_uploader import R2Config, upload_file as r2_upload_file
 from .visual import ImageAsset
 
 
@@ -47,9 +48,10 @@ class Publisher:
         credentials_path: Path,
         blog_id: str,
         service_account_path: Path,
-        image_hosting_backend: str = "blogger_media",
+        image_hosting_backend: str = "r2",
         gcs_bucket_name: str = "",
         gcs_public_base_url: str = "",
+        r2_config: Any | None = None,
         max_banner_images: int = 1,
         max_inline_images: int = 2,
         semantic_html_enabled: bool = True,
@@ -63,6 +65,7 @@ class Publisher:
         self.image_hosting_backend = (image_hosting_backend or "blogger_media").strip().lower()
         self.gcs_bucket_name = (gcs_bucket_name or "").strip()
         self.gcs_public_base_url = (gcs_public_base_url or "").strip().rstrip("/")
+        self.r2_config = self._normalize_r2_config(r2_config)
         self.max_banner_images = max(1, int(max_banner_images or 1))
         self.max_inline_images = max(0, int(max_inline_images or 0))
         self.semantic_html_enabled = bool(semantic_html_enabled)
@@ -80,11 +83,86 @@ class Publisher:
         self._upload_probe_log_path = (
             self.credentials_path.parent.parent / "storage" / "logs" / "upload_probe.jsonl"
         ).resolve()
+        self._r2_upload_log_path = (
+            self.credentials_path.parent.parent / "storage" / "logs" / "r2_upload.jsonl"
+        ).resolve()
+        self._publish_backend_log_path = (
+            self.credentials_path.parent.parent / "storage" / "logs" / "publish_backend.jsonl"
+        ).resolve()
         self._upload_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._thumbnail_gate_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._upload_probe_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._r2_upload_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._publish_backend_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_rotate_max_bytes = 50 * 1024 * 1024
         self._log_rotate_keep = 10
+
+    def _normalize_r2_config(self, raw: Any | None) -> R2Config:
+        if isinstance(raw, R2Config):
+            return raw
+        if isinstance(raw, dict):
+            src = dict(raw or {})
+        elif raw is not None:
+            src = {
+                "endpoint_url": getattr(raw, "endpoint_url", ""),
+                "bucket": getattr(raw, "bucket", ""),
+                "access_key_id": getattr(raw, "access_key_id", ""),
+                "secret_access_key": getattr(raw, "secret_access_key", ""),
+                "public_base_url": getattr(raw, "public_base_url", ""),
+                "prefix": getattr(raw, "prefix", "library"),
+                "cache_control": getattr(raw, "cache_control", "public, max-age=31536000, immutable"),
+            }
+        else:
+            src = {}
+        return R2Config(
+            endpoint_url=str(src.get("endpoint_url", "") or "").strip(),
+            bucket=str(src.get("bucket", "") or "").strip(),
+            access_key_id=str(src.get("access_key_id", "") or "").strip(),
+            secret_access_key=str(src.get("secret_access_key", "") or "").strip(),
+            public_base_url=str(src.get("public_base_url", "") or "").strip().rstrip("/"),
+            prefix=str(src.get("prefix", "library") or "library").strip() or "library",
+            cache_control=str(src.get("cache_control", "public, max-age=31536000, immutable") or "public, max-age=31536000, immutable").strip(),
+        )
+
+    def _is_r2_mode(self) -> bool:
+        return (self.image_hosting_backend or "").strip().lower() == "r2"
+
+    def _r2_public_host(self) -> str:
+        try:
+            return (urlparse(str(self.r2_config.public_base_url or "")).netloc or "").lower()
+        except Exception:
+            return ""
+
+    def _is_r2_public_url(self, url: str) -> bool:
+        host = (urlparse(str(url or "")).netloc or "").lower()
+        pub = self._r2_public_host()
+        return bool(host and pub and host == pub)
+
+    def _is_allowed_image_url(self, url: str, allow_data_uri: bool = False) -> bool:
+        clean = str(url or "").strip()
+        if not clean:
+            return False
+        lower = clean.lower()
+        if lower.startswith("data:image/"):
+            return bool(allow_data_uri)
+        if not (lower.startswith("https://") or lower.startswith("http://")):
+            return False
+        if self._is_r2_mode():
+            return self._is_r2_public_url(clean)
+        return self._is_blogger_media_url(clean)
+
+    def _classify_library_category(self, image_path: Path) -> str:
+        parts = [p.lower() for p in image_path.parts]
+        if "assets" in parts and "library" in parts:
+            try:
+                idx = parts.index("library")
+                if idx + 1 < len(parts):
+                    cat = re.sub(r"[^a-z0-9_-]", "", parts[idx + 1])[:40]
+                    if cat:
+                        return cat
+            except Exception:
+                pass
+        return "generic"
 
     def publish_post(
         self,
@@ -108,7 +186,7 @@ class Publisher:
             if not (
                 preflight_src
                 and (
-                    self._is_blogger_media_url(preflight_src)
+                    self._is_allowed_image_url(preflight_src, allow_data_uri=bool(self.thumbnail_data_uri_allowed))
                     or (preflight_is_data and self.thumbnail_data_uri_allowed)
                 )
             ):
@@ -132,7 +210,6 @@ class Publisher:
                         "after_img_count": int(post_semantic_img_count),
                     }
                 )
-                post_html = self.build_dry_run_html(post_html, images)
             try:
                 self._assert_html_image_integrity(
                     post_html,
@@ -140,7 +217,7 @@ class Publisher:
                     require_no_figcaption=True,
                     strict_intro_alt=True,
                     allow_data_uri=bool(self.thumbnail_data_uri_allowed),
-                    require_blogger_hosts=True,
+                    require_backend_hosts=True,
                 )
             except Exception as exc:
                 self._log_upload_event(
@@ -149,8 +226,7 @@ class Publisher:
                         "reason": str(exc),
                     }
                 )
-                # Re-insert a deterministic preview image block as one-shot repair.
-                post_html = self.build_dry_run_html(post_html, images)
+                raise
         post_html += self._author_schema()
         seo_description = self._normalize_meta_description(meta_description)
         self._assert_english_only_payload(
@@ -536,30 +612,20 @@ class Publisher:
             }
         )
         thumbnail = images[0]
-        thumbnail_kind = (getattr(thumbnail, "source_kind", "") or "").strip().lower()
-        if thumbnail_kind not in {"gemini", "generated"}:
-            raise RuntimeError("Thumbnail must be generated image. retry required")
         thumb_src = str(preflight_thumbnail_src or "").strip()
-        thumb_is_data = thumb_src.lower().startswith("data:image/")
         if not thumb_src:
-            thumb_src = src_map.get(str(thumbnail.path), "")
-            thumb_is_data = str(thumb_src).strip().lower().startswith("data:image/")
-        if not thumb_src or (
-            (not self._is_blogger_media_url(thumb_src))
-            and not (thumb_is_data and self.thumbnail_data_uri_allowed)
-        ):
-            thumb_src = self._recover_thumbnail_blogger_src(
-                thumbnail=thumbnail,
-                images=images,
-                src_map=src_map,
-                creds=creds,
-            )
-            thumb_is_data = str(thumb_src).strip().lower().startswith("data:image/")
-        if not thumb_src and not self.strict_thumbnail_blogger_media:
-            thumb_src = self._pick_relaxed_thumbnail_src(src_map=src_map, images=images)
+            thumb_src = str(src_map.get(str(thumbnail.path), "") or "").strip()
+
+        if not thumb_src:
+            for maybe in src_map.values():
+                clean = str(maybe or "").strip()
+                if self._is_allowed_image_url(clean, allow_data_uri=False):
+                    thumb_src = clean
+                    break
+
         if (
             thumb_src
-            and str(thumb_src).strip().lower().startswith("data:image/")
+            and thumb_src.lower().startswith("data:image/")
             and (not self.thumbnail_data_uri_allowed)
         ):
             self._log_upload_event(
@@ -571,13 +637,11 @@ class Publisher:
             thumb_src = ""
         if (
             thumb_src
-            and self.strict_thumbnail_blogger_media
-            and (not self._is_blogger_media_url(str(thumb_src)))
-            and not (str(thumb_src).strip().lower().startswith("data:image/") and self.thumbnail_data_uri_allowed)
+            and (not self._is_allowed_image_url(thumb_src, allow_data_uri=bool(self.thumbnail_data_uri_allowed)))
         ):
             self._log_upload_event(
                 {
-                    "event": "thumbnail_non_blogger_blocked",
+                    "event": "thumbnail_invalid_host_blocked",
                     "thumb_src": str(thumb_src)[:220],
                 }
             )
@@ -631,29 +695,10 @@ class Publisher:
         if len(images) > 1:
             inline = images[1]
             inline_src = str(src_map.get(str(inline.path), "") or "").strip()
-            if not inline_src:
-                try:
-                    inline_src = self._file_to_data_uri(inline.path)
-                except Exception:
-                    inline_src = ""
-            if not inline_src:
-                inline_src = self._fallback_asset_data_uri(role="inline")
-            if inline_src and (inline_src.startswith("https://") or inline_src.startswith("http://")):
+            if inline_src and self._is_allowed_image_url(inline_src, allow_data_uri=bool(self.thumbnail_data_uri_allowed)):
                 inline.alt = self._regen_alt_if_too_similar(inline.alt, intro_text)
                 inline_block = self._image_block(inline_src, inline.alt)
                 html = self._insert_inline_between_fix2_fix3(html, inline_block)
-            elif inline_src and inline_src.startswith("data:"):
-                inline.alt = self._regen_alt_if_too_similar(inline.alt, intro_text)
-                inline_block = self._image_block(inline_src, inline.alt)
-                html = self._insert_inline_between_fix2_fix3(html, inline_block)
-        else:
-            inline_fallback_src = self._fallback_asset_data_uri(role="inline")
-            if inline_fallback_src:
-                inline_alt = self._regen_alt_if_too_similar("Troubleshooting process diagram.", intro_text)
-                html = self._insert_inline_between_fix2_fix3(
-                    html,
-                    self._image_block(inline_fallback_src, inline_alt),
-                )
 
         img_count = len(re.findall(r"<img\b[^>]*\bsrc=", html, flags=re.IGNORECASE))
         self._log_upload_event(
@@ -681,7 +726,7 @@ class Publisher:
                 require_no_figcaption=True,
                 strict_intro_alt=True,
                 allow_data_uri=bool(self.thumbnail_data_uri_allowed),
-                require_blogger_hosts=True,
+                require_backend_hosts=True,
             )
         except Exception as exc:
             self._log_upload_event(
@@ -743,8 +788,25 @@ class Publisher:
         return dict(self._last_upload_report or {})
 
     def _upload_images(self, images: list[ImageAsset], creds) -> dict[str, str]:
-        backend = (self.image_hosting_backend or "blogger_media").strip().lower()
+        backend = (self.image_hosting_backend or "r2").strip().lower()
         requested = len(images or [])
+        if backend == "r2":
+            hosted = self._upload_images_to_r2(images)
+            self._last_upload_report = self._compose_upload_report(
+                backend="r2",
+                requested=requested,
+                hosted=hosted,
+            )
+            self._log_publish_backend_event(
+                {
+                    "event": "publish_backend_used",
+                    "backend": "r2",
+                    "requested_images": int(requested),
+                    "uploaded_images": int(len(hosted)),
+                    "hosts": self._last_upload_report.get("hosts", []),
+                }
+            )
+            return hosted
         if backend == "gcs":
             hosted = self._upload_images_to_gcs(images)
             self._last_upload_report = self._compose_upload_report(
@@ -754,17 +816,71 @@ class Publisher:
             )
             return hosted
         if backend in {"blogger_media", "blogger", "blogger_server"}:
-            hosted = self._upload_images_to_blogger_media(images, creds)
-            self._last_upload_report = self._compose_upload_report(
-                backend="blogger_media",
-                requested=requested,
-                hosted=hosted,
-                fallback_backend="",
-            )
-            return hosted
+            raise RuntimeError("blogger_media_backend_disabled")
         if backend in {"drive", "photos"}:
             raise RuntimeError("drive_backend_disabled")
         raise RuntimeError(f"지원하지 않는 이미지 호스팅 백엔드: {backend}")
+
+    def _upload_images_to_r2(self, images: list[ImageAsset]) -> dict[str, str]:
+        cfg = self.r2_config
+        if not str(getattr(cfg, "endpoint_url", "") or "").strip():
+            raise RuntimeError("r2_missing_config:endpoint_url")
+        if not str(getattr(cfg, "bucket", "") or "").strip():
+            raise RuntimeError("r2_missing_config:bucket")
+        if not str(getattr(cfg, "access_key_id", "") or "").strip():
+            raise RuntimeError("r2_missing_config:access_key_id")
+        if not str(getattr(cfg, "secret_access_key", "") or "").strip():
+            raise RuntimeError("r2_missing_config:secret_access_key")
+        if not str(getattr(cfg, "public_base_url", "") or "").strip():
+            raise RuntimeError("r2_missing_config:public_base_url")
+
+        root = self.credentials_path.parent.parent
+        hosted: dict[str, str] = {}
+        for image in images or []:
+            path = Path(getattr(image, "path", ""))
+            if not path.exists():
+                payload = {
+                    "event": "r2_upload_fail",
+                    "file": str(path),
+                    "category": "generic",
+                    "status": 0,
+                    "url": "",
+                    "error": "file_missing",
+                }
+                self._log_upload_event(payload)
+                self._log_r2_upload_event(payload)
+                continue
+            category = self._classify_library_category(path)
+            try:
+                url = r2_upload_file(root=root, cfg=cfg, file_path=path, category=category)
+                if not self._is_r2_public_url(url):
+                    raise RuntimeError("r2_url_invalid_host")
+                hosted[str(path)] = str(url)
+                object_key = str(urlparse(url).path.lstrip("/") if str(url).strip() else "")
+                payload = {
+                    "event": "r2_upload_ok",
+                    "file": str(path),
+                    "category": category,
+                    "object_key": object_key,
+                    "status": 200,
+                    "url": str(url),
+                    "error": "",
+                }
+                self._log_upload_event(payload)
+                self._log_r2_upload_event(payload)
+            except Exception as exc:
+                payload = {
+                    "event": "r2_upload_fail",
+                    "file": str(path),
+                    "category": category,
+                    "object_key": "",
+                    "status": 0,
+                    "url": "",
+                    "error": str(exc)[:220],
+                }
+                self._log_upload_event(payload)
+                self._log_r2_upload_event(payload)
+        return hosted
 
     def _compose_upload_report(
         self,
@@ -1257,6 +1373,41 @@ class Publisher:
                 }
             )
             raise RuntimeError("thumbnail_preflight_failed:file_missing")
+        if self._is_r2_mode():
+            category = self._classify_library_category(path)
+            try:
+                root = self.credentials_path.parent.parent
+                url = r2_upload_file(root=root, cfg=self.r2_config, file_path=path, category=category)
+            except Exception as exc:
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_gate_result",
+                        "ok": False,
+                        "reason_code": "r2_upload_failed",
+                        "error": str(exc)[:220],
+                        "source_path": str(path),
+                    }
+                )
+                raise RuntimeError("thumbnail_preflight_failed:r2_upload_failed") from exc
+            if not self._is_r2_public_url(url):
+                self._log_thumbnail_gate_event(
+                    {
+                        "event": "thumbnail_gate_result",
+                        "ok": False,
+                        "reason_code": "r2_url_invalid_host",
+                        "thumbnail_url": str(url),
+                    }
+                )
+                raise RuntimeError("thumbnail_preflight_failed:r2_url_invalid_host")
+            self._log_thumbnail_gate_event(
+                {
+                    "event": "thumbnail_gate_result",
+                    "ok": True,
+                    "reason_code": "r2_preflight_ok",
+                    "thumbnail_url": str(url),
+                }
+            )
+            return str(url)
         if creds is None:
             creds = self._oauth_credentials()
 
@@ -1803,7 +1954,7 @@ class Publisher:
             require_no_figcaption=True,
             strict_intro_alt=True,
             allow_data_uri=bool(self.thumbnail_data_uri_allowed),
-            require_blogger_hosts=True,
+            require_backend_hosts=True,
         )
 
     def _log_upload_event(self, payload: dict) -> None:
@@ -1814,6 +1965,30 @@ class Publisher:
         try:
             self._rotate_log_if_needed(self._upload_log_path)
             with self._upload_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _log_publish_backend_event(self, payload: dict) -> None:
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            **(payload or {}),
+        }
+        try:
+            self._rotate_log_if_needed(self._publish_backend_log_path)
+            with self._publish_backend_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _log_r2_upload_event(self, payload: dict) -> None:
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            **(payload or {}),
+        }
+        try:
+            self._rotate_log_if_needed(self._r2_upload_log_path)
+            with self._r2_upload_log_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception:
             return
@@ -2268,7 +2443,7 @@ class Publisher:
         require_no_figcaption: bool = True,
         strict_intro_alt: bool = True,
         allow_data_uri: bool = True,
-        require_blogger_hosts: bool = False,
+        require_backend_hosts: bool = False,
     ) -> None:
         content = str(html or "")
         if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", content):
@@ -2285,8 +2460,8 @@ class Publisher:
                     valid_src.append(s)
                 continue
             if lower.startswith("https://") or lower.startswith("http://"):
-                if require_blogger_hosts and (not self._is_blogger_media_url(s)):
-                    raise RuntimeError(f"publish failed - non_blogger_image_host:{(urlparse(s).netloc or '').lower()}")
+                if require_backend_hosts and (not self._is_allowed_image_url(s, allow_data_uri=False)):
+                    raise RuntimeError(f"publish failed - invalid_image_host:{(urlparse(s).netloc or '').lower()}")
                 valid_src.append(s)
         if len(valid_src) < max(1, int(min_images)):
             raise RuntimeError(f"publish failed - missing images ({len(valid_src)}/{int(min_images)})")

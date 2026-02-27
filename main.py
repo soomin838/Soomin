@@ -932,8 +932,29 @@ class AgentController:
                 changed = True
 
             cur_backend = (_nested_get(raw, "publish.image_hosting_backend") or "").strip().lower()
-            if cur_backend in {"", "gcs", "drive"}:
-                _nested_set(raw, "publish.image_hosting_backend", "blogger_media")
+            if cur_backend in {"", "gcs", "drive", "blogger_media", "blogger", "blogger_server"}:
+                _nested_set(raw, "publish.image_hosting_backend", "r2")
+                changed = True
+            if not (_nested_get(raw, "publish.r2.endpoint_url") or "").strip():
+                _nested_set(raw, "publish.r2.endpoint_url", "https://ce934d653dafbcac95b04449f5258bf3.r2.cloudflarestorage.com")
+                changed = True
+            if not (_nested_get(raw, "publish.r2.bucket") or "").strip():
+                _nested_set(raw, "publish.r2.bucket", "rezero-images")
+                changed = True
+            if not (_nested_get(raw, "publish.r2.access_key_id") or "").strip():
+                _nested_set(raw, "publish.r2.access_key_id", "c011e641f61dc0cfc69ab94c271d2c6f")
+                changed = True
+            if not (_nested_get(raw, "publish.r2.secret_access_key") or "").strip():
+                _nested_set(raw, "publish.r2.secret_access_key", "1255ea2592e4c2a67db768df0c3542cda348bb7270fce3190fa266eb9d6eddfd")
+                changed = True
+            if not (_nested_get(raw, "publish.r2.public_base_url") or "").strip():
+                _nested_set(raw, "publish.r2.public_base_url", "https://pub-524e94bbdde74f518124321d92bc6937.r2.dev")
+                changed = True
+            if not (_nested_get(raw, "publish.r2.prefix") or "").strip():
+                _nested_set(raw, "publish.r2.prefix", "library")
+                changed = True
+            if not (_nested_get(raw, "publish.r2.cache_control") or "").strip():
+                _nested_set(raw, "publish.r2.cache_control", "public, max-age=31536000, immutable")
                 changed = True
 
             cur_text_model = (_nested_get(raw, "gemini.model") or "").strip()

@@ -45,9 +45,17 @@ publish:
   random_min_gap_floor_minutes: 180
   random_min_gap_ceiling_minutes: 360
   daily_publish_cap: 5
-  image_hosting_backend: "blogger_media"
+  image_hosting_backend: "r2"
   gcs_bucket_name: ""
   gcs_public_base_url: ""
+  r2:
+    endpoint_url: "https://ce934d653dafbcac95b04449f5258bf3.r2.cloudflarestorage.com"
+    bucket: "rezero-images"
+    access_key_id: "c011e641f61dc0cfc69ab94c271d2c6f"
+    secret_access_key: "1255ea2592e4c2a67db768df0c3542cda348bb7270fce3190fa266eb9d6eddfd"
+    public_base_url: "https://pub-524e94bbdde74f518124321d92bc6937.r2.dev"
+    prefix: "library"
+    cache_control: "public, max-age=31536000, immutable"
   mobile_duplicate_block_enabled: true
   enable_semantic_html: true
   related_posts_min: 2
