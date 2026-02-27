@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import hashlib
 import re
 import random
 import time
@@ -26,14 +27,17 @@ from .logstore import LogStore, RunRecord
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
 from .patterns import PatternEngine
+from .prompt_factory import PromptFactory
 from .publisher import Publisher
 from .quality import ContentQAGate
 from .reference_docs import ReferenceCorpus
 from .scheduler import MonthlyScheduler
 from .scout import SourceScout, TopicCandidate
 from .settings import AppSettings
+from .preflight import validate_secrets
 from .text_segmenter import section_bundle_for_llm
 from .topic_growth import TopicGrower
+from .title_variations import TitleContext, render_title, title_fingerprint
 from .visual import ImageAsset, VisualPipeline
 
 
@@ -54,6 +58,7 @@ class AgentWorkflow:
         self.guard = BudgetGuard(settings.budget, self.logs)
         self.scout = SourceScout(settings.sources, root, settings.content_mode)
         self.patterns = PatternEngine()
+        self.prompt_factory = PromptFactory(root)
         self.references = ReferenceCorpus(
             files=[
                 root / "storage" / "references" / "quality_automation_manual.txt",
@@ -115,9 +120,12 @@ class AgentWorkflow:
         self._global_keyword_cache: tuple[datetime, list[str]] | None = None
         self._global_keyword_cache_ttl_seconds = 1800
         self.last_global_keywords: list[str] = []
+        self._pending_keyword_claims: list[str] = []
         self._kst = timezone(timedelta(hours=9))
         self._keyword_pool_path = self.root / "storage" / "logs" / "keyword_pool.json"
         self._blogger_recent_14d_path = self.root / "storage" / "logs" / "blogger_recent_14d.json"
+        self._cluster_rotation_state_path = self.root / "storage" / "state" / "cluster_rotation_state.json"
+        self._title_fingerprint_path = self.root / "storage" / "logs" / "title_fingerprints.json"
         self.keyword_assets = KeywordAssetStore(
             db_path=self.root / str(getattr(self.settings.keywords, "db_path", "storage/keywords.sqlite")),
         )
@@ -605,6 +613,119 @@ class AgentWorkflow:
                 {"purpose": "plan_json", "success": False, "fallback_used": True},
             )
             return fallback_plan
+
+    def _generation_mode(self) -> str:
+        mode = str(getattr(getattr(self.settings, "generation", None), "mode", "hybrid") or "hybrid").strip().lower()
+        if mode not in {"local_first", "hybrid", "cloud_first"}:
+            return "hybrid"
+        return mode
+
+    def _gemini_budget_remaining(self) -> int:
+        daily_limit = int(getattr(self.settings.gemini, "max_calls_per_day", 0) or 0)
+        mode_budget = int(getattr(getattr(self.settings, "generation", None), "gemini_daily_budget_calls", 0) or 0)
+        caps = [x for x in [daily_limit, mode_budget] if x > 0]
+        if not caps:
+            return 999999
+        cap = min(caps)
+        used = int(self.logs.get_today_gemini_count() or 0)
+        return max(0, cap - used)
+
+    def _style_variant_id(self, keyword: str, cluster_id: str) -> str:
+        seed = f"{datetime.now(timezone.utc).date().isoformat()}:{cluster_id}:{keyword}".encode("utf-8")
+        bucket = int(hashlib.sha1(seed).hexdigest(), 16) % 12
+        return f"v{bucket + 1}"
+
+    def _build_local_draft_with_ollama(
+        self,
+        *,
+        selected: TopicCandidate,
+        plan: dict[str, Any],
+        internal_links_block: str,
+    ) -> DraftPost | None:
+        max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
+        if self._local_llm_calls_in_post >= max_calls:
+            return None
+        ready, _ = self._prepare_local_llm()
+        if not ready:
+            return None
+        keyword = re.sub(r"\s+", " ", str((plan or {}).get("primary_keyword", "") or selected.title or "").strip())
+        cluster_id = self._infer_cluster_id_from_keyword(keyword or selected.title)
+        style_variant_id = self._style_variant_id(keyword=keyword, cluster_id=cluster_id)
+        html = self.ollama_client.build_draft_html(
+            plan=plan or {},
+            internal_links_block=internal_links_block,
+            images_plan=None,
+            style_variant_id=style_variant_id,
+            title_hint=str(getattr(selected, "title", "") or ""),
+        )
+        if not str(html or "").strip():
+            return None
+        self._local_llm_calls_in_post += 1
+        self._local_llm_used_last_run = True
+        title_hint = re.sub(r"\s+", " ", str((plan or {}).get("primary_keyword", "") or selected.title or "")).strip()
+        title_hint = title_hint or "Device issue not working fix"
+        return DraftPost(
+            title=title_hint,
+            alt_titles=[],
+            summary=str((plan or {}).get("issue_summary", "") or "").strip(),
+            html=str(html),
+            score=85,
+            source_url=str(getattr(selected, "url", "") or ""),
+            extracted_urls=[],
+        )
+
+    def _fix_steps_fingerprint(self, fix_steps: list[dict[str, Any]]) -> str:
+        toks: list[str] = []
+        for row in fix_steps or []:
+            if not isinstance(row, dict):
+                continue
+            for key in ("step_title", "action", "menu_path"):
+                txt = re.sub(r"[^a-z0-9\s-]", " ", str(row.get(key, "") or "").lower())
+                txt = re.sub(r"\s+", " ", txt).strip()
+                if txt:
+                    toks.append(txt)
+        uniq = sorted(set(" ".join(toks).split()))
+        if not uniq:
+            return ""
+        return hashlib.sha1(" ".join(uniq).encode("utf-8")).hexdigest()
+
+    def _is_recent_fix_steps_duplicate(self, fp: str) -> bool:
+        if not fp:
+            return False
+        path = self.root / "storage" / "logs" / "fix_steps_fingerprints.json"
+        try:
+            if not path.exists():
+                return False
+            rows = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(rows, list):
+                return False
+            seen = {str(x.get("fp", "")).strip().lower() for x in rows if isinstance(x, dict)}
+            return fp.lower() in seen
+        except Exception:
+            return False
+
+    def _remember_fix_steps_fingerprint(self, fp: str, title: str) -> None:
+        if not fp:
+            return
+        path = self.root / "storage" / "logs" / "fix_steps_fingerprints.json"
+        try:
+            rows: list[dict[str, str]] = []
+            if path.exists():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    rows = [x for x in loaded if isinstance(x, dict)]
+            rows.append(
+                {
+                    "ts_utc": datetime.now(timezone.utc).isoformat(),
+                    "fp": fp,
+                    "title": str(title or "")[:160],
+                }
+            )
+            rows = rows[-200:]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            return
         if self._local_llm_calls_in_post >= max_calls:
             self._log_ollama_event(
                 "ollama_plan_json_skipped_budget",
@@ -685,6 +806,26 @@ class AgentWorkflow:
             min_word_count=max(200, int(getattr(cfg, "min_word_count", 900) or 900)),
             max_generic_ratio=float(getattr(cfg, "max_generic_ratio", 0.012) or 0.012),
         )
+
+    def _scaled_content_risk(self, title: str, html: str, plan_fp: str = "") -> tuple[bool, list[str]]:
+        reasons: list[str] = []
+        title_fp = title_fingerprint(title)
+        if title_fp and title_fp in self._load_recent_title_fingerprints():
+            reasons.append("title_fp_duplicate")
+        if plan_fp and self._is_recent_fix_steps_duplicate(plan_fp):
+            reasons.append("fix_steps_fp_duplicate")
+        excerpt = self._normalize_excerpt(html)
+        excerpt_bow = self._tokenize(excerpt[:4000])
+        for row in self.logs.get_recent_content_fingerprints(days=14, limit=80):
+            old = str((row or {}).get("excerpt", "") or "").strip().lower()
+            if not old:
+                continue
+            lex = SequenceMatcher(None, excerpt[:4000], old[:4000]).ratio()
+            sem = self._bow_cosine(excerpt_bow, self._tokenize(old[:4000]))
+            if lex >= 0.84 and sem >= 0.80:
+                reasons.append("excerpt_similarity_high")
+                break
+        return (len(reasons) > 0), reasons
 
     def _build_image_prompt_plan_with_local_llm(self, draft: DraftPost, selected: TopicCandidate) -> dict[str, Any]:
         max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
@@ -1081,6 +1222,7 @@ class AgentWorkflow:
 
     def run_once(self, manual_trigger: bool = False) -> WorkflowResult:
         self._workflow_perf_start_run(manual_trigger=bool(manual_trigger))
+        self._pending_keyword_claims = []
         self._active_slot_id = ""
         self._set_image_pipeline_state(
             "idle",
@@ -1110,6 +1252,26 @@ class AgentWorkflow:
             self._preflight_recent_index_sync,
             slow_ms=2000,
         )
+        secret_issues = self._profile_call(
+            "secret_preflight",
+            lambda: validate_secrets(self.settings),
+            slow_ms=500,
+        )
+        if secret_issues:
+            reason = "preflight_missing_secrets:" + ",".join(str(x) for x in secret_issues[:8])
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=0,
+                    title="",
+                    source_url="",
+                    published_url="",
+                    note=reason,
+                )
+            )
+            self._workflow_perf_finish_run("hold", reason)
+            return WorkflowResult("hold", reason)
+        preflight_generation_mode = self._generation_mode()
         budget = self.guard.can_run(
             today_posts=(
                 int(blog_snapshot.get("today_posts", 0))
@@ -1119,6 +1281,8 @@ class AgentWorkflow:
             # In schedule mode, do not block generation just because today's live posts hit cap.
             # Daily publish capacity is enforced by _compute_publish_at() per-day placement.
             enforce_post_limit=(snapshot_source == "blogger" and not bool(self.settings.publish.use_blogger_schedule)),
+            # In local_first/hybrid, Gemini is optional; enforce per-call budgets at call sites instead.
+            enforce_gemini_limit=(preflight_generation_mode == "cloud_first"),
         )
         if not budget.ok:
             hold_note = f"Budget guard: {budget.reason}"
@@ -1184,7 +1348,19 @@ class AgentWorkflow:
             )
             latest_candidates = [c for c in (latest_candidates or []) if self._candidate_matches_content_mode(c)]
             recent_history_titles = self._get_recent_blogger_titles(limit=240, refresh_api=False)
-            recent_urls = []
+            recent_url_rows = []
+            try:
+                recent_url_rows = self.publisher.fetch_recent_live_urls(days=30, limit=360)
+            except Exception as exc:
+                duplicate_recovery_note = self._append_note(
+                    duplicate_recovery_note,
+                    f"recent_urls_fetch_failed={str(exc)[:90]}",
+                )
+            recent_urls = [
+                str((row or {}).get("url", "") or "").strip()
+                for row in (recent_url_rows or [])
+                if str((row or {}).get("url", "") or "").strip()
+            ]
             recent_titles = list(recent_history_titles)
             filtered = self._filter_recent_duplicates(latest_candidates, recent_titles)
             if filtered:
@@ -1210,6 +1386,10 @@ class AgentWorkflow:
             )
         if not candidates:
             raise RuntimeError("Candidate collection exhausted after 3 retry rounds")
+        duplicate_recovery_note = self._append_note(
+            duplicate_recovery_note,
+            f"recent_urls_count={len(recent_urls)}",
+        )
         diversity_note = ""
         entity_title_map = self._entity_titles_from_today_snapshot(blog_snapshot)
         if entity_title_map:
@@ -1238,7 +1418,19 @@ class AgentWorkflow:
                     rec = [c for c in (rec or []) if self._candidate_matches_content_mode(c)]
                     # Refresh recent history after each growth round to avoid reusing just-written patterns.
                     recent_history_titles = self._get_recent_blogger_titles(limit=240, refresh_api=False)
-                    recent_urls = []
+                    recent_url_rows = []
+                    try:
+                        recent_url_rows = self.publisher.fetch_recent_live_urls(days=30, limit=360)
+                    except Exception as exc:
+                        diversity_note = self._append_note(
+                            diversity_note,
+                            f"recent_urls_fetch_failed={str(exc)[:90]}",
+                        )
+                    recent_urls = [
+                        str((row or {}).get("url", "") or "").strip()
+                        for row in (recent_url_rows or [])
+                        if str((row or {}).get("url", "") or "").strip()
+                    ]
                     recent_titles = list(recent_history_titles)
                     rec = self._filter_recent_duplicates(rec, recent_titles)
                     filtered_by_entity = self._exclude_same_entity_same_topic_candidates(
@@ -1276,8 +1468,9 @@ class AgentWorkflow:
             (self.settings.gemini.api_key or "").strip()
             and (self.settings.gemini.api_key or "").strip() != "GEMINI_API_KEY"
         )
-        # Rezero 2.1: if API key is available, use Gemini path even in free_mode.
-        free_local_mode = bool(self.settings.budget.free_mode and not api_ready)
+        generation_mode = self._generation_mode()
+        # Cost control: in free_mode, keep local-first/hybrid behavior even if API key exists.
+        free_local_mode = bool(self.settings.budget.free_mode and generation_mode != "cloud_first")
         self._progress("trend", "글로벌 타겟 키워드 분석", 24)
         global_keywords, keyword_pool_note = self._acquire_run_keywords(candidates)
         keyword_fallback_note = keyword_pool_note or ""
@@ -1371,6 +1564,23 @@ class AgentWorkflow:
                 self._workflow_perf_finish_run("hold", hold_msg)
                 return WorkflowResult("hold", hold_msg)
 
+        last_cluster = self._last_cluster_id()
+        selected_cluster = self._infer_cluster_id_from_keyword(
+            " ".join(getattr(selected, "long_tail_keywords", [])[:2]) or str(getattr(selected, "title", "") or "")
+        )
+        if last_cluster and selected_cluster == last_cluster:
+            alternates = []
+            for c in (candidates or []):
+                cid = self._infer_cluster_id_from_keyword(
+                    " ".join(getattr(c, "long_tail_keywords", [])[:2]) or str(getattr(c, "title", "") or "")
+                )
+                if cid != last_cluster and self._candidate_matches_content_mode(c):
+                    alternates.append(c)
+            if alternates:
+                selected = max(alternates, key=lambda x: int(getattr(x, "score", 0)))
+                score = max(score, int(getattr(selected, "score", 70)))
+                reason = self._append_note(reason, f"cluster_rotation_applied:{last_cluster}->{self._infer_cluster_id_from_keyword(' '.join(getattr(selected, 'long_tail_keywords', [])[:2]) or str(getattr(selected, 'title', '') or ''))}")
+
         if score < self.settings.gemini.min_publish_score:
             reason = self._append_note(reason, f"score_auto_raised_from_{score}")
             score = max(score, int(self.settings.gemini.min_publish_score))
@@ -1417,85 +1627,184 @@ class AgentWorkflow:
             lambda: self._build_troubleshooting_plan_with_local_llm(selected),
             slow_ms=2600,
         )
+        plan_fp = self._fix_steps_fingerprint(
+            list((troubleshooting_plan or {}).get("fix_steps", []) or [])
+            if isinstance(troubleshooting_plan, dict)
+            else []
+        )
+        if plan_fp and self._is_recent_fix_steps_duplicate(plan_fp):
+            generation_degraded_note = self._append_note(
+                generation_degraded_note,
+                "fix_steps_fp_duplicate_initial",
+            )
+            try:
+                # One deterministic replan attempt to avoid repeated step patterns.
+                replanned = self._build_troubleshooting_plan_with_local_llm(selected)
+                replanned_fp = self._fix_steps_fingerprint(
+                    list((replanned or {}).get("fix_steps", []) or [])
+                    if isinstance(replanned, dict)
+                    else []
+                )
+                if replanned_fp and (not self._is_recent_fix_steps_duplicate(replanned_fp)):
+                    troubleshooting_plan = replanned
+                    plan_fp = replanned_fp
+                    generation_degraded_note = self._append_note(
+                        generation_degraded_note,
+                        "fix_steps_fp_replanned",
+                    )
+            except Exception:
+                pass
+        if plan_fp and self._is_recent_fix_steps_duplicate(plan_fp):
+            hold_reason = "fix_steps_fingerprint_duplicate"
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=0,
+                    title=str(getattr(selected, "title", "") or ""),
+                    source_url=str(getattr(selected, "url", "") or ""),
+                    published_url="",
+                    note=hold_reason,
+                )
+            )
+            self._workflow_perf_finish_run("hold", hold_reason)
+            return WorkflowResult("hold", hold_reason)
         plan_source = str((troubleshooting_plan or {}).get("source", "fallback") or "fallback").strip().lower()
         if plan_source != "ollama":
             generation_degraded_note = self._append_note(generation_degraded_note, f"plan_source={plan_source}")
         headline_note = ""
         self._progress("draft", "본문 초안 생성", 40)
         current_domain = self._infer_domain_from_title(str(getattr(selected, "title", "") or ""))
-        if free_local_mode:
-            generation_count += 1
-            draft = self.brain.generate_post_free(selected, self.settings.authority_links)
-        else:
-            pattern = self.patterns.choose(selected)
-            current_domain = str(getattr(pattern, "domain", "tech_troubleshoot") or "tech_troubleshoot")
-            pattern_instruction = (
-                f"Pattern key: {pattern.key}\n"
-                f"Domain: {current_domain}\n"
-                f"Audience stage: {pattern.stage}\n"
-                f"Objective: {pattern.objective}\n"
-                "Outline:\n- " + "\n- ".join(pattern.outline)
-            )
-            reference_guidance = self.references.build_guidance()
-            draft = None
-            generation_fail_notes: list[str] = []
-            max_attempts = 1
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    generation_count += 1
-                    draft_candidate = self.brain.generate_post(
-                        selected,
-                        self.settings.authority_links,
-                        pattern_instruction,
-                        reference_guidance,
-                        domain=current_domain,
-                        plan=troubleshooting_plan,
-                    )
-                except Exception as exc:
-                    if self.brain.call_count:
-                        self.logs.increment_today_gemini_count(self.brain.call_count)
-                        self.brain.reset_run_counter()
-                    err = str(exc)
-                    generation_fail_notes.append(f"attempt={attempt}, error={err}")
-                    if self._is_physical_impossible_error(err):
-                        self.logs.append_run(
-                            RunRecord(
-                                status="skipped",
-                                score=0,
-                                title="",
-                                source_url=str(getattr(selected, "url", "") or ""),
-                                published_url="",
-                                note=self._physical_block_reason(err),
-                            )
-                        )
-                        skip_reason = self._physical_block_reason(err)
-                        self._workflow_perf_finish_run("skipped", skip_reason)
-                        return WorkflowResult("skipped", skip_reason)
-                    # Temporary 429 should be retried by scheduler with 20-30min window.
-                    if self._is_temporary_rate_limit_error(err):
-                        raise
-                    if not self._is_retryable_error(err):
-                        continue
-                    continue
+        generation_mode = self._generation_mode()
+        gemini_only_on_fail = bool(getattr(getattr(self.settings, "generation", None), "gemini_only_on_fail", True))
+        generation_degraded_note = self._append_note(generation_degraded_note, f"generation_mode={generation_mode}")
+        pattern = self.patterns.choose(selected)
+        current_domain = str(getattr(pattern, "domain", "tech_troubleshoot") or "tech_troubleshoot")
+        prompt_pack = self.prompt_factory.get_pack(
+            "generate_post",
+            seed=str(getattr(selected, "title", "") or ""),
+        )
+        pattern_instruction = (
+            f"Pattern key: {pattern.key}\n"
+            f"Domain: {current_domain}\n"
+            f"Audience stage: {pattern.stage}\n"
+            f"Objective: {pattern.objective}\n"
+            f"Style variant: {prompt_pack.style_variant_id}\n"
+            f"Prompt directive: {prompt_pack.user}\n"
+            "Outline:\n- " + "\n- ".join(pattern.outline)
+        )
+        reference_guidance = self.references.build_guidance()
+        draft: DraftPost | None = None
 
+        if generation_mode in {"local_first", "hybrid"}:
+            try:
+                tentative_internal_links = self._build_internal_links_block(
+                    current_title=str(getattr(selected, "title", "") or ""),
+                    current_keywords=global_keywords,
+                    current_device_type=self._infer_device_type(f"{selected.title}"),
+                    current_cluster_id=self._infer_cluster_id_from_keyword(
+                        " ".join(global_keywords[:2]) or str(getattr(selected, "title", "") or "")
+                    ),
+                )
+                local_draft = self._build_local_draft_with_ollama(
+                    selected=selected,
+                    plan=troubleshooting_plan,
+                    internal_links_block=tentative_internal_links,
+                )
+                if local_draft is not None:
+                    draft = local_draft
+                    generation_count += 1
+                    generation_degraded_note = self._append_note(
+                        generation_degraded_note,
+                        f"generation_mode={generation_mode}:local_draft",
+                    )
+            except Exception as exc:
+                generation_degraded_note = self._append_note(
+                    generation_degraded_note,
+                    f"local_draft_failed={str(exc)[:120]}",
+                )
+
+        should_use_gemini_generate = (
+            draft is None and (
+                generation_mode == "cloud_first"
+                or generation_mode == "hybrid"
+                or (generation_mode == "local_first" and gemini_only_on_fail)
+                or (not free_local_mode)
+            )
+        )
+
+        if should_use_gemini_generate:
+            if self._gemini_budget_remaining() <= 0:
+                reason = "gemini_budget_exceeded"
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title=str(getattr(selected, "title", "") or ""),
+                        source_url=str(getattr(selected, "url", "") or ""),
+                        published_url="",
+                        note=reason,
+                    )
+                )
+                self._workflow_perf_finish_run("hold", reason)
+                return WorkflowResult("hold", reason)
+
+            try:
+                generation_count += 1
+                draft_candidate = self.brain.generate_post(
+                    selected,
+                    self.settings.authority_links,
+                    pattern_instruction,
+                    reference_guidance,
+                    domain=current_domain,
+                    plan=troubleshooting_plan,
+                )
                 if self.brain.call_count:
                     self.logs.increment_today_gemini_count(self.brain.call_count)
                     self.brain.reset_run_counter()
-
                 issues = self._draft_fatal_issues(draft_candidate.html, domain=current_domain)
-                if issues:
-                    generation_fail_notes.append(f"attempt={attempt}, issues={','.join(issues)}")
-                    continue
-                draft = draft_candidate
-                break
+                if not issues:
+                    draft = draft_candidate
+                else:
+                    generation_degraded_note = self._append_note(
+                        generation_degraded_note,
+                        "gemini_draft_rejected=" + ",".join(issues[:3]),
+                    )
+            except Exception as exc:
+                if self.brain.call_count:
+                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                    self.brain.reset_run_counter()
+                err = str(exc)
+                if self._is_physical_impossible_error(err):
+                    self.logs.append_run(
+                        RunRecord(
+                            status="skipped",
+                            score=0,
+                            title="",
+                            source_url=str(getattr(selected, "url", "") or ""),
+                            published_url="",
+                            note=self._physical_block_reason(err),
+                        )
+                    )
+                    skip_reason = self._physical_block_reason(err)
+                    self._workflow_perf_finish_run("skipped", skip_reason)
+                    return WorkflowResult("skipped", skip_reason)
+                if self._is_temporary_rate_limit_error(err):
+                    raise
+                generation_degraded_note = self._append_note(
+                    generation_degraded_note,
+                    f"gemini_generate_failed={err[:120]}",
+                )
 
-            # Keep the same cycle alive: emergency local rewrite instead of dropping the slot.
-            if draft is None:
-                draft = self.brain.generate_post_free(selected, self.settings.authority_links)
-                generation_degraded_note = self._append_note(generation_degraded_note, "degraded_to_free_mode_rewrite")
+        if draft is None:
+            generation_count += 1
+            draft = self.brain.generate_post_free(selected, self.settings.authority_links)
+            generation_degraded_note = self._append_note(
+                generation_degraded_note,
+                "degraded_to_free_mode_rewrite",
+            )
 
         # Headline specialist step: dedicated CTR rewrite via Gemini 2.0 Pro.
-        if not free_local_mode:
+        if (not free_local_mode) and self._gemini_budget_remaining() > 0:
             self._progress("headline", "제목 CTR 최적화", 50)
             try:
                 optimized_title, variants = self.brain.optimize_headline_ctr(
@@ -1527,6 +1836,8 @@ class AgentWorkflow:
                     self.logs.increment_today_gemini_count(self.brain.call_count)
                     self.brain.reset_run_counter()
                 headline_note = f"headline_opt=failed:{exc}"
+        elif not free_local_mode:
+            headline_note = "headline_opt=skipped_budget"
         draft.title = self._enforce_seo_title(
             title=draft.title,
             candidate=selected,
@@ -1772,12 +2083,79 @@ class AgentWorkflow:
                     + ((";" + ";".join(judge_issues[:3])) if judge_issues else ""),
                 )
 
+        scaled_risk, scaled_reasons = self._scaled_content_risk(
+            title=draft.title,
+            html=final_html,
+            plan_fp=plan_fp,
+        )
+        if scaled_risk:
+            hold_reason = "scaled_content_risk:" + ",".join(scaled_reasons[:4])
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=0,
+                    title=draft.title,
+                    source_url=draft.source_url,
+                    published_url="",
+                    note=hold_reason,
+                )
+            )
+            self._workflow_perf_finish_run("hold", hold_reason)
+            return WorkflowResult("hold", hold_reason)
+
         actionability_result = self._profile_call(
             "actionability_gate_initial",
             lambda: self._evaluate_actionability_gate(draft.title, final_html),
             slow_ms=1200,
         )
         if (not actionability_result.ok) and (not free_local_mode):
+            # First remediation: local rewrite to preserve low-cost path.
+            try:
+                local_rewrite = self._build_local_draft_with_ollama(
+                    selected=selected,
+                    plan=troubleshooting_plan,
+                    internal_links_block="",
+                )
+                if local_rewrite is not None and str(local_rewrite.html or "").strip():
+                    candidate_html = self._sanitize_publish_html(local_rewrite.html, domain=current_domain)
+                    candidate_html = self._canonicalize_html_payload(candidate_html)
+                    candidate_qa = self._qa_evaluate(
+                        candidate_html,
+                        title=draft.title,
+                        domain=current_domain,
+                        keyword=str(getattr(selected, "title", "") or ""),
+                        context="actionability_local_rewrite",
+                    )
+                    candidate_actionability = self._profile_call(
+                        "actionability_gate_after_local_rewrite",
+                        lambda: self._evaluate_actionability_gate(draft.title, candidate_html),
+                        slow_ms=1200,
+                    )
+                    if candidate_actionability.ok:
+                        final_html = candidate_html
+                        qa_result = candidate_qa
+                        actionability_result = candidate_actionability
+                        generation_degraded_note = self._append_note(generation_degraded_note, "actionability_local_rewrite_applied")
+            except Exception as exc:
+                generation_degraded_note = self._append_note(
+                    generation_degraded_note,
+                    f"actionability_local_rewrite_failed:{str(exc)[:120]}",
+                )
+
+            if (not actionability_result.ok) and self._gemini_budget_remaining() <= 0:
+                hold_reason = "gemini_budget_exceeded"
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="",
+                        note=hold_reason,
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
             self._progress("qa", "액션 가능성 강화 재작성", 66)
             try:
                 generation_count += 1
@@ -2066,8 +2444,30 @@ class AgentWorkflow:
                     ),
                 )
             )
+            self._remember_title_fingerprint(draft.title)
+            self._remember_fix_steps_fingerprint(plan_fp, draft.title)
             self._workflow_perf_finish_run("success", published_url)
             return WorkflowResult("success", published_url)
+
+        publish_secret_issues = self._profile_call(
+            "secret_preflight_before_publish",
+            lambda: validate_secrets(self.settings),
+            slow_ms=500,
+        )
+        if publish_secret_issues:
+            reason = "preflight_missing_secrets:" + ",".join(str(x) for x in publish_secret_issues[:8])
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=0,
+                    title=draft.title,
+                    source_url=draft.source_url,
+                    published_url="",
+                    note=reason,
+                )
+            )
+            self._workflow_perf_finish_run("hold", reason)
+            return WorkflowResult("hold", reason)
 
         self._progress("schedule", "예약 시간 계산", 84)
         publish_at = self._compute_publish_at()
@@ -2305,8 +2705,22 @@ class AgentWorkflow:
                 ),
             )
         )
+        self._remember_title_fingerprint(draft.title)
+        self._remember_fix_steps_fingerprint(plan_fp, draft.title)
         if manual_trigger and str(getattr(published, "post_id", "")).strip():
             self.logs.add_excluded_post(str(published.post_id).strip(), reason="manual_trigger")
+        if self._pending_keyword_claims:
+            try:
+                used_count = self.keyword_assets.mark_keywords_used(self._pending_keyword_claims)
+                if used_count > 0:
+                    generation_degraded_note = self._append_note(
+                        generation_degraded_note,
+                        f"kw_mark_used={used_count}",
+                    )
+            except Exception:
+                pass
+            finally:
+                self._pending_keyword_claims = []
         self._rotate_keywords_after_success(
             candidates=candidates,
             used_text=f"{draft.title}\n{draft.summary}\n{self._normalize_excerpt(final_html)[:2000]}",
@@ -2326,6 +2740,12 @@ class AgentWorkflow:
                 global_keywords=global_keywords,
                 candidate=selected,
                 publish_at=publish_at,
+            )
+        except Exception:
+            pass
+        try:
+            self._save_last_cluster_id(
+                self._infer_cluster_id_from_keyword(" ".join(global_keywords[:2]) or draft.title)
             )
         except Exception:
             pass
@@ -2462,7 +2882,24 @@ class AgentWorkflow:
             for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
             if str(x or "").strip()
         ]
+        prohibited = [
+            "hack",
+            "hacking",
+            "crack",
+            "cracking",
+            "license key",
+            "pirated",
+            "bypass drm",
+            "account takeover",
+            "malware",
+            "spyware",
+            "adult",
+            "hate",
+            "violence",
+        ]
         if any(tok in text for tok in banned):
+            return False
+        if any(tok in text for tok in prohibited):
             return False
         device_tokens = {
             "windows", "mac", "macos", "iphone", "ios", "galaxy", "samsung",
@@ -2617,6 +3054,34 @@ class AgentWorkflow:
         if any(k in text for k in ("performance", "slow", "lag", "freeze")):
             return "performance"
         return "general"
+
+    def _last_cluster_id(self) -> str:
+        try:
+            if not self._cluster_rotation_state_path.exists():
+                return ""
+            payload = json.loads(self._cluster_rotation_state_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return str(payload.get("last_cluster_id", "") or "").strip().lower()
+        except Exception:
+            return ""
+        return ""
+
+    def _save_last_cluster_id(self, cluster_id: str) -> None:
+        cid = str(cluster_id or "").strip().lower()
+        if not cid:
+            return
+        payload = {
+            "last_cluster_id": cid,
+            "updated_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self._cluster_rotation_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cluster_rotation_state_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
 
     def _build_template_keywords(self, device_type: str, limit: int = 120) -> list[str]:
         d = str(device_type or "device").strip().lower()
@@ -3121,6 +3586,25 @@ class AgentWorkflow:
                 max_labels=6,
             )
         post_id = str(row.get("post_id", "") or "").strip()
+        publish_secret_issues = self._profile_call(
+            "resume_secret_preflight_before_publish",
+            lambda: validate_secrets(self.settings),
+            slow_ms=500,
+        )
+        if publish_secret_issues:
+            reason = "preflight_missing_secrets:" + ",".join(str(x) for x in publish_secret_issues[:8])
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=0,
+                    title=title,
+                    source_url="",
+                    published_url="",
+                    note=reason,
+                )
+            )
+            self._mark_active_slot("hold", reason)
+            return WorkflowResult("hold", reason)
 
         self._progress("schedule", "중단 문서 재개: 예약 시간 계산", 84)
         publish_at = self._compute_publish_at()
@@ -3208,6 +3692,12 @@ class AgentWorkflow:
             source_url="",
             published_url=published.url,
         )
+        try:
+            self._save_last_cluster_id(
+                self._infer_cluster_id_from_keyword(" ".join(self.last_global_keywords[:2]) or title)
+            )
+        except Exception:
+            pass
         self._blog_snapshot_cache = None
         self._cleanup_local_image_files(images)
 
@@ -3226,6 +3716,7 @@ class AgentWorkflow:
                 note=note,
             )
         )
+        self._remember_title_fingerprint(title)
         if manual_trigger and str(getattr(published, "post_id", "")).strip():
             self.logs.add_excluded_post(str(published.post_id).strip(), reason="manual_trigger")
         self._progress("done", "중단 문서 재개 완료", 100)
@@ -3518,22 +4009,98 @@ class AgentWorkflow:
         lower = raw.lower()
         if mode == "tech_troubleshoot_only" and not any(tok in lower for tok in req_tokens):
             if "after update" in lower or "update" in lower:
-                raw = f"{device_hint.title()} not working after update? 5 fixes that actually work (2026)"
+                raw = f"{device_hint.title()} not working after update"
             elif re.search(r"\berror\b", lower):
-                raw = f"{device_hint.title()} error fix: 5 steps that actually work (2026)"
+                raw = f"{device_hint.title()} error fix"
             else:
-                raw = f"{device_hint.title()} not working? 5 fixes that actually work (2026)"
+                raw = f"{device_hint.title()} not working fix"
             lower = raw.lower()
-
-        if mode == "tech_troubleshoot_only" and not re.search(r"\b(2026|\d+ fixes?)\b", lower):
-            raw = f"{raw} (2026 Fix Guide)"
+        cluster_id = self._infer_cluster_id_from_keyword(
+            " ".join(global_keywords[:2] if global_keywords else []) or raw
+        )
+        ctx = TitleContext(
+            keyword=(preferred_keyword or raw),
+            device=device_hint,
+            cluster=cluster_id,
+            year="2026",
+        )
+        recent_fp = self._load_recent_title_fingerprints()
+        for attempt in range(0, 4):
+            candidate_title = render_title(ctx, attempt=attempt)
+            if preferred_keyword and preferred_keyword.lower() not in candidate_title.lower():
+                candidate_title = f"{preferred_keyword}: {candidate_title}".strip(" :")
+            candidate_title = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", candidate_title)
+            candidate_title = re.sub(r"\s+", " ", candidate_title).strip()
+            fp = title_fingerprint(candidate_title)
+            if fp not in recent_fp:
+                raw = candidate_title
+                break
         pref = re.sub(r"\s+", " ", str(preferred_keyword or "")).strip()
         if pref and pref.lower() not in raw.lower():
             if len(pref) <= 75:
                 raw = f"{pref}: {raw}".strip(" :")
+        req_tokens = [
+            str(x or "").strip().lower()
+            for x in (getattr(self.settings.content_mode, "required_title_tokens_any", []) or [])
+            if str(x or "").strip()
+        ] or ["not working", "fix", "error", "after update"]
+        if not any(tok in raw.lower() for tok in req_tokens):
+            raw = f"{raw} fix".strip()
         raw = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", raw)
         raw = re.sub(r"\s+", " ", raw).strip()
         return raw[:120]
+
+    def _load_recent_title_fingerprints(self) -> set[str]:
+        fps: set[str] = set()
+        try:
+            rows = self.logs.get_recent_topic_history(days=30, limit=300)
+            for row in rows:
+                t = str((row or {}).get("title", "") or "").strip()
+                if t:
+                    fps.add(title_fingerprint(t))
+        except Exception:
+            pass
+        try:
+            if self._title_fingerprint_path.exists():
+                payload = json.loads(self._title_fingerprint_path.read_text(encoding="utf-8"))
+                if isinstance(payload, list):
+                    for row in payload:
+                        if isinstance(row, dict):
+                            fp = str(row.get("fp", "") or "").strip().lower()
+                            if fp:
+                                fps.add(fp)
+        except Exception:
+            pass
+        return fps
+
+    def _remember_title_fingerprint(self, title: str) -> None:
+        fp = title_fingerprint(title)
+        if not fp:
+            return
+        rows: list[dict[str, str]] = []
+        try:
+            if self._title_fingerprint_path.exists():
+                payload = json.loads(self._title_fingerprint_path.read_text(encoding="utf-8"))
+                if isinstance(payload, list):
+                    rows = [x for x in payload if isinstance(x, dict)]
+        except Exception:
+            rows = []
+        rows.append(
+            {
+                "ts_utc": datetime.now(timezone.utc).isoformat(),
+                "fp": fp,
+                "title": str(title or "")[:160],
+            }
+        )
+        rows = rows[-240:]
+        try:
+            self._title_fingerprint_path.parent.mkdir(parents=True, exist_ok=True)
+            self._title_fingerprint_path.write_text(
+                json.dumps(rows, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
 
     def _go_live_gate_checklist(
         self,
@@ -4383,10 +4950,42 @@ class AgentWorkflow:
                     pass
         return self._compute_publish_at_legacy(now=now, min_delay=min_delay)
 
+    def _adaptive_daily_publish_cap(self) -> int:
+        base_cap = max(1, int(getattr(self.settings.publish, "daily_publish_cap", 5) or 5))
+        rows = self.logs.get_recent_runs(days=3, limit=120)
+        if not rows:
+            return base_cap
+        hold = 0
+        total = 0
+        qa_scores: list[int] = []
+        for row in rows:
+            status = str((row or {}).get("status", "") or "").strip().lower()
+            if status not in {"success", "hold", "skipped"}:
+                continue
+            total += 1
+            if status == "hold":
+                hold += 1
+            try:
+                qa_scores.append(int((row or {}).get("score", 0) or 0))
+            except Exception:
+                pass
+        if total <= 0:
+            return base_cap
+        hold_rate = float(hold) / float(max(1, total))
+        avg_score = float(sum(qa_scores)) / float(max(1, len(qa_scores)))
+        adjusted = base_cap
+        if hold_rate >= 0.45 or avg_score < 80:
+            adjusted = max(1, base_cap - 2)
+        elif hold_rate >= 0.30 or avg_score < 86:
+            adjusted = max(1, base_cap - 1)
+        elif hold_rate <= 0.12 and avg_score >= 90:
+            adjusted = min(base_cap + 1, max(base_cap, 8))
+        return int(adjusted)
+
     def _compute_publish_at_legacy(self, now: datetime, min_delay: int) -> datetime | None:
         snapshot = self._blog_snapshot(force_refresh=True)
         times, day_count = self._build_publish_state(snapshot, now)
-        daily_cap = max(1, int(self.settings.publish.daily_publish_cap))
+        daily_cap = self._adaptive_daily_publish_cap()
         anchor = times[-1] if times else now + timedelta(minutes=min_delay)
         if anchor < now + timedelta(minutes=min_delay):
             anchor = now + timedelta(minutes=min_delay)
@@ -4403,7 +5002,7 @@ class AgentWorkflow:
         now = datetime.now(timezone.utc)
         snapshot = self._blog_snapshot(force_refresh=True)
         times, day_count = self._build_publish_state(snapshot, now)
-        daily_cap = max(1, int(self.settings.publish.daily_publish_cap))
+        daily_cap = self._adaptive_daily_publish_cap()
         min_delay = max(1, int(self.settings.publish.min_delay_minutes))
         anchor = times[-1] if times else now + timedelta(minutes=min_delay)
         if anchor < now + timedelta(minutes=min_delay):
@@ -5160,6 +5759,67 @@ class AgentWorkflow:
             txt = " ".join(words[:8])
         return txt
 
+    def _keyword_specificity_score(self, keyword: str) -> int:
+        kw = str(keyword or "").lower()
+        score = 0
+        os_tokens = ["windows 11", "windows 10", "ios", "iphone", "macos", "android", "galaxy", "ipad"]
+        triggers = ["after update", "keeps", "not recognized", "not detected", "error", "stuck", "no sound", "disconnect", "won t"]
+        features = ["wifi", "wi-fi", "bluetooth", "usb", "printer", "microphone", "camera", "keyboard", "mouse", "driver", "vpn"]
+        generic = ["device not working", "not working", "fix my", "help me", "problem"]
+        for t in os_tokens:
+            if t in kw:
+                score += 3
+        for t in triggers:
+            if t in kw:
+                score += 3
+                break
+        for t in features:
+            if t in kw:
+                score += 2
+                break
+        for t in generic:
+            if t in kw:
+                score -= 5
+        return score
+
+    def _expand_low_specificity_keyword(self, keyword: str, device_type: str) -> str:
+        base = self._normalize_keyword(keyword).lower()
+        device = self._normalize_keyword(device_type).lower() or "windows"
+        if not base:
+            return ""
+        trigger = "after update"
+        if "error" in base:
+            trigger = "error code fix"
+        elif "disconnect" in base or "wifi" in base or "bluetooth" in base:
+            trigger = "keeps disconnecting fix"
+        elif "sound" in base or "audio" in base:
+            trigger = "no sound after update fix"
+        if device not in base:
+            base = f"{device} {base}"
+        expanded = f"{base} {trigger}"
+        expanded = re.sub(r"\s+", " ", expanded).strip()
+        expanded = self._normalize_keyword(expanded)
+        if not expanded:
+            expanded = self._normalize_keyword(f"{device} issue after update fix")
+        return expanded
+
+    def _apply_keyword_specificity(self, keywords: list[str], device_type: str) -> tuple[list[str], str]:
+        out: list[str] = []
+        changed = 0
+        for kw in (keywords or []):
+            norm = self._normalize_keyword(kw)
+            if not norm:
+                continue
+            if self._keyword_specificity_score(norm) < 3:
+                exp = self._expand_low_specificity_keyword(norm, device_type=device_type)
+                if exp and exp.lower() != norm.lower():
+                    norm = exp
+                    changed += 1
+            if norm and norm.lower() not in {x.lower() for x in out}:
+                out.append(norm)
+        note = f"kw_specificity_rewrites={changed}" if changed else ""
+        return out, note
+
     def _keyword_allowed_for_content_mode(self, keyword: str) -> bool:
         mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
         if mode != "tech_troubleshoot_only":
@@ -5326,7 +5986,8 @@ class AgentWorkflow:
         device_type = self._current_rotated_device_type()
         refill_threshold = max(10, int(getattr(self.settings.keywords, "refill_threshold_per_device", 100) or 100))
         avoid_days = max(7, int(getattr(self.settings.keywords, "avoid_reuse_days", 30) or 30))
-        pick_count = max(1, int(getattr(self.settings.publish, "daily_publish_cap", 2) or 2))
+        # One post is generated per run; reserve exactly one primary keyword per run.
+        pick_count = 1
 
         available = self.keyword_assets.available_count(device_type=device_type, avoid_reuse_days=avoid_days)
         note = self._append_note(note, f"kw_device={device_type}")
@@ -5361,11 +6022,16 @@ class AgentWorkflow:
             device_type=device_type,
             limit=pick_count,
             avoid_reuse_days=avoid_days,
+            mark_used=False,
         )
+        self._pending_keyword_claims = list(picks[:pick_count])
         if not picks:
             fallback = self._build_local_keyword_candidates(candidates, limit=24)
             picks = fallback[:pick_count]
             note = self._append_note(note, "kw_fallback_local")
+        picks, spec_note = self._apply_keyword_specificity(picks, device_type=device_type)
+        if spec_note:
+            note = self._append_note(note, spec_note)
         return picks, note
 
     def _load_blogger_recent_titles_cache(self) -> dict[str, Any]:

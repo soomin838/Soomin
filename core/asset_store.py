@@ -157,6 +157,7 @@ class KeywordAssetStore:
         device_type: str,
         limit: int,
         avoid_reuse_days: int,
+        mark_used: bool = True,
     ) -> list[str]:
         cap = max(1, int(limit))
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(avoid_reuse_days)))).isoformat()
@@ -173,13 +174,36 @@ class KeywordAssetStore:
                 (str(device_type or ""), cutoff, cap),
             ).fetchall()
             out = [str((r[0] if r else "") or "").strip() for r in rows if str((r[0] if r else "") or "").strip()]
-            if out:
+            if out and mark_used:
                 now = _utc_now_iso()
                 conn.executemany(
                     "UPDATE keywords SET used_at=? WHERE keyword=?",
                     [(now, kw) for kw in out],
                 )
         return out
+
+    def mark_keywords_used(self, keywords: Iterable[str]) -> int:
+        rows = [str(x or "").strip().lower() for x in (keywords or []) if str(x or "").strip()]
+        if not rows:
+            return 0
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            conn.executemany(
+                "UPDATE keywords SET used_at=? WHERE lower(keyword)=lower(?)",
+                [(now, kw) for kw in rows],
+            )
+            return int(conn.total_changes or 0)
+
+    def release_keywords(self, keywords: Iterable[str]) -> int:
+        rows = [str(x or "").strip().lower() for x in (keywords or []) if str(x or "").strip()]
+        if not rows:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                "UPDATE keywords SET used_at=NULL WHERE lower(keyword)=lower(?)",
+                [(kw,) for kw in rows],
+            )
+            return int(conn.total_changes or 0)
 
 
 class PostsIndexStore:
