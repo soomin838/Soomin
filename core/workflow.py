@@ -6,7 +6,7 @@ import random
 import time
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -17,6 +17,7 @@ from urllib.parse import quote_plus, urlparse
 from zoneinfo import ZoneInfo
 
 from .brain import DraftPost, GeminiBrain
+from .actionability_gate import ActionabilityGate, ActionabilityGateResult
 from .budget import BudgetGuard
 from .asset_store import KeywordAssetStore, PostsIndexStore
 from .image_library import pick_images
@@ -86,6 +87,7 @@ class AgentWorkflow:
             settings.authority_links,
             qa_runtime_path=root / "storage" / "logs" / "qa_runtime.jsonl",
         )
+        self.actionability_gate = ActionabilityGate()
         self.ollama_manager = OllamaManager(
             root=root,
             settings=settings.local_llm,
@@ -382,7 +384,7 @@ class AgentWorkflow:
     def _log_ollama_event(self, event: str, payload: dict[str, Any] | None = None) -> None:
         payload = dict(payload or {})
         purpose = str(payload.get("purpose", "") or "").strip().lower()
-        if purpose not in {"image_plan", "qa_review"}:
+        if purpose not in {"image_plan", "qa_review", "plan_json"}:
             return
         payload["purpose"] = purpose
         payload.setdefault("endpoint", "/api/generate")
@@ -454,6 +456,235 @@ class AgentWorkflow:
             "style_tags": ["minimal", "pastel", "rounded", "diagram"],
             "source": "fallback",
         }
+
+    def _build_troubleshooting_context(self, selected: TopicCandidate) -> dict[str, str]:
+        body = re.sub(r"\s+", " ", str(getattr(selected, "body", "") or "")).strip()
+        chunks = re.split(r"(?<=[.!?])\s+", body)
+        quick = (chunks[0] if chunks else body)[:220]
+        fix2 = (chunks[1] if len(chunks) > 1 else body)[:220]
+        advanced = (chunks[2] if len(chunks) > 2 else body)[:220]
+        return {
+            "quick_take": quick or str(getattr(selected, "title", "") or "")[:220],
+            "fix2": fix2 or quick,
+            "advanced_fix": advanced or quick,
+        }
+
+    def _fallback_troubleshooting_plan(self, selected: TopicCandidate) -> dict[str, Any]:
+        long_tails = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (getattr(selected, "long_tail_keywords", []) or [])
+            if str(x or "").strip()
+        ]
+        keyword = long_tails[0] if long_tails else re.sub(r"\s+", " ", str(getattr(selected, "title", "") or "")).strip()
+        keyword = keyword or "device not working fix"
+        device = self._infer_device_type(f"{keyword}\n{selected.title}")
+        cluster = self._infer_cluster_id_from_keyword(keyword)
+        fix_steps = [
+            {
+                "step_title": "Restart and isolate the issue",
+                "action": f"Restart your {device} device and reproduce the issue in one app only.",
+                "menu_path": "",
+                "expected_result": "Expected result: you can confirm if this is app-specific or system-wide.",
+                "if_not_worked_next": "If not worked, continue with system and app updates.",
+                "risk_level": "low",
+            },
+            {
+                "step_title": "Install pending updates",
+                "action": "Install all pending OS and app updates, then reboot once.",
+                "menu_path": "Settings > Update",
+                "expected_result": "Expected result: update-related bugs are reduced.",
+                "if_not_worked_next": "If not worked, reset the affected app settings.",
+                "risk_level": "low",
+            },
+            {
+                "step_title": "Reset app-level settings",
+                "action": "Reset app preferences or clear cache without removing account data.",
+                "menu_path": "Settings > Apps",
+                "expected_result": "Expected result: corrupted local preferences stop causing failures.",
+                "if_not_worked_next": "If not worked, sign out and sign in to refresh app state.",
+                "risk_level": "low",
+            },
+            {
+                "step_title": "Refresh connectivity and permissions",
+                "action": "Toggle required network and permission settings off and on once.",
+                "menu_path": "Settings > Network / Privacy",
+                "expected_result": "Expected result: stale permission or network state is cleared.",
+                "if_not_worked_next": "If not worked, reset network settings.",
+                "risk_level": "low",
+            },
+            {
+                "step_title": "Reinstall safely",
+                "action": "Reinstall the affected app and keep only minimal settings during first launch.",
+                "menu_path": "Settings > Apps > Reinstall",
+                "expected_result": "Expected result: broken binaries or stale caches are removed.",
+                "if_not_worked_next": "If not worked, test in safe mode / clean boot.",
+                "risk_level": "medium",
+            },
+            {
+                "step_title": "Run diagnostics and escalate",
+                "action": "Collect exact error text and contact official support with reproduction steps.",
+                "menu_path": "Settings > Support",
+                "expected_result": "Expected result: support can identify root cause faster.",
+                "if_not_worked_next": "If not worked, stop advanced changes and wait for vendor guidance.",
+                "risk_level": "medium",
+            },
+        ]
+        return {
+            "primary_keyword": keyword,
+            "device_family": device,
+            "issue_summary": f"Practical troubleshooting plan for {device} users dealing with {cluster} issues.",
+            "symptom_phrases": [
+                f"{keyword} after update",
+                f"{device} feature not responding",
+                "app opens but function fails",
+                "settings reset keeps returning",
+            ],
+            "likely_causes": [
+                "Recent update changed defaults.",
+                "Corrupted cache or local configuration.",
+                "Permission mismatch after update.",
+                "Network profile conflict.",
+                f"{cluster} configuration conflict.",
+            ],
+            "fix_steps": fix_steps,
+            "verification": [
+                "Confirm the issue is resolved twice in a row.",
+                "Reboot and verify the fix persists.",
+                "Test with a second app or account.",
+            ],
+            "when_to_stop": [
+                "Stop if instructions ask for unknown firmware-level changes.",
+                "Stop if actions require deleting unknown system files.",
+                "Stop when no change after all safe software steps.",
+            ],
+            "safe_warnings": [
+                "Back up important files before reset actions.",
+                "Avoid unofficial one-click repair tools.",
+                "Use official support for account security lockouts.",
+            ],
+            "faq": [
+                {
+                    "question": "How long should I test each fix?",
+                    "answer": "Test each step for 2 to 5 minutes before moving on.",
+                },
+                {
+                    "question": "Should I reinstall first?",
+                    "answer": "No. Start with low-risk checks and updates first.",
+                },
+                {
+                    "question": "Could this be update-related?",
+                    "answer": "Yes. Many issues appear right after updates change defaults.",
+                },
+                {
+                    "question": "When should I contact support?",
+                    "answer": "Contact support after all safe software fixes fail.",
+                },
+            ],
+            "internal_links_anchor_ideas": [
+                f"{device} update issue checklist",
+                f"{device} safe reset steps",
+                f"fix {cluster} issue safely",
+                "expected result troubleshooting checklist",
+                "when to reinstall app",
+                "when to contact official support",
+            ],
+            "meta_description_seed": (
+                f"{keyword}: step-by-step software fixes with expected results, fallback actions, "
+                f"and safe escalation tips for {device} users."
+            )[:160],
+            "source": "fallback",
+        }
+
+    def _build_troubleshooting_plan_with_local_llm(self, selected: TopicCandidate) -> dict[str, Any]:
+        fallback_plan = self._fallback_troubleshooting_plan(selected)
+        max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
+        plan_enabled = bool(getattr(self.settings.local_llm, "plan_json_enabled", True))
+        if not plan_enabled:
+            self._log_ollama_event(
+                "ollama_plan_json_skipped_disabled",
+                {"purpose": "plan_json", "success": False, "fallback_used": True},
+            )
+            return fallback_plan
+        if self._local_llm_calls_in_post >= max_calls:
+            self._log_ollama_event(
+                "ollama_plan_json_skipped_budget",
+                {"purpose": "plan_json", "success": False, "fallback_used": True},
+            )
+            return fallback_plan
+        ready, reason = self._prepare_local_llm()
+        if not ready:
+            self._log_ollama_event(
+                "ollama_plan_json_skipped_unavailable",
+                {"purpose": "plan_json", "success": False, "fallback_used": True, "reason": reason},
+            )
+            return fallback_plan
+
+        long_tails = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (getattr(selected, "long_tail_keywords", []) or [])
+            if str(x or "").strip()
+        ]
+        keyword = long_tails[0] if long_tails else re.sub(r"\s+", " ", str(getattr(selected, "title", "") or "")).strip()
+        keyword = keyword or "device not working fix"
+        device_type = self._infer_device_type(f"{keyword}\n{selected.title}")
+        cluster_id = self._infer_cluster_id_from_keyword(keyword)
+        context = self._build_troubleshooting_context(selected)
+        prompt_len_est = len(keyword) + len(device_type) + len(cluster_id) + sum(len(str(v or "")) for v in context.values())
+        started = time.perf_counter()
+        try:
+            plan = self.ollama_client.build_troubleshooting_plan(
+                keyword=keyword,
+                device_type=device_type,
+                cluster_id=cluster_id,
+                context=context,
+            )
+            self._local_llm_calls_in_post += 1
+            self._local_llm_used_last_run = True
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            payload = asdict(plan)
+            payload["source"] = "ollama"
+            self._log_ollama_event(
+                "ollama_plan_json_ok",
+                {
+                    "purpose": "plan_json",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": True,
+                    "fallback_used": False,
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": int(len(json.dumps(payload, ensure_ascii=False))),
+                },
+            )
+            return payload
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            self._log_ollama_event(
+                "ollama_plan_json_failed",
+                {
+                    "purpose": "plan_json",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": False,
+                    "fallback_used": True,
+                    "error": str(exc),
+                    "reason": reason,
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": 0,
+                },
+            )
+            return fallback_plan
+
+    def _evaluate_actionability_gate(self, title: str, html: str) -> ActionabilityGateResult:
+        cfg = getattr(self.settings, "actionability_gate", None)
+        if cfg is None or (not bool(getattr(cfg, "enabled", True))):
+            return ActionabilityGateResult(ok=True, score=100, reasons=[], details={"enabled": False})
+        return self.actionability_gate.evaluate(
+            title=title,
+            html=html,
+            min_steps=max(1, int(getattr(cfg, "min_steps", 8) or 8)),
+            min_word_count=max(200, int(getattr(cfg, "min_word_count", 900) or 900)),
+            max_generic_ratio=float(getattr(cfg, "max_generic_ratio", 0.012) or 0.012),
+        )
 
     def _build_image_prompt_plan_with_local_llm(self, draft: DraftPost, selected: TopicCandidate) -> dict[str, Any]:
         max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
@@ -1180,6 +1411,15 @@ class AgentWorkflow:
         )
         if collect_note:
             generation_degraded_note = self._append_note(generation_degraded_note, collect_note)
+        self._progress("plan", "트러블슈팅 플랜 구성", 34)
+        troubleshooting_plan = self._profile_call(
+            "build_troubleshooting_plan",
+            lambda: self._build_troubleshooting_plan_with_local_llm(selected),
+            slow_ms=2600,
+        )
+        plan_source = str((troubleshooting_plan or {}).get("source", "fallback") or "fallback").strip().lower()
+        if plan_source != "ollama":
+            generation_degraded_note = self._append_note(generation_degraded_note, f"plan_source={plan_source}")
         headline_note = ""
         self._progress("draft", "본문 초안 생성", 40)
         current_domain = self._infer_domain_from_title(str(getattr(selected, "title", "") or ""))
@@ -1209,6 +1449,7 @@ class AgentWorkflow:
                         pattern_instruction,
                         reference_guidance,
                         domain=current_domain,
+                        plan=troubleshooting_plan,
                     )
                 except Exception as exc:
                     if self.brain.call_count:
@@ -1290,6 +1531,7 @@ class AgentWorkflow:
             title=draft.title,
             candidate=selected,
             global_keywords=global_keywords,
+            preferred_keyword=str((troubleshooting_plan or {}).get("primary_keyword", "") or ""),
         )
 
         similarity = self._similarity_ratio(draft.html, selected.body)
@@ -1529,6 +1771,85 @@ class AgentWorkflow:
                     + str(judge_score)
                     + ((";" + ";".join(judge_issues[:3])) if judge_issues else ""),
                 )
+
+        actionability_result = self._profile_call(
+            "actionability_gate_initial",
+            lambda: self._evaluate_actionability_gate(draft.title, final_html),
+            slow_ms=1200,
+        )
+        if (not actionability_result.ok) and (not free_local_mode):
+            self._progress("qa", "액션 가능성 강화 재작성", 66)
+            try:
+                generation_count += 1
+                rewritten_html = self._profile_call(
+                    "rewrite_to_actionable",
+                    lambda: self.brain.rewrite_to_actionable(
+                        title=draft.title,
+                        html=final_html,
+                        plan=troubleshooting_plan,
+                    ),
+                    slow_ms=3500,
+                )
+                if self.brain.call_count:
+                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                    self.brain.reset_run_counter()
+                if rewritten_html and rewritten_html != final_html:
+                    final_html = self._sanitize_publish_html(rewritten_html, domain=current_domain)
+                    final_html = self._canonicalize_html_payload(final_html)
+                    qa_result = self._qa_evaluate(
+                        final_html,
+                        title=draft.title,
+                        domain=current_domain,
+                        keyword=str(getattr(selected, "title", "") or ""),
+                        context="actionability_rewrite",
+                    )
+                    actionability_result = self._profile_call(
+                        "actionability_gate_after_rewrite",
+                        lambda: self._evaluate_actionability_gate(draft.title, final_html),
+                        slow_ms=1200,
+                    )
+                    generation_degraded_note = self._append_note(generation_degraded_note, "actionability_rewrite_applied")
+            except Exception as exc:
+                if self.brain.call_count:
+                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                    self.brain.reset_run_counter()
+                generation_degraded_note = self._append_note(
+                    generation_degraded_note,
+                    f"actionability_rewrite_failed:{str(exc)[:140]}",
+                )
+
+        if not actionability_result.ok:
+            reason_tags = ",".join(actionability_result.reasons[:6]) if actionability_result.reasons else "unknown"
+            hold_reason = f"actionability_gate_failed:{reason_tags}"
+            hold_labels = self._build_public_labels(
+                title=draft.title,
+                candidate=selected,
+                global_keywords=global_keywords,
+                max_labels=6,
+            )
+            working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                current_draft_post_id=working_draft_id,
+                stage="hold",
+                title=draft.title,
+                html_body=final_html,
+                labels=hold_labels,
+                reason=hold_reason,
+            )
+            hold_msg = f"{hold_reason};score={actionability_result.score}"
+            if hold_note:
+                hold_msg += f" | {hold_note}"
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=max(0, int(actionability_result.score)),
+                    title=draft.title,
+                    source_url=draft.source_url,
+                    published_url="",
+                    note=hold_msg,
+                )
+            )
+            self._workflow_perf_finish_run("hold", hold_msg)
+            return WorkflowResult("hold", hold_msg)
 
         working_draft_id, draft_note = self._sync_stage_draft_checkpoint(
             current_draft_post_id=working_draft_id,
@@ -3171,6 +3492,7 @@ class AgentWorkflow:
         title: str,
         candidate: TopicCandidate | None,
         global_keywords: list[str] | None,
+        preferred_keyword: str = "",
     ) -> str:
         raw = re.sub(r"\s+", " ", str(title or "")).strip()
         base_candidate_title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
@@ -3205,6 +3527,10 @@ class AgentWorkflow:
 
         if mode == "tech_troubleshoot_only" and not re.search(r"\b(2026|\d+ fixes?)\b", lower):
             raw = f"{raw} (2026 Fix Guide)"
+        pref = re.sub(r"\s+", " ", str(preferred_keyword or "")).strip()
+        if pref and pref.lower() not in raw.lower():
+            if len(pref) <= 75:
+                raw = f"{pref}: {raw}".strip(" :")
         raw = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", raw)
         raw = re.sub(r"\s+", " ", raw).strip()
         return raw[:120]

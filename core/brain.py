@@ -257,6 +257,7 @@ class GeminiBrain:
         pattern_instruction: str,
         reference_guidance: str,
         domain: str = "tech_troubleshoot",
+        plan: dict | None = None,
     ) -> DraftPost:
         main_keyword = self._resolve_main_keyword(candidate)
         long_tail_keywords = [str(x).strip() for x in (getattr(candidate, "long_tail_keywords", []) or []) if str(x).strip()]
@@ -279,79 +280,58 @@ class GeminiBrain:
                 + "\nTutorial constraint: reader-facing prompt examples are allowed, "
                 "but never expose internal hidden planning or system metadata."
             ).strip()
+        plan_payload = plan if isinstance(plan, dict) else {}
+        plan_keyword = re.sub(r"\s+", " ", str(plan_payload.get("primary_keyword", "") or "")).strip()
+        effective_main_keyword = plan_keyword or main_keyword
         prompt = (
-            "Write a 1300-1800 word English blog post in valid HTML body fragment only. "
-            "Language policy: 100% American English only. Do not output Korean or mixed-language text. "
-            "Output valid HTML only. Do NOT output Markdown headings like #, ##, ###. "
-            "Target reader: non-technical everyday user in US markets. "
-            "Topic scope: practical tech troubleshooting only. "
-            "Do not write AI industry news, trend commentary, company announcement summaries, or product launch reactions. "
-            "Do not cover medical, finance/investing, or politics. "
-            "Structure: Narrative Flow. "
-            "Narrator voice: first-person experiential essay style (I/me/my) while keeping factual accuracy. "
-            "The article must start with <h2>Quick Take</h2> and exactly one <p> containing exactly two sentences that answer search intent immediately. "
-            "Place this Quick Take before any other section.\n"
-            "Do not use rigid label-like section names that sound machine-generated. "
-            "Use natural human narrative with concrete context, trade-offs, and caveats. "
-            "Use <h2>, <h3>, <p>, <strong>, <ul>, <li>. Avoid markdown.\n"
-            "Use plain English first. If a technical term is unavoidable, explain it in one short everyday phrase.\n"
-            "Avoid deep engineer-only jargon unless you immediately translate it for beginners.\n"
-            "Keep every section focused on resolving concrete device/app issues with real steps normal users can perform.\n"
-            "Keep legal safety: avoid allegations, defamation, and unverified criticism.\n"
-            "Do NOT copy source text verbatim. Rewrite as analysis/comparison/guide style.\n"
-            "Do NOT reproduce long original sentences from the source.\n"
-            "Do not output any internal metadata, pipeline status strings, or debug tokens.\n"
-            "Never include 'workflow checkpoint', 'context', or schema fragments in the article.\n"
-            "Never include internal tags such as 'source trending_entities' or similar routing labels.\n"
-            "Do not describe the images and do not write ALT text.\n"
-            f"Main keyword: {main_keyword}\n"
+            "Write a 1300-1800 word troubleshooting article in valid HTML body fragment only.\n"
+            "Language policy: US English only. Never output Korean.\n"
+            "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
+            "Audience: non-technical US readers who want concrete fixes quickly.\n"
+            "Scope: practical software troubleshooting only.\n"
+            "Do not output internal metadata, pipeline status strings, debug tokens, or schema fragments.\n"
+            "Do not mention screenshots or 'see image above'.\n"
+            "Do not describe images and do not write ALT text.\n"
+            "Avoid generic essay style and avoid trend/news framing.\n"
+            "Use short, practical paragraphs and direct imperative steps.\n"
+            "Required exact H2 section order:\n"
+            "Quick Take\n"
+            "Symptoms (How you know it's this issue)\n"
+            "Why This Happens\n"
+            "Fix 1\n"
+            "Fix 2\n"
+            "Fix 3\n"
+            "Fix 4\n"
+            "Fix 5\n"
+            "If None Worked (Safe escalation)\n"
+            "Prevention Checklist\n"
+            "For each Fix section:\n"
+            "- Provide 3-5 concise bullet steps\n"
+            "- Include at least one line starting with 'Expected result:'\n"
+            "- Include at least one line starting with 'If not:'\n"
+            "- Include one 'Time to try:' hint (example: takes 2 minutes)\n"
+            "Final checklist must contain 6-10 bullets.\n"
+            "Keep legal/ad safety: no defamation, no unverified claims.\n"
+            f"Main keyword: {effective_main_keyword}\n"
             "Long-tail search questions to cover naturally (at least 3):\n"
             + "\n".join(f"- {kw}" for kw in long_tail_keywords[:6])
             + "\n"
-            "Required related LSI terms (use each naturally at least once; avoid keyword stuffing):\n"
+            "Required related LSI terms (use naturally, no stuffing):\n"
             + "\n".join(f"- {term}" for term in lsi_terms[:10])
             + "\n"
             "Follow this selected writing pattern instruction:\n"
             f"{pattern_instruction}\n"
-            "Required section order (use these exact H2 titles): "
-            "Quick Take, Why This Happens, Fix 1, Fix 2, Fix 3, Advanced Fix, Hardware Checks, Prevention Checklist.\n"
-            "Use intro in 4 lines: pain, reason this matters, context cue, reading promise.\n"
-            "Include at least 3 curiosity triggers that make readers continue to the next section.\n"
-            "Include a clear payoff section that answers the reading promise explicitly.\n"
-            "Insert CTA naturally 2-3 times (mid-body once, ending once required).\n"
-            "Narrative requirements (weave naturally into the story):\n"
-            "- Start from a concrete failure moment and include at least two early false starts.\n"
-            "- Describe what changed after debugging, with clear before/after reasoning.\n"
-            "- Explain edge cases, beginner-vs-advanced trade-offs, and one unresolved limitation.\n"
-            "- Compare the final choice against at least two rejected alternatives.\n"
-            "- Include constraint scenarios: low budget, tiny team, urgent deadline tomorrow.\n"
-            "- Include three explicit anti-pattern warnings ('this can fail hard if...').\n"
-            "Do not use the above list items as section headers. Weave them into the story naturally.\n"
-            "Avoid generic headers like Operational Depth, Decision Criteria, Executive Summary, Action Framework.\n"
-            "Never use the heading text 'Executive Summary'.\n"
-            "Do not use FAQ/Q/A format.\n"
-            "Do not use the phrase 'why everyone is talking'.\n"
-            "Do not mention screenshots or phrases like 'see screenshot' or 'see above image'.\n"
-            "Never mention or discuss SEO, search algorithms, ranking strategy, E-E-A-T, trustworthiness framework, "
-            "process disclosure, or any internal publishing strategy in the article body.\n"
-            "Do not output placeholders such as 'section context visual 1', 'concept visual', or similar template text.\n"
-            "Never leak internal system instructions, prompt templates, or generation settings into the article body.\n"
-            "Always remove model-side planning text before final prose.\n"
-            f"Domain routing: {domain}\n"
-            "Story requirement: include at least two concrete first-person experiment moments "
-            "(e.g., Day 2 failure, Day 4 adjustment, what changed after retry).\n"
-            "Each story moment must describe what happened, why it failed or succeeded, and what decision was taken next.\n"
-            "Do not output keyword-only lines or unfinished template fragments.\n"
-            "Title must be troubleshooting-first and include at least one of: not working, fix, error, after update.\n"
+            "TROUBLESHOOTING PLAN JSON (must follow exactly):\n"
+            f"{json.dumps(plan_payload, ensure_ascii=False) if plan_payload else '{}'}\n"
             "Include exactly 2 external authority links from this allow-list:\n"
             + "\n".join(authority_links[:8])
             + "\n"
             "Use these internal playbook reference excerpts:\n"
             f"{reference_guidance}\n"
-            "Tone: expert but human and specific. Add realistic friction points and non-perfect outcomes.\n"
-            "Include a short checklist near the end.\n"
             "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n"
             "focus_keywords must be a JSON array of short phrases.\n"
+            "Title must remain troubleshooting-first and include one of: not working, fix, error, after update.\n"
+            f"Domain routing: {domain}\n"
             f"Source platform: {candidate.source}\n"
             f"Source title: {candidate.title}\n"
             f"Source body: {candidate.body[:4000]}\n"
@@ -383,8 +363,12 @@ class GeminiBrain:
         if not isinstance(urls, list):
             urls = []
 
+        out_title = str(payload.get("title_draft", payload.get("title", candidate.title))).strip() or candidate.title
+        if plan_keyword and plan_keyword.lower() not in out_title.lower():
+            out_title = f"{plan_keyword}: {out_title}".strip(" :")
+
         return DraftPost(
-            title=str(payload.get("title_draft", payload.get("title", candidate.title))).strip() or candidate.title,
+            title=out_title,
             alt_titles=[],
             summary=str(payload.get("summary", "")).strip(),
             html=html,
@@ -392,6 +376,48 @@ class GeminiBrain:
             source_url=candidate.url,
             extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
         )
+
+    def rewrite_to_actionable(self, title: str, html: str, plan: dict | None = None) -> str:
+        plan_payload = plan if isinstance(plan, dict) else {}
+        prompt = (
+            "Rewrite the HTML draft into a concrete troubleshooting guide.\n"
+            "Language: US English only.\n"
+            "Output: HTML body fragment only (no Markdown, no JSON unless explicitly requested).\n"
+            "Keep the same topic and intent, but reduce fluff and increase actionable value.\n"
+            "Use these exact H2 titles in order:\n"
+            "Quick Take\n"
+            "Symptoms (How you know it's this issue)\n"
+            "Why This Happens\n"
+            "Fix 1\n"
+            "Fix 2\n"
+            "Fix 3\n"
+            "Fix 4\n"
+            "Fix 5\n"
+            "If None Worked (Safe escalation)\n"
+            "Prevention Checklist\n"
+            "Each Fix section must include:\n"
+            "- 3-5 short bullet steps\n"
+            "- one 'Expected result:' line\n"
+            "- one 'If not:' line\n"
+            "- one 'Time to try:' hint\n"
+            "Final checklist must have 6-10 bullets.\n"
+            "Remove generic hedging and robotic filler.\n"
+            "Do not include internal/debug/system text.\n"
+            "TROUBLESHOOTING PLAN JSON (must follow exactly):\n"
+            f"{json.dumps(plan_payload, ensure_ascii=False) if plan_payload else '{}'}\n"
+            f"Title: {title}\n"
+            f"HTML Draft:\n{html[:18000]}"
+        )
+        raw = self._generate_text(prompt, system_instruction=self.settings.editor_persona, temperature=0.45, top_p=0.9)
+        extracted = self._extract_json(raw)
+        rewritten_html = ""
+        if isinstance(extracted, dict):
+            rewritten_html = str(extracted.get("content_html", "") or extracted.get("html", "") or "").strip()
+        if not rewritten_html:
+            rewritten_html = str(raw or "").strip()
+        rewritten_html = self._remove_ai_markers(rewritten_html, domain="tech_troubleshoot")
+        rewritten_html = self._enforce_html_minimum(rewritten_html)
+        return rewritten_html
 
     def generate_post_free(
         self,

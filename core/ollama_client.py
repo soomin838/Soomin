@@ -21,6 +21,22 @@ class ImagePromptPlan:
     style_tags: list[str]
 
 
+@dataclass
+class TroubleshootingPlan:
+    primary_keyword: str
+    device_family: str
+    issue_summary: str
+    symptom_phrases: list[str]
+    likely_causes: list[str]
+    fix_steps: list[dict[str, str]]
+    verification: list[str]
+    when_to_stop: list[str]
+    safe_warnings: list[str]
+    faq: list[dict[str, str]]
+    internal_links_anchor_ideas: list[str]
+    meta_description_seed: str
+
+
 class OllamaClient:
     def __init__(self, settings: LocalLLMSettings, log_path: Path | None = None) -> None:
         self.settings = settings
@@ -239,6 +255,53 @@ class OllamaClient:
             style_tags=style_tags,
         )
 
+    def build_troubleshooting_plan(
+        self,
+        *,
+        keyword: str,
+        device_type: str,
+        cluster_id: str,
+        context: dict[str, str] | None = None,
+    ) -> TroubleshootingPlan:
+        compact_context = {
+            k: re.sub(r"\s+", " ", str(v or "")).strip()[:240]
+            for k, v in (context or {}).items()
+            if str(k or "").strip()
+        }
+        system_prompt = (
+            "You are a troubleshooting planner for US consumer tech readers.\n"
+            "Return JSON only.\n"
+            "Language: US English only.\n"
+            "Scope: SOFTWARE troubleshooting only.\n"
+            "Do not include dangerous physical or electrical hazard scenes.\n"
+            "Make it beginner-safe and actionable.\n"
+            "Required JSON keys:\n"
+            "primary_keyword, device_family, issue_summary, symptom_phrases, likely_causes, fix_steps, "
+            "verification, when_to_stop, safe_warnings, faq, internal_links_anchor_ideas, meta_description_seed.\n"
+            "fix_steps must be an array of 6-10 objects with keys:\n"
+            "step_title, action, menu_path, expected_result, if_not_worked_next, risk_level.\n"
+            "risk_level must be low or medium.\n"
+            "faq must be an array of objects with keys question and answer.\n"
+            "Do not output markdown or commentary, only JSON."
+        )
+        user_payload = {
+            "keyword": str(keyword or ""),
+            "device_type": str(device_type or ""),
+            "cluster_id": str(cluster_id or ""),
+            "context": compact_context,
+        }
+        data = self.generate_json(
+            system_prompt=system_prompt,
+            user_payload=user_payload,
+            purpose="plan_json",
+        )
+        return self._normalize_troubleshooting_plan(
+            data=data,
+            keyword=keyword,
+            device_type=device_type,
+            cluster_id=cluster_id,
+        )
+
     def review_article_quality(
         self,
         *,
@@ -303,3 +366,410 @@ class OllamaClient:
             "rewrite_needed": rewrite_needed,
             "summary": summary,
         }
+
+    def _normalize_troubleshooting_plan(
+        self,
+        *,
+        data: dict[str, Any],
+        keyword: str,
+        device_type: str,
+        cluster_id: str,
+    ) -> TroubleshootingPlan:
+        device_family = self._normalize_device_family(str(data.get("device_family", "") or device_type))
+        primary_keyword = self._clean_plan_text(str(data.get("primary_keyword", "") or keyword), max_len=120)
+        if not primary_keyword:
+            primary_keyword = self._clean_plan_text(str(keyword or "device not working fix"), max_len=120)
+
+        issue_summary = self._clean_plan_text(str(data.get("issue_summary", "") or ""), max_len=220)
+        if not issue_summary:
+            issue_summary = (
+                f"This guide helps you fix a common {device_family} software issue with safe steps for everyday users."
+            )
+
+        symptom_defaults = self._default_symptoms(primary_keyword, device_family)
+        symptom_phrases = self._normalize_text_list(
+            data.get("symptom_phrases", []),
+            min_items=3,
+            max_items=6,
+            fallback=symptom_defaults,
+            max_len=120,
+        )
+        likely_causes = self._normalize_text_list(
+            data.get("likely_causes", []),
+            min_items=4,
+            max_items=7,
+            fallback=self._default_causes(device_family, cluster_id),
+            max_len=150,
+        )
+        fix_steps = self._normalize_fix_steps(
+            data.get("fix_steps", []),
+            device_family=device_family,
+            cluster_id=cluster_id,
+        )
+        verification = self._normalize_text_list(
+            data.get("verification", []),
+            min_items=3,
+            max_items=6,
+            fallback=self._default_verification(device_family),
+            max_len=150,
+        )
+        when_to_stop = self._normalize_text_list(
+            data.get("when_to_stop", []),
+            min_items=2,
+            max_items=4,
+            fallback=self._default_when_to_stop(device_family),
+            max_len=160,
+        )
+        safe_warnings = self._normalize_text_list(
+            data.get("safe_warnings", []),
+            min_items=2,
+            max_items=5,
+            fallback=self._default_safe_warnings(device_family),
+            max_len=170,
+        )
+        faq = self._normalize_faq(
+            data.get("faq", []),
+            primary_keyword=primary_keyword,
+            device_family=device_family,
+        )
+        anchors = self._normalize_text_list(
+            data.get("internal_links_anchor_ideas", []),
+            min_items=6,
+            max_items=10,
+            fallback=self._default_anchor_ideas(device_family, cluster_id),
+            max_len=90,
+        )
+
+        meta_seed = self._clean_plan_text(str(data.get("meta_description_seed", "") or ""), max_len=160)
+        if len(meta_seed) < 140:
+            suffix = f" Includes expected results, branch steps, and beginner-safe actions for {device_family} users."
+            meta_seed = self._clean_plan_text((meta_seed + " " + suffix).strip(), max_len=160)
+        if len(meta_seed) < 140:
+            meta_seed = self._clean_plan_text(
+                f"{primary_keyword}: step-by-step software fixes with expected results, fallback actions, and safe escalation tips for {device_family} users.",
+                max_len=160,
+            )
+
+        return TroubleshootingPlan(
+            primary_keyword=primary_keyword,
+            device_family=device_family,
+            issue_summary=issue_summary,
+            symptom_phrases=symptom_phrases,
+            likely_causes=likely_causes,
+            fix_steps=fix_steps,
+            verification=verification,
+            when_to_stop=when_to_stop,
+            safe_warnings=safe_warnings,
+            faq=faq,
+            internal_links_anchor_ideas=anchors,
+            meta_description_seed=meta_seed,
+        )
+
+    def _normalize_device_family(self, text: str) -> str:
+        low = str(text or "").strip().lower()
+        if "win" in low:
+            return "windows"
+        if "mac" in low:
+            return "mac"
+        if "iphone" in low or "ios" in low:
+            return "iphone"
+        if "galaxy" in low or "android" in low:
+            return "galaxy"
+        return "windows"
+
+    def _clean_plan_text(self, text: str, max_len: int = 220) -> str:
+        cleaned = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", str(text or ""))
+        for banned in self._hazard_terms():
+            cleaned = re.sub(re.escape(banned), "software issue", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
+        return cleaned[: max(20, int(max_len))]
+
+    def _normalize_text_list(
+        self,
+        raw: Any,
+        *,
+        min_items: int,
+        max_items: int,
+        fallback: list[str],
+        max_len: int,
+    ) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        if isinstance(raw, list):
+            items = raw
+        else:
+            items = []
+        for v in items:
+            text = self._clean_plan_text(str(v or ""), max_len=max_len)
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+            if len(out) >= max_items:
+                break
+        for v in fallback:
+            if len(out) >= max_items:
+                break
+            text = self._clean_plan_text(str(v or ""), max_len=max_len)
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+        while len(out) < min_items:
+            out.append(self._clean_plan_text(fallback[(len(out)) % len(fallback)], max_len=max_len))
+        return out[:max_items]
+
+    def _normalize_fix_steps(
+        self,
+        raw: Any,
+        *,
+        device_family: str,
+        cluster_id: str,
+    ) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        if isinstance(raw, list):
+            rows = raw
+        else:
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            step = {
+                "step_title": self._clean_plan_text(str(row.get("step_title", "") or ""), max_len=80),
+                "action": self._clean_plan_text(str(row.get("action", "") or ""), max_len=220),
+                "menu_path": self._clean_plan_text(str(row.get("menu_path", "") or ""), max_len=160),
+                "expected_result": self._clean_plan_text(str(row.get("expected_result", "") or ""), max_len=220),
+                "if_not_worked_next": self._clean_plan_text(str(row.get("if_not_worked_next", "") or ""), max_len=220),
+                "risk_level": self._clean_plan_text(str(row.get("risk_level", "") or "low"), max_len=20).lower(),
+            }
+            if not step["step_title"] or not step["action"]:
+                continue
+            if step["risk_level"] not in {"low", "medium"}:
+                step["risk_level"] = "low"
+            if not step["expected_result"]:
+                step["expected_result"] = "Expected result: the issue becomes less frequent or stops."
+            if not step["if_not_worked_next"]:
+                step["if_not_worked_next"] = "If not worked, move to the next fix in order."
+            out.append(step)
+            if len(out) >= 10:
+                break
+        fallback = self._default_fix_steps(device_family, cluster_id)
+        idx = 0
+        while len(out) < 6 and idx < len(fallback):
+            out.append(dict(fallback[idx]))
+            idx += 1
+        while len(out) < 6:
+            out.append(
+                {
+                    "step_title": f"Apply safe software fix {len(out) + 1}",
+                    "action": "Restart the app or device and apply one controlled settings change.",
+                    "menu_path": "",
+                    "expected_result": "Expected result: symptoms improve after one controlled change.",
+                    "if_not_worked_next": "If not worked, continue to the next structured fix.",
+                    "risk_level": "low",
+                }
+            )
+        return out[:10]
+
+    def _normalize_faq(self, raw: Any, *, primary_keyword: str, device_family: str) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        if isinstance(raw, list):
+            rows = raw
+        else:
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            q = self._clean_plan_text(str(row.get("question", "") or row.get("q", "") or ""), max_len=140)
+            a = self._clean_plan_text(str(row.get("answer", "") or row.get("a", "") or ""), max_len=220)
+            if not q or not a:
+                continue
+            out.append({"question": q, "answer": a})
+            if len(out) >= 6:
+                break
+        defaults = [
+            {
+                "question": f"How long should I test each fix for {primary_keyword}?",
+                "answer": "Test each fix for 2 to 5 minutes before switching to the next one.",
+            },
+            {
+                "question": f"Do I need to reinstall apps on {device_family} first?",
+                "answer": "No. Start with low-risk settings checks and updates before reinstalling.",
+            },
+            {
+                "question": "Can this be caused by a recent update?",
+                "answer": "Yes. Many issues appear after updates when old settings conflict with new defaults.",
+            },
+            {
+                "question": "When should I contact official support?",
+                "answer": "Contact support if the issue remains after all software fixes and safety checks.",
+            },
+            {
+                "question": "Will these steps delete my files?",
+                "answer": "Most steps are low risk, but always back up important files before reset actions.",
+            },
+        ]
+        i = 0
+        while len(out) < 4 and i < len(defaults):
+            out.append(defaults[i])
+            i += 1
+        return out[:6]
+
+    def _default_fix_steps(self, device_family: str, cluster_id: str) -> list[dict[str, str]]:
+        cluster_hint = self._clean_plan_text(cluster_id.replace("_", " "), max_len=80) or "core issue"
+        return [
+            {
+                "step_title": "Restart and isolate the symptom",
+                "action": f"Restart the {device_family} device and reproduce the {cluster_hint} issue with one app only.",
+                "menu_path": "",
+                "expected_result": "Expected result: you can confirm whether the issue is system-wide or app-specific.",
+                "if_not_worked_next": "If not worked, continue with OS and app updates.",
+                "risk_level": "low",
+            },
+            {
+                "step_title": "Install pending system updates",
+                "action": "Install all pending system updates, then reboot once.",
+                "menu_path": self._device_menu_path(device_family, "update"),
+                "expected_result": "Expected result: update-related bugs and compatibility issues are reduced.",
+                "if_not_worked_next": "If not worked, update the affected app only and test again.",
+                "risk_level": "low",
+            },
+            {
+                "step_title": "Reset the affected app settings",
+                "action": "Reset in-app preferences or clear app cache without deleting account data when possible.",
+                "menu_path": self._device_menu_path(device_family, "apps"),
+                "expected_result": "Expected result: corrupted local settings no longer trigger the issue.",
+                "if_not_worked_next": "If not worked, sign out and sign in to refresh app state.",
+                "risk_level": "low",
+            },
+            {
+                "step_title": "Toggle network and permissions",
+                "action": "Toggle Wi-Fi/Bluetooth/cellular or required permissions off and on once.",
+                "menu_path": self._device_menu_path(device_family, "network"),
+                "expected_result": "Expected result: stale connectivity or permission states are refreshed.",
+                "if_not_worked_next": "If not worked, reset network settings and reconnect.",
+                "risk_level": "low",
+            },
+            {
+                "step_title": "Reinstall the affected app safely",
+                "action": "Uninstall and reinstall the affected app, then restore minimal settings only.",
+                "menu_path": self._device_menu_path(device_family, "apps"),
+                "expected_result": "Expected result: broken binaries and cached conflicts are removed.",
+                "if_not_worked_next": "If not worked, test in safe/clean boot mode to isolate conflicts.",
+                "risk_level": "medium",
+            },
+            {
+                "step_title": "Run safe diagnostics and escalate",
+                "action": "Collect logs or error messages and contact official support with exact reproduction steps.",
+                "menu_path": self._device_menu_path(device_family, "support"),
+                "expected_result": "Expected result: support can identify root cause faster with reproducible evidence.",
+                "if_not_worked_next": "If not worked, stop advanced changes and wait for vendor-level fix guidance.",
+                "risk_level": "medium",
+            },
+        ]
+
+    def _default_symptoms(self, keyword: str, device_family: str) -> list[str]:
+        return [
+            f"{keyword} issue appears after restart",
+            f"{device_family} feature stops responding randomly",
+            "Settings changes do not persist after reboot",
+            "App opens but the core function fails",
+        ]
+
+    def _default_causes(self, device_family: str, cluster_id: str) -> list[str]:
+        cluster_hint = self._clean_plan_text(cluster_id.replace("_", " "), max_len=80)
+        return [
+            "A recent update changed default behavior.",
+            "Corrupted app cache or stale local configuration.",
+            "Permission mismatch after system or app updates.",
+            "Network profile conflict or DNS inconsistency.",
+            f"Feature-specific conflict around {cluster_hint} settings on {device_family}.",
+        ]
+
+    def _default_verification(self, device_family: str) -> list[str]:
+        return [
+            f"Confirm the core function works twice in a row on {device_family}.",
+            "Reboot once and verify the fix persists.",
+            "Test with a second app or account to validate system stability.",
+        ]
+
+    def _default_when_to_stop(self, device_family: str) -> list[str]:
+        return [
+            f"Stop if you are asked to perform firmware or BIOS changes you do not understand on {device_family}.",
+            "Stop if steps request deleting unknown system files.",
+            "Stop if repeated resets show no change after all safe software fixes.",
+        ]
+
+    def _default_safe_warnings(self, device_family: str) -> list[str]:
+        return [
+            "Back up important files before reset or reinstall steps.",
+            "Avoid unofficial tools that promise one-click miracle fixes.",
+            f"Use official support channels for account or security lockouts on {device_family}.",
+        ]
+
+    def _default_anchor_ideas(self, device_family: str, cluster_id: str) -> list[str]:
+        cluster_hint = self._clean_plan_text(cluster_id.replace("_", " "), max_len=60)
+        return [
+            f"{device_family} update issue checklist",
+            f"{device_family} settings reset steps",
+            f"fix {cluster_hint} safely",
+            "how to verify troubleshooting results",
+            "when to reinstall app vs reset settings",
+            "network reset without data loss",
+            "safe escalation to official support",
+        ]
+
+    def _device_menu_path(self, device_family: str, mode: str) -> str:
+        family = self._normalize_device_family(device_family)
+        if family == "windows":
+            mapping = {
+                "update": "Settings > Windows Update",
+                "apps": "Settings > Apps > Installed apps",
+                "network": "Settings > Network & Internet",
+                "support": "Settings > System > Troubleshoot",
+            }
+            return mapping.get(mode, "")
+        if family == "mac":
+            mapping = {
+                "update": "System Settings > General > Software Update",
+                "apps": "System Settings > General > Login Items",
+                "network": "System Settings > Wi-Fi",
+                "support": "System Settings > Privacy & Security",
+            }
+            return mapping.get(mode, "")
+        if family == "iphone":
+            mapping = {
+                "update": "Settings > General > Software Update",
+                "apps": "Settings > Apps",
+                "network": "Settings > Wi-Fi / Cellular",
+                "support": "Settings > Privacy & Security",
+            }
+            return mapping.get(mode, "")
+        mapping = {
+            "update": "Settings > Software update",
+            "apps": "Settings > Apps",
+            "network": "Settings > Connections",
+            "support": "Settings > Device care",
+        }
+        return mapping.get(mode, "")
+
+    def _hazard_terms(self) -> tuple[str, ...]:
+        return (
+            "fire",
+            "smoke",
+            "explosion",
+            "hazard",
+            "injury",
+            "blood",
+            "electrical",
+            "shock",
+            "burning",
+            "damaged hardware",
+            "cracked screen",
+        )

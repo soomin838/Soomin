@@ -153,6 +153,12 @@ quality:
   partial_fix_enabled: true
   partial_fix_story_first: true
 
+actionability_gate:
+  enabled: true
+  min_steps: 8
+  min_word_count: 900
+  max_generic_ratio: 0.012
+
 qa:
   prompt_leak_patterns:
     - "real-time trend focus"
@@ -321,6 +327,7 @@ content_mode:
 local_llm:
   enabled: true
   provider: "ollama"
+  plan_json_enabled: true
   model: "qwen2.5:3b"
   base_url: "http://127.0.0.1:11434"
   num_ctx: 2048

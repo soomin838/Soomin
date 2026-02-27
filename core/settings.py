@@ -264,6 +264,14 @@ class QualitySettings:
 
 
 @dataclass
+class ActionabilityGateSettings:
+    enabled: bool = True
+    min_steps: int = 8
+    min_word_count: int = 900
+    max_generic_ratio: float = 0.012
+
+
+@dataclass
 class TopicGrowthSettings:
     enabled: bool = True
     daily_new_topics: int = 10
@@ -359,6 +367,7 @@ class LLMPolicySettings:
 class LocalLLMSettings:
     enabled: bool = True
     provider: str = "ollama"
+    plan_json_enabled: bool = True
     model: str = "qwen2.5:3b"
     base_url: str = "http://127.0.0.1:11434"
     num_ctx: int = 2048
@@ -429,6 +438,7 @@ class AppSettings:
     budget: BudgetSettings = field(default_factory=BudgetSettings)
     publish: PublishSettings = field(default_factory=PublishSettings)
     quality: QualitySettings = field(default_factory=QualitySettings)
+    actionability_gate: ActionabilityGateSettings = field(default_factory=ActionabilityGateSettings)
     topic_growth: TopicGrowthSettings = field(default_factory=TopicGrowthSettings)
     keyword_pool: KeywordPoolSettings = field(default_factory=KeywordPoolSettings)
     integrations: IntegrationSettings = field(default_factory=IntegrationSettings)
@@ -463,6 +473,7 @@ def load_settings(path: Path) -> AppSettings:
     raw = _load_yaml(path)
     settings_warnings: list[str] = []
     quality_raw = dict(raw.get("quality", {}) or {})
+    actionability_raw = dict(raw.get("actionability_gate", {}) or {})
     qa_raw = raw.get("qa", {}) or {}
     content_raw = dict(raw.get("content", {}) or {})
     content_mode_raw = dict(raw.get("content_mode", {}) or {})
@@ -674,6 +685,7 @@ def load_settings(path: Path) -> AppSettings:
         budget=_construct_dc(BudgetSettings, raw.get("budget", {})),
         publish=publish_obj,
         quality=_construct_dc(QualitySettings, quality_raw),
+        actionability_gate=_construct_dc(ActionabilityGateSettings, actionability_raw),
         topic_growth=_construct_dc(TopicGrowthSettings, raw.get("topic_growth", {})),
         keyword_pool=_construct_dc(KeywordPoolSettings, raw.get("keyword_pool", {})),
         integrations=_construct_dc(IntegrationSettings, raw.get("integrations", {})),
