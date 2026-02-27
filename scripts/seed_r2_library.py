@@ -3,13 +3,18 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from core.r2_uploader import R2Config, upload_file
 from core.settings import load_settings
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1]
+    root = ROOT
     settings = load_settings(root / "config" / "settings.yaml")
     r2 = getattr(settings.publish, "r2", None)
     cfg = R2Config(
@@ -61,4 +66,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
