@@ -94,6 +94,7 @@ class AgentWorkflow:
             strict_thumbnail_blogger_media=bool(getattr(settings.publish, "strict_thumbnail_blogger_media", True)),
             thumbnail_data_uri_allowed=bool(getattr(settings.publish, "thumbnail_data_uri_allowed", False)),
             auto_allow_data_uri_on_blogger_405=bool(getattr(settings.publish, "auto_allow_data_uri_on_blogger_405", False)),
+            min_required_images=int(getattr(settings.publish, "min_images_required", 0) or 0),
         )
         self.qa = ContentQAGate(
             settings.quality,
@@ -628,6 +629,15 @@ class AgentWorkflow:
                 "title": str(title or "")[:120],
             },
         )
+
+    def _image_target_max(self) -> int:
+        configured_max = int(getattr(self.settings.publish, "max_images_per_post", 5) or 5)
+        visual_target = int(getattr(self.settings.visual, "target_images_per_post", configured_max) or configured_max)
+        return max(0, min(5, configured_max, visual_target))
+
+    def _image_min_required(self) -> int:
+        requested = int(getattr(self.settings.publish, "min_images_required", 0) or 0)
+        return max(0, min(self._image_target_max(), requested))
 
     def _pick_images_from_library_or_guard(self, *, title: str, min_count: int) -> list[ImageAsset]:
         if is_news_mode(self.settings):
@@ -2550,7 +2560,8 @@ class AgentWorkflow:
                 return WorkflowResult("hold", hold_reason)
 
             self._progress("visual", "뉴스 이미지/썸네일 구성", 72)
-            target_images = max(5, int(getattr(self.settings.visual, "target_images_per_post", 5) or 5))
+            target_images = self._image_target_max()
+            min_images_required = self._image_min_required()
             required_inline = max(0, target_images - 1)
             news_tags = self._news_pack_tags_for_candidate(selected, category)
             picked_pack, emergency_notes = self._profile_call(
@@ -2568,47 +2579,53 @@ class AgentWorkflow:
             inline_rows = list(getattr(picked_pack, "inline_bg", []) or [])
             if (not thumb_row) or len(inline_rows) < required_inline:
                 available_count = (1 if thumb_row else 0) + len(inline_rows)
-                hold_reason = f"image_understock_after_recovery({available_count}/{target_images})"
-                self.logs.append_run(
-                    RunRecord(
-                        status="hold",
-                        score=0,
-                        title=draft.title,
-                        source_url=draft.source_url,
-                        published_url="",
-                        note=self._append_note(hold_reason, degraded_note),
+                if available_count < min_images_required:
+                    hold_reason = f"image_understock_min_required({available_count}/{min_images_required})"
+                    self.logs.append_run(
+                        RunRecord(
+                            status="hold",
+                            score=0,
+                            title=draft.title,
+                            source_url=draft.source_url,
+                            published_url="",
+                            note=self._append_note(hold_reason, degraded_note),
+                        )
                     )
-                )
-                self._workflow_perf_finish_run("hold", hold_reason)
-                return WorkflowResult("hold", hold_reason)
-            thumb_asset = self._render_news_thumb_overlay(
-                thumb_row=thumb_row,
-                category=category,
-                title=draft.title,
-            )
-            if thumb_asset is None:
-                hold_reason = "thumb_overlay_failed:no_thumb_asset"
-                self.logs.append_run(
-                    RunRecord(
-                        status="hold",
-                        score=0,
-                        title=draft.title,
-                        source_url=draft.source_url,
-                        published_url="",
-                        note=self._append_note(hold_reason, degraded_note),
-                    )
-                )
-                self._workflow_perf_finish_run("hold", hold_reason)
-                return WorkflowResult("hold", hold_reason)
+                    self._workflow_perf_finish_run("hold", hold_reason)
+                    return WorkflowResult("hold", hold_reason)
 
-            images: list[ImageAsset] = [thumb_asset]
-            for idx, row in enumerate(inline_rows[:required_inline], start=1):
+            images: list[ImageAsset] = []
+            if thumb_row:
+                thumb_asset = self._render_news_thumb_overlay(
+                    thumb_row=thumb_row,
+                    category=category,
+                    title=draft.title,
+                )
+                if thumb_asset is not None:
+                    images.append(thumb_asset)
+                elif min_images_required > 0:
+                    hold_reason = "thumb_overlay_failed:no_thumb_asset"
+                    self.logs.append_run(
+                        RunRecord(
+                            status="hold",
+                            score=0,
+                            title=draft.title,
+                            source_url=draft.source_url,
+                            published_url="",
+                            note=self._append_note(hold_reason, degraded_note),
+                        )
+                    )
+                    self._workflow_perf_finish_run("hold", hold_reason)
+                    return WorkflowResult("hold", hold_reason)
+
+            inline_cap = max(0, target_images - (1 if images else 0))
+            for idx, row in enumerate(inline_rows[:inline_cap], start=1):
                 asset = self._news_pack_record_to_asset(dict(row or {}), idx)
                 if asset is None:
                     continue
                 images.append(asset)
-            if len(images) < target_images:
-                hold_reason = f"image_understock_after_recovery({len(images)}/{target_images})"
+            if len(images) < min_images_required:
+                hold_reason = f"image_understock_min_required({len(images)}/{min_images_required})"
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -2621,22 +2638,25 @@ class AgentWorkflow:
                 )
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
+            if len(images) > target_images:
+                images = images[:target_images]
 
             dry_run = bool(getattr(self.settings.budget, "dry_run", False))
             preflight_thumb_src = ""
             if dry_run:
                 gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
             else:
-                preflight_thumb_src = str(getattr(images[0], "source_url", "") or "").strip()
-                if not preflight_thumb_src:
-                    images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
-                        draft=draft,
-                        candidate=selected,
-                        images=images,
-                        prompt_plan={"source": "news_pack_picker"},
-                        max_attempts=2,
-                        manual_trigger=manual_trigger,
-                    )
+                if images:
+                    preflight_thumb_src = str(getattr(images[0], "source_url", "") or "").strip()
+                    if not preflight_thumb_src:
+                        images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
+                            draft=draft,
+                            candidate=selected,
+                            images=images,
+                            prompt_plan={"source": "news_pack_picker"},
+                            max_attempts=2,
+                            manual_trigger=manual_trigger,
+                        )
                 creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
                 gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
                     final_html,
@@ -2651,6 +2671,7 @@ class AgentWorkflow:
                 domain=current_domain,
                 keyword=selected.title,
                 context="news_post_image",
+                include_image_integrity=bool(images),
                 phase="post_images",
             )
             if post_image_qa.has_hard_failure:
@@ -3967,7 +3988,8 @@ class AgentWorkflow:
             generation_degraded_note = self._append_note(generation_degraded_note, draft_note)
 
         self._progress("visual", "이미지 라이브러리 선택", 74)
-        target_images = max(5, int(self.settings.visual.target_images_per_post or 5))
+        target_images = self._image_target_max()
+        min_images_required = self._image_min_required()
         self._set_image_pipeline_state("running", 0, target_images, "이미지 라이브러리 선택 시작")
         image_prompt_plan: dict[str, Any] = {"source": "library"}
         images = self._profile_call(
@@ -3980,14 +4002,14 @@ class AgentWorkflow:
         )
         images = self.visual.ensure_unique_assets(images)
         image_kind_counts = Counter((getattr(img, "source_kind", "") or "unknown") for img in images)
-        if len(images) < target_images:
+        if len(images) < min_images_required:
             hold_labels = self._build_public_labels(
                 title=draft.title,
                 candidate=selected,
                 global_keywords=global_keywords,
                 max_labels=6,
             )
-            policy_reason = f"image_library_shortage({len(images)}/{target_images})"
+            policy_reason = f"image_library_shortage_min_required({len(images)}/{min_images_required})"
             working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
                 current_draft_post_id=working_draft_id,
                 stage="hold",
@@ -4002,6 +4024,8 @@ class AgentWorkflow:
             self._set_image_pipeline_state("failed", len(images), target_images, hold_msg)
             self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
+        if len(images) > target_images:
+            images = images[:target_images]
         self._set_image_pipeline_state("validated", len(images), target_images, f"이미지 선택 완료 {len(images)}/{target_images}")
         self._progress("visual", f"이미지 선택 완료 {len(images)}/{target_images}", 80)
         self._ensure_min_long_tail_keywords(
@@ -4070,18 +4094,19 @@ class AgentWorkflow:
                 raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         else:
             try:
-                images, preflight_thumb_src = self._profile_call(
-                    "thumbnail_preflight_with_recovery",
-                    lambda: self._preflight_thumbnail_with_recovery(
-                        draft=draft,
-                        candidate=selected,
-                        images=images,
-                        prompt_plan=image_prompt_plan,
-                        max_attempts=3,
-                        manual_trigger=manual_trigger,
-                    ),
-                    slow_ms=8000,
-                )
+                if images:
+                    images, preflight_thumb_src = self._profile_call(
+                        "thumbnail_preflight_with_recovery",
+                        lambda: self._preflight_thumbnail_with_recovery(
+                            draft=draft,
+                            candidate=selected,
+                            images=images,
+                            prompt_plan=image_prompt_plan,
+                            max_attempts=3,
+                            manual_trigger=manual_trigger,
+                        ),
+                        slow_ms=8000,
+                    )
                 creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
                 gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
                     final_html,
@@ -4135,9 +4160,10 @@ class AgentWorkflow:
             dry_log_dir.mkdir(parents=True, exist_ok=True)
             dry_html_path = dry_log_dir / f"dry_run_final_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.html"
             dry_html_path.write_text(dry_html, encoding="utf-8")
-            if len(re.findall(r"<img\b[^>]*\bsrc=", dry_html, flags=re.IGNORECASE)) < target_images:
+            dry_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", dry_html, flags=re.IGNORECASE))
+            if dry_img_count < min_images_required:
                 raise RuntimeError(
-                    f"dry-run regression failed: missing required <img> count (need {target_images})"
+                    f"dry-run regression failed: missing required <img> count (need {min_images_required})"
                 )
             published_url = "dry-run://not-published"
             self.logs.append_run(
@@ -4204,7 +4230,7 @@ class AgentWorkflow:
         self._progress("publish", "Blogger 예약 발행 처리", 92)
         published = None
         last_publish_err = ""
-        if not preflight_thumb_src:
+        if images and (not preflight_thumb_src):
             try:
                 images, preflight_thumb_src = self._profile_call(
                     "thumbnail_preflight_with_recovery",
@@ -4303,7 +4329,7 @@ class AgentWorkflow:
                     self._mark_active_slot("skipped", skip_reason)
                     self._workflow_perf_finish_run("skipped", skip_reason)
                     return WorkflowResult("skipped", skip_reason)
-                if ("thumbnail_preflight_failed" in err or "missing thumbnail image url" in err) and publish_try < 3:
+                if images and ("thumbnail_preflight_failed" in err or "missing thumbnail image url" in err) and publish_try < 3:
                     try:
                         images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
                             draft=draft,
@@ -5375,12 +5401,13 @@ class AgentWorkflow:
         )
 
         self._progress("visual", "중단 문서 재개: 이미지 라이브러리 선택", 74)
-        target_images = max(5, int(self.settings.visual.target_images_per_post or 5))
+        target_images = self._image_target_max()
+        min_images_required = self._image_min_required()
         self._set_image_pipeline_state("running", 0, target_images, "중단 작업 이미지 선택")
         image_prompt_plan: dict[str, Any] = {"source": "library"}
         images = pick_images(title=title, min_count=target_images, root=self.root)
         images = self.visual.ensure_unique_assets(images)
-        if len(images) < target_images:
+        if len(images) < min_images_required:
             hold_labels = self._normalize_resume_labels(row.get("labels", []))
             if not hold_labels:
                 hold_labels = self._build_public_labels(
@@ -5396,15 +5423,17 @@ class AgentWorkflow:
                 title=title,
                 html_body=draft.html,
                 labels=hold_labels,
-                reason=f"image_library_shortage({len(images)}/{target_images})",
+                reason=f"image_library_shortage_min_required({len(images)}/{min_images_required})",
             )
-            hold_msg = f"image_library_shortage({len(images)}/{target_images})"
+            hold_msg = f"image_library_shortage_min_required({len(images)}/{min_images_required})"
             if hold_note:
                 hold_msg += f" | {hold_note}"
             if updated_draft_id:
                 hold_msg += f" | draft_checkpoint={updated_draft_id}"
             self._set_image_pipeline_state("failed", len(images), target_images, hold_msg)
             return WorkflowResult("hold", hold_msg)
+        if len(images) > target_images:
+            images = images[:target_images]
         self._set_image_pipeline_state("validated", len(images), target_images, f"이미지 선택 완료 {len(images)}/{target_images}")
         self._progress("visual", f"이미지 선택 완료 {len(images)}/{target_images}", 80)
 
@@ -5464,18 +5493,19 @@ class AgentWorkflow:
                 raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         else:
             try:
-                images, preflight_thumb_src = self._profile_call(
-                    "resume_thumbnail_preflight_with_recovery",
-                    lambda: self._preflight_thumbnail_with_recovery(
-                        draft=draft,
-                        candidate=candidate,
-                        images=images,
-                        prompt_plan=image_prompt_plan,
-                        max_attempts=3,
-                        manual_trigger=manual_trigger,
-                    ),
-                    slow_ms=8000,
-                )
+                if images:
+                    images, preflight_thumb_src = self._profile_call(
+                        "resume_thumbnail_preflight_with_recovery",
+                        lambda: self._preflight_thumbnail_with_recovery(
+                            draft=draft,
+                            candidate=candidate,
+                            images=images,
+                            prompt_plan=image_prompt_plan,
+                            max_attempts=3,
+                            manual_trigger=manual_trigger,
+                        ),
+                        slow_ms=8000,
+                    )
                 creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
                 gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
                     final_html,
@@ -5501,6 +5531,7 @@ class AgentWorkflow:
             domain=resume_domain,
             keyword=str(getattr(candidate, "title", "") or ""),
             context="resume_publish",
+            include_image_integrity=bool(images),
         )
         labels = self._normalize_resume_labels(row.get("labels", []))
         if not labels:
@@ -5543,7 +5574,7 @@ class AgentWorkflow:
             summary=summary_text,
             html=final_html,
         )
-        if not preflight_thumb_src:
+        if images and (not preflight_thumb_src):
             try:
                 images, preflight_thumb_src = self._profile_call(
                     "resume_thumbnail_preflight_with_recovery",
@@ -6407,11 +6438,14 @@ class AgentWorkflow:
         if re.search(r"\billustration\s+showing\b", merged):
             errors.append("illustration_placeholder_leak")
 
-        target_required = max(5, int(getattr(self.settings.visual, "target_images_per_post", 5) or 5))
+        target_required = self._image_target_max()
+        min_required = self._image_min_required()
         if not images:
-            errors.append("images_missing")
+            if min_required > 0:
+                errors.append("images_missing")
+            else:
+                warnings.append("images_missing_allowed(min_required=0)")
         else:
-            min_required = 5
             if len(images) < min_required:
                 errors.append(f"insufficient_images_min(<{min_required})")
             elif len(images) < target_required:
@@ -6439,8 +6473,10 @@ class AgentWorkflow:
                 errors.append("intro_alt_similarity_high")
                 warnings.append(intro_alt_detail)
         html_img_count = len(re.findall(r"<img\b[^>]*\bsrc=", str(gate_html or final_html or ""), flags=re.IGNORECASE))
-        if html_img_count < target_required:
-            errors.append(f"insufficient_html_images({html_img_count}/{target_required})")
+        if html_img_count < min_required:
+            errors.append(f"insufficient_html_images({html_img_count}/{min_required})")
+        elif html_img_count < target_required:
+            warnings.append(f"html_images_below_target({html_img_count}/{target_required})")
         # Enforce runtime backend image hosts in production mode.
         html_for_hosts = str(gate_html or final_html or "")
         src_matches = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_for_hosts, flags=re.IGNORECASE)
@@ -6620,7 +6656,9 @@ class AgentWorkflow:
     ) -> tuple[list[ImageAsset], str]:
         working = self.visual.ensure_unique_assets(list(images or []))
         if not working:
-            raise RuntimeError("thumbnail_preflight_failed:no_images")
+            if self._image_min_required() > 0:
+                raise RuntimeError("thumbnail_preflight_failed:no_images")
+            return [], ""
         if bool(manual_trigger) and (not bool(self._manual_upload_probe_done)) and str(getattr(self.settings.publish, "image_hosting_backend", "")).strip().lower() in {"blogger_media", "blogger", "blogger_server"}:
             probe = self._profile_call(
                 "manual_upload_probe_session",

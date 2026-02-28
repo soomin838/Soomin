@@ -74,6 +74,8 @@ publish:
   thumbnail_preflight_only: false
   thumbnail_preflight_max_cycles: 6
   thumbnail_preflight_retry_delay_sec: 8
+  min_images_required: 0
+  max_images_per_post: 5
 quality:
   enabled: true
   strict_mode: true

@@ -222,6 +222,8 @@ class PublishSettings:
     thumbnail_preflight_only: bool = False
     thumbnail_preflight_max_cycles: int = 6
     thumbnail_preflight_retry_delay_sec: int = 8
+    min_images_required: int = 0
+    max_images_per_post: int = 5
     r2: PublishR2Settings = field(default_factory=PublishR2Settings)
 
 

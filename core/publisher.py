@@ -54,6 +54,7 @@ class Publisher:
         r2_config: Any | None = None,
         max_banner_images: int = 1,
         max_inline_images: int = 4,
+        min_required_images: int = 0,
         semantic_html_enabled: bool = True,
         strict_thumbnail_blogger_media: bool = True,
         thumbnail_data_uri_allowed: bool = False,
@@ -68,6 +69,7 @@ class Publisher:
         self.r2_config = self._normalize_r2_config(r2_config)
         self.max_banner_images = max(1, int(max_banner_images or 1))
         self.max_inline_images = max(0, int(max_inline_images or 0))
+        self.min_required_images = max(0, int(min_required_images or 0))
         self.semantic_html_enabled = bool(semantic_html_enabled)
         self.strict_thumbnail_blogger_media = bool(strict_thumbnail_blogger_media)
         self.thumbnail_data_uri_allowed = bool(thumbnail_data_uri_allowed)
@@ -164,8 +166,11 @@ class Publisher:
                 pass
         return "generic"
 
+    def _target_images_count(self) -> int:
+        return max(0, int(self.max_banner_images) + int(self.max_inline_images))
+
     def _required_images_count(self) -> int:
-        return max(1, int(self.max_banner_images) + int(self.max_inline_images))
+        return max(0, min(self._target_images_count(), int(self.min_required_images)))
 
     def publish_post(
         self,
@@ -215,7 +220,7 @@ class Publisher:
                         "after_img_count": int(post_semantic_img_count),
                     }
                 )
-            if post_semantic_img_count < required_images:
+            if required_images > 0 and post_semantic_img_count < required_images:
                 # Semantic transform must not reduce required image floor.
                 self._log_upload_event(
                     {
@@ -316,18 +321,22 @@ class Publisher:
         Dry-run must mirror production insertion count/policy to prevent regressions.
         """
         out = str(html_body or "")
-        if not images:
-            return out
+        target_images = self._target_images_count()
         required_images = self._required_images_count()
+        if (not images) or target_images <= 0:
+            if required_images > 0 and (not images):
+                raise RuntimeError(f"dry-run failed - missing images (0/{required_images})")
+            return out
         entries: list[tuple[str, str]] = []
-        for image in images[:required_images]:
+        for image in images[:target_images]:
             src = self._file_to_data_uri(Path(getattr(image, "path", "")))
             if not src:
                 continue
             entries.append((src, str(getattr(image, "alt", "") or "")))
         if len(entries) < required_images:
             raise RuntimeError(f"dry-run failed - missing images ({len(entries)}/{required_images})")
-        out = self._compose_image_enriched_html(out, entries)
+        if entries:
+            out = self._compose_image_enriched_html(out, entries[:target_images])
         self._assert_html_image_integrity(
             out,
             min_images=required_images,
@@ -603,9 +612,27 @@ class Publisher:
         creds,
         preflight_thumbnail_src: str = "",
     ) -> str:
-        if not images:
-            raise RuntimeError("이미지 자산이 비어 있습니다. retry required")
         required_images = self._required_images_count()
+        target_images = self._target_images_count()
+        if not images:
+            if required_images > 0:
+                raise RuntimeError("이미지 자산이 비어 있습니다. retry required")
+            self._log_upload_event(
+                {
+                    "event": "merge_images_skipped",
+                    "reason": "no_images_allowed",
+                    "required_images": int(required_images),
+                }
+            )
+            return str(html_body or "")
+        if target_images <= 0:
+            self._log_upload_event(
+                {
+                    "event": "merge_images_skipped",
+                    "reason": "target_images_zero",
+                }
+            )
+            return str(html_body or "")
 
         self._log_upload_event(
             {
@@ -676,7 +703,9 @@ class Publisher:
                     "last_upload_report": dict(self._last_upload_report or {}),
                 }
             )
-            raise RuntimeError("publish failed - missing thumbnail image url. retry required")
+            if required_images > 0:
+                raise RuntimeError("publish failed - missing thumbnail image url. retry required")
+            return str(html_body or "")
 
         # Keep diagnostics for missing uploads, but do not hard-fail before final post verification.
         missing_paths = [str(img.path) for img in images if str(img.path) not in src_map]
@@ -704,7 +733,7 @@ class Publisher:
                 continue
             seen_src.add(src)
             selected_entries.append((src, str(getattr(image, "alt", "") or "")))
-            if len(selected_entries) >= required_images:
+            if len(selected_entries) >= target_images:
                 break
 
         if len(selected_entries) < required_images:
@@ -721,7 +750,9 @@ class Publisher:
                 f"publish failed - missing images before submit ({len(selected_entries)}/{required_images})"
             )
 
-        html = self._compose_image_enriched_html(str(html_body or ""), selected_entries[:required_images])
+        if not selected_entries:
+            return str(html_body or "")
+        html = self._compose_image_enriched_html(str(html_body or ""), selected_entries[:target_images])
 
         img_count = len(re.findall(r"<img\b[^>]*\bsrc=", html, flags=re.IGNORECASE))
         banner_block = self._image_block(selected_entries[0][0], selected_entries[0][1])
@@ -730,7 +761,7 @@ class Publisher:
                 "event": "merge_images_inserted",
                 "img_count_after_insert": img_count,
                 "banner_inserted": bool(re.search(r"<img\b[^>]*\bsrc=", banner_block, flags=re.IGNORECASE)),
-                "inline_inserted": img_count >= required_images,
+                "inline_inserted": img_count >= max(1, target_images),
             }
         )
         if img_count < required_images:
@@ -1965,7 +1996,7 @@ class Publisher:
             if str(s).strip().lower().startswith("data:image/")
         ]
         valid_total = len(valid_http_src) + (len(valid_data_src) if self.thumbnail_data_uri_allowed else 0)
-        if valid_total < required_images:
+        if required_images > 0 and valid_total < required_images:
             self._log_upload_event(
                 {
                     "event": "go_live_gate_fail",
@@ -2586,8 +2617,9 @@ class Publisher:
                 if require_backend_hosts and (not self._is_allowed_image_url(s, allow_data_uri=False)):
                     raise RuntimeError(f"publish failed - invalid_image_host:{(urlparse(s).netloc or '').lower()}")
                 valid_src.append(s)
-        if len(valid_src) < max(1, int(min_images)):
-            raise RuntimeError(f"publish failed - missing images ({len(valid_src)}/{int(min_images)})")
+        required_floor = max(0, int(min_images))
+        if len(valid_src) < required_floor:
+            raise RuntimeError(f"publish failed - missing images ({len(valid_src)}/{int(required_floor)})")
         if require_no_figcaption and re.search(r"<figcaption\b", content, flags=re.IGNORECASE):
             raise RuntimeError("publish failed - figcaption_not_allowed")
         if strict_intro_alt:
