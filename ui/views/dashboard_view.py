@@ -172,7 +172,9 @@ class MainWindow(QMainWindow):
             return
         font_dir = self.root / "storage" / "ui" / "fonts"
         font_dir.mkdir(parents=True, exist_ok=True)
-        loaded_family = "Segoe UI"
+        fallback_families = ["Segoe UI", "Malgun Gothic", "맑은 고딕", "Noto Sans CJK KR"]
+        available = set(QFontDatabase.families())
+        loaded_family = next((fam for fam in fallback_families if fam in available), "Segoe UI")
         for fp in sorted(font_dir.glob("*.ttf")) + sorted(font_dir.glob("*.otf")):
             fid = QFontDatabase.addApplicationFont(str(fp))
             if fid != -1:

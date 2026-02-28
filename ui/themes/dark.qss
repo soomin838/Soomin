@@ -4,7 +4,7 @@
 
 QWidget {
     color: #EAF0FF;
-    font-family: "Segoe UI", "Inter", sans-serif;
+    font-family: "Segoe UI", "Malgun Gothic", "맑은 고딕", "Inter", sans-serif;
     font-size: 14px;
 }
 

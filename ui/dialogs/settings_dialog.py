@@ -109,15 +109,15 @@ def _validate_blogger_token_file(root: Path, path_value: str) -> tuple[bool, str
     if not p.is_absolute():
         p = root / p
     if not p.exists():
-        return False, "blogger_token.json ?뚯씪??李얠쓣 ???놁뒿?덈떎."
+        return False, "blogger_token.json 파일을 찾을 수 없습니다."
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
-        return False, "blogger_token.json ?뺤떇???щ컮瑜?JSON???꾨떃?덈떎."
+        return False, "blogger_token.json 형식이 올바른 JSON이 아닙니다."
     required = ["client_id", "client_secret", "refresh_token", "token_uri"]
     missing = [k for k in required if not data.get(k)]
     if missing:
-        return False, f"blogger_token.json ?꾩닔 ??ぉ ?꾨씫: {', '.join(missing)}"
+        return False, f"blogger_token.json 필수 항목 누락: {', '.join(missing)}"
     return True, ""
 
 
@@ -131,7 +131,7 @@ class SettingsDialog(QDialog):
         self.required_only = required_only
         self.data = _load_yaml(self.context.settings_path)
         self.pref = _load_ui_preferences(self.context.root)
-        self.setWindowTitle("RezeroAgent ?ㅼ젙")
+        self.setWindowTitle("RezeroAgent 설정")
         self.resize(1120, 780)
         self.setMinimumSize(980, 680)
         self._conn_grid = None
@@ -145,9 +145,9 @@ class SettingsDialog(QDialog):
 
         header = GlassCard()
         h = QVBoxLayout(header)
-        title = QLabel("?곌껐 諛??먮룞???ㅼ젙")
+        title = QLabel("연결 및 자동화 설정")
         title.setObjectName("Title")
-        sub = QLabel("?곌껐 諛⑹떇???좏깮?섏꽭?? JSON ?낅줈??/ Google 濡쒓렇??/ ?좏겙 吏곸젒 ?곌껐")
+        sub = QLabel("연결 방식을 선택하세요: JSON 업로드 / Google 로그인 / 토큰 직접 연결")
         sub.setObjectName("Subtitle")
         h.addWidget(title)
         h.addWidget(sub)
@@ -164,11 +164,11 @@ class SettingsDialog(QDialog):
         b1.clicked.connect(self.upload_client_secret)
         b2 = MotionButton("Google 로그인")
         b2.clicked.connect(self.google_login)
-        b3 = MotionButton("?좏겙 吏곸젒 ?곌껐")
+        b3 = MotionButton("토큰 직접 연결")
         b3.clicked.connect(self.browse_token)
         b4 = MotionButton("모델 테스트")
         b4.clicked.connect(self.test_models)
-        b5 = MotionButton("臾대즺?곗뼱 ?덈궡")
+        b5 = MotionButton("무료 쿼터 안내")
         b5.clicked.connect(self.show_quota_guide)
 
         self._conn_buttons = [b1, b2, b3, b4, b5]
@@ -196,7 +196,7 @@ class SettingsDialog(QDialog):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        cancel = MotionButton("痍⑥냼")
+        cancel = MotionButton("취소")
         save = MotionButton("저장")
         save.setObjectName("PrimaryBtn")
         cancel.clicked.connect(self.reject)
@@ -234,7 +234,7 @@ class SettingsDialog(QDialog):
         model_row = QHBoxLayout(model_box)
         model_row.setContentsMargins(0, 0, 0, 0)
         model_row.setSpacing(8)
-        btn_models = MotionButton("紐⑤뜽 紐⑸줉 遺덈윭?ㅺ린")
+        btn_models = MotionButton("모델 목록 불러오기")
         btn_models.clicked.connect(self.test_models)
         model_row.addWidget(self.model_combo, 1)
         model_row.addWidget(btn_models)
@@ -243,10 +243,10 @@ class SettingsDialog(QDialog):
         self.dry_run = QCheckBox()
         self.dry_run.setChecked(_nested_get(self.data, "budget.dry_run").strip().lower() in {"1", "true", "yes", "on"})
         form.addRow("Gemini API Key", self.gemini_key)
-        form.addRow("Gemini 紐⑤뜽", model_box)
-        form.addRow("Free Mode (鍮꾩슜 0??", self.free_mode)
+        form.addRow("Gemini 모델", model_box)
+        form.addRow("Free Mode (비용 0원)", self.free_mode)
         form.addRow("Dry Run", self.dry_run)
-        self._add_tab("紐⑤뜽", self._wrap_scroll(page))
+        self._add_tab("모델", self._wrap_scroll(page))
 
     def _build_image_tab(self) -> None:
         page = QWidget()
@@ -269,10 +269,10 @@ class SettingsDialog(QDialog):
         self.target_images = QLineEdit(target_default)
         self.target_images.setReadOnly(True)
         form.addRow("이미지 공급자", self.image_provider)
-        form.addRow("?대?吏 ?앹꽦 ?ъ슜", self.enable_img)
+        form.addRow("이미지 생성 사용 여부", self.enable_img)
         form.addRow("Gemini 이미지 모델", self.gemini_image_model)
-        form.addRow("寃뚯떆湲??紐⑺몴 ?대?吏", self.target_images)
-        self._add_tab("?대?吏", self._wrap_scroll(page))
+        form.addRow("게시글당 목표 이미지", self.target_images)
+        self._add_tab("이미지", self._wrap_scroll(page))
 
     def _build_blogger_tab(self) -> None:
         page = QWidget()
@@ -293,9 +293,9 @@ class SettingsDialog(QDialog):
             _nested_get(self.data, "integrations.search_console_enabled").strip().lower() in {"1", "true", "yes", "on"}
         )
         self.search_console_site_url = QLineEdit((_nested_get(self.data, "integrations.search_console_site_url") or "").strip())
-        self.search_console_site_url.setPlaceholderText("?? https://yourblog.com/")
-        form.addRow("Search Console ?곕룞", self.search_console_enabled)
-        form.addRow("Search Console ?ъ씠??URL", self.search_console_site_url)
+        self.search_console_site_url.setPlaceholderText("예: https://yourblog.com/")
+        form.addRow("Search Console 연동", self.search_console_enabled)
+        form.addRow("Search Console 사이트 URL", self.search_console_site_url)
         self._add_tab("인덱싱", self._wrap_scroll(page))
     def _build_automation_tab(self) -> None:
         page = QWidget()
@@ -453,12 +453,12 @@ class SettingsDialog(QDialog):
             current_intensity = "high"
         self.animation_intensity.setCurrentText(current_intensity)
         info = QLabel(
-            "UI ?좊땲硫붿씠??媛뺣룄\n"
+            "UI 애니메이션 강도\n"
             "high: 고감도 모션 / medium: 절충 / off: 모션 끔"
         )
         info.setWordWrap(True)
         info.setObjectName("Subtitle")
-        form.addRow("?좊땲硫붿씠??媛뺣룄", self.animation_intensity)
+        form.addRow("애니메이션 강도", self.animation_intensity)
         form.addRow("", info)
 
         self.local_llm_enabled = QCheckBox()
@@ -489,7 +489,7 @@ class SettingsDialog(QDialog):
         form.addRow("Local LLM URL", self.local_llm_base_url)
         form.addRow("Local LLM 상태", self.local_llm_status)
         form.addRow("Local LLM 관리", llm_btn_box)
-        self._add_tab("怨좉툒", self._wrap_scroll(page))
+        self._add_tab("고급", self._wrap_scroll(page))
 
     def _local_llm_settings_from_ui(self) -> LocalLLMSettings:
         return LocalLLMSettings(
@@ -594,9 +594,9 @@ class SettingsDialog(QDialog):
             self.context.client_secrets_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(selected, self.context.client_secrets_path)
         except Exception as exc:
-            QMessageBox.critical(self, "?낅줈???ㅽ뙣", str(exc))
+            QMessageBox.critical(self, "업로드 실패", str(exc))
             return
-        QMessageBox.information(self, "?꾨즺", "client_secrets.json ?낅줈?쒓? ?꾨즺?섏뿀?듬땲??")
+        QMessageBox.information(self, "완료", "client_secrets.json 업로드가 완료되었습니다.")
 
     def browse_token(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(self, "Select blogger_token.json", "", "JSON Files (*.json);;All Files (*)")
@@ -613,11 +613,11 @@ class SettingsDialog(QDialog):
             from google_auth_oauthlib.flow import InstalledAppFlow
             from googleapiclient.discovery import build
         except Exception as exc:
-            QMessageBox.critical(self, "紐⑤뱢 ?ㅻ쪟", f"Google ?몄쬆 紐⑤뱢???ъ슜?????놁뒿?덈떎.\n{exc}")
+            QMessageBox.critical(self, "모듈 오류", f"Google 인증 모듈을 사용할 수 없습니다.\n{exc}")
             return
 
         if not self.context.client_secrets_path.exists():
-            QMessageBox.information(self, "JSON ?꾩슂", "癒쇱? client_secret JSON ?뚯씪???낅줈?쒗븯?몄슂.")
+            QMessageBox.information(self, "JSON 필요", "먼저 client_secret JSON 파일을 업로드해 주세요.")
             return
 
         try:
@@ -638,16 +638,16 @@ class SettingsDialog(QDialog):
             service = build("blogger", "v3", credentials=creds)
             blogs = service.blogs().listByUser(userId="self").execute().get("items", []) or []
         except Exception as exc:
-            QMessageBox.critical(self, "Google 濡쒓렇???ㅽ뙣", str(exc))
+            QMessageBox.critical(self, "Google 로그인 실패", str(exc))
             return
 
         if not blogs:
-            QMessageBox.warning(self, "釉붾줈洹??놁쓬", "??怨꾩젙?먯꽌 Blogger 釉붾줈洹몃? 李얠? 紐삵뻽?듬땲??")
+            QMessageBox.warning(self, "블로그 없음", "이 계정에서 Blogger 블로그를 찾지 못했습니다.")
             return
 
         if len(blogs) == 1:
             self.blog_id.setText(str(blogs[0].get("id", "")))
-            QMessageBox.information(self, "?곌껐 ?꾨즺", "Blog ID媛 ?먮룞 ?낅젰?섏뿀?듬땲??")
+            QMessageBox.information(self, "연결 완료", "Blog ID가 자동 입력되었습니다.")
             return
 
         labels = [f"{b.get('name', 'Untitled')} ({b.get('id', '')})" for b in blogs]
@@ -655,7 +655,7 @@ class SettingsDialog(QDialog):
         if ok and selected:
             idx = labels.index(selected)
             self.blog_id.setText(str(blogs[idx].get("id", "")))
-            QMessageBox.information(self, "?곌껐 ?꾨즺", "?좏깮??釉붾줈洹몃? ?곌껐?덉뒿?덈떎.")
+            QMessageBox.information(self, "연결 완료", "선택한 블로그를 연결했습니다.")
 
     def save(self) -> None:
         api_key = self.gemini_key.text().strip()
@@ -695,26 +695,26 @@ class SettingsDialog(QDialog):
         gemini_required = (not free_mode) or enable_img
         if gemini_required:
             if not api_key:
-                QMessageBox.warning(self, "?낅젰 ?꾩슂", "Gemini API Key???꾩닔?낅땲??")
+                QMessageBox.warning(self, "입력 필요", "Gemini API Key는 필수입니다.")
                 return
             if not _is_valid_gemini_key(api_key):
-                QMessageBox.warning(self, "?뺤떇 ?ㅻ쪟", "Gemini API Key ?뺤떇???щ컮瑜댁? ?딆뒿?덈떎.\n?? AIza濡??쒖옉?섎뒗 Google API Key")
+                QMessageBox.warning(self, "형식 오류", "Gemini API Key 형식이 올바르지 않습니다.\n예: AIza로 시작하는 Google API Key")
                 return
         elif api_key and (not _is_valid_gemini_key(api_key)):
-            QMessageBox.warning(self, "?뺤떇 ?ㅻ쪟", "?낅젰??Gemini API Key ?뺤떇???щ컮瑜댁? ?딆뒿?덈떎.")
+            QMessageBox.warning(self, "형식 오류", "입력한 Gemini API Key 형식이 올바르지 않습니다.")
             return
         if not blog_id:
-            QMessageBox.warning(self, "?낅젰 ?꾩슂", "Blogger Blog ID???꾩닔?낅땲??")
+            QMessageBox.warning(self, "입력 필요", "Blogger Blog ID는 필수입니다.")
             return
         if not _is_valid_blogger_blog_id(blog_id):
-            QMessageBox.warning(self, "?뺤떇 ?ㅻ쪟", "Blogger Blog ID ?뺤떇???щ컮瑜댁? ?딆뒿?덈떎.\n?レ옄留??낅젰?섏꽭??")
+            QMessageBox.warning(self, "형식 오류", "Blogger Blog ID 형식이 올바르지 않습니다.\n숫자만 입력해 주세요.")
             return
         if not token:
-            QMessageBox.warning(self, "?낅젰 ?꾩슂", "blogger_token.json 寃쎈줈???꾩닔?낅땲??")
+            QMessageBox.warning(self, "입력 필요", "blogger_token.json 경로는 필수입니다.")
             return
         ok_token, token_msg = _validate_blogger_token_file(self.context.root, token)
         if not ok_token:
-            QMessageBox.warning(self, "?좏겙 ?ㅻ쪟", token_msg)
+            QMessageBox.warning(self, "토큰 오류", token_msg)
             return
 
         selected_model = self.model_combo.currentText().strip() or _nested_get(self.data, "gemini.model").strip()
@@ -810,13 +810,13 @@ class SettingsDialog(QDialog):
 
         if self.on_saved:
             self.on_saved()
-        QMessageBox.information(self, "????꾨즺", "?ㅼ젙????λ릺?덉뒿?덈떎.")
+        QMessageBox.information(self, "저장 완료", "설정이 저장되었습니다.")
         self.accept()
 
     def test_models(self) -> None:
         api_key = self.gemini_key.text().strip()
         if not _is_valid_gemini_key(api_key):
-            QMessageBox.warning(self, "?뺤떇 ?ㅻ쪟", "Gemini API Key ?뺤떇???щ컮瑜댁? ?딆뒿?덈떎.\n癒쇱? API ?ㅻ? ?뺥솗???낅젰?섏꽭??")
+            QMessageBox.warning(self, "형식 오류", "Gemini API Key 형식이 올바르지 않습니다.\n먼저 API 키를 정확히 입력해 주세요.")
             return
 
         endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -825,7 +825,7 @@ class SettingsDialog(QDialog):
             resp.raise_for_status()
             models = resp.json().get("models", []) or []
         except requests.RequestException as exc:
-            QMessageBox.critical(self, "紐⑤뜽 議고쉶 ?ㅽ뙣", f"紐⑤뜽 紐⑸줉 議고쉶???ㅽ뙣?덉뒿?덈떎.\n{exc}")
+            QMessageBox.critical(self, "모델 조회 실패", f"모델 목록 조회에 실패했습니다.\n{exc}")
             return
 
         candidates: list[str] = []
@@ -842,7 +842,7 @@ class SettingsDialog(QDialog):
             candidates.append(short)
 
         if not candidates:
-            QMessageBox.warning(self, "紐⑤뜽 ?놁쓬", "?ъ슜 媛?ν븳 Gemini generateContent 紐⑤뜽??李얠? 紐삵뻽?듬땲??")
+            QMessageBox.warning(self, "모델 없음", "사용 가능한 Gemini generateContent 모델을 찾지 못했습니다.")
             return
 
         candidates = sorted(set(candidates), key=lambda x: x.lower())
@@ -854,7 +854,7 @@ class SettingsDialog(QDialog):
         else:
             self.model_combo.setCurrentIndex(0)
         selected = self.model_combo.currentText().strip()
-        QMessageBox.information(self, "紐⑤뜽 紐⑸줉 媛깆떊", f"?ъ슜 媛?ν븳 紐⑤뜽 {len(candidates)}媛쒕? 遺덈윭?붿뒿?덈떎.\n?꾩옱 ?좏깮: {selected}")
+        QMessageBox.information(self, "모델 목록 완료", f"사용 가능한 모델 {len(candidates)}개를 불러왔습니다.\n현재 선택: {selected}")
 
     def show_quota_guide(self) -> None:
         model = self.model_combo.currentText().strip() or _nested_get(self.data, "gemini.model").strip()
@@ -862,11 +862,11 @@ class SettingsDialog(QDialog):
         daily_posts = _nested_get(self.data, "budget.daily_post_limit").strip() or "6"
         QMessageBox.information(
             self,
-            "臾대즺?곗뼱 ?덈궡",
-            "Gemini 臾대즺?곗뼱 ?곹븳? 紐⑤뜽/?꾨줈?앺듃/?쒓컙????곕씪 ?щ씪吏묐땲??\n\n"
-            f"?꾩옱 紐⑤뜽: {model}\n"
-            f"???쒗븳媛? API ?몄텧 {daily_calls}, ?앹꽦 {daily_posts}\n\n"
-            "?꾨옒 怨듭떇 ?섏씠吏?먯꽌 ?꾩옱 怨꾩젙 ?쒕룄瑜??뺤씤?섏꽭??\n"
+            "무료 쿼터 안내",
+            "Gemini 무료 쿼터 상한은 모델/프로젝트/시간대에 따라 달라집니다.\n\n"
+            f"현재 모델: {model}\n"
+            f"일일 제한값: API 호출 {daily_calls}, 생성 {daily_posts}\n\n"
+            "아래 공식 페이지에서 현재 계정 한도를 확인해 주세요.\n"
             f"- Usage dashboard: {self.context.gemini_usage_dashboard}\n"
             f"- Rate limits: {self.context.gemini_rate_limit_doc}\n"
             f"- Pricing: {self.context.gemini_pricing_doc}\n"
