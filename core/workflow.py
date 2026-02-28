@@ -26,7 +26,7 @@ from .image_library import pick_images
 from .index_sync import BloggerIndexSync
 from .logstore import LogStore, RunRecord
 from .news_pool import NewsPoolStore
-from .news_rss import fetch_feed
+from .news_rss import fetch_feed_detailed
 from .news_score import classify_category, contains_allow_keywords, has_blocked_keywords, score_news_item
 from .news_pack_manifest import NewsPackManifest
 from .news_pack_picker import NewsPackPicker
@@ -182,6 +182,8 @@ class AgentWorkflow:
         self._manual_upload_probe_done = False
         self._news_pool_db_path = self.root / "storage" / "logs" / "news_pool.sqlite3"
         self._news_pool_state_path = self.root / "storage" / "logs" / "news_pool_state.json"
+        self._news_pool_refresh_log_path = self.root / "storage" / "logs" / "news_pool_refresh.jsonl"
+        self._news_rotation_state_path = self.root / "storage" / "state" / "news_rotation_state.json"
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
         self.news_pack_manifest = NewsPackManifest(
             root=self.root,
@@ -207,6 +209,7 @@ class AgentWorkflow:
         self._news_pack_last_tick_mono = 0.0
         self._news_domain = "tech_news_explainer"
         self._start_posts_index_bootstrap()
+        self._run_legacy_news_cleanup_once()
 
     def set_progress_hook(self, hook) -> None:
         self._progress_hook = hook
@@ -600,7 +603,8 @@ class AgentWorkflow:
         domain: str = "tech_troubleshoot",
         keyword: str = "",
         context: str = "qa",
-        include_image_integrity: bool = True,
+        include_image_integrity: bool | None = None,
+        phase: str = "post_images",
     ):
         return self._profile_call(
             stage=f"qa_evaluate:{context}",
@@ -609,7 +613,8 @@ class AgentWorkflow:
                 title=title,
                 domain=domain,
                 keyword=keyword,
-                include_image_integrity=bool(include_image_integrity),
+                include_image_integrity=include_image_integrity,
+                phase=phase,
             ),
             slow_ms=1200,
             meta={
@@ -820,24 +825,7 @@ class AgentWorkflow:
                 "Avoid unofficial one-click repair tools.",
                 "Use official support for account security lockouts.",
             ],
-            "faq": [
-                {
-                    "question": "How long should I test each fix?",
-                    "answer": "Test each step for 2 to 5 minutes before moving on.",
-                },
-                {
-                    "question": "Should I reinstall first?",
-                    "answer": "No. Start with low-risk checks and updates first.",
-                },
-                {
-                    "question": "Could this be update-related?",
-                    "answer": "Yes. Many issues appear right after updates change defaults.",
-                },
-                {
-                    "question": "When should I contact support?",
-                    "answer": "Contact support after all safe software fixes fail.",
-                },
-            ],
+            "faq": [],
             "internal_links_anchor_ideas": [
                 f"{device} update issue checklist",
                 f"{device} safe reset steps",
@@ -1706,9 +1694,67 @@ class AgentWorkflow:
         except Exception:
             return
 
-    def _refresh_news_pool_if_needed(self, force: bool = False) -> str:
+    def _append_news_pool_refresh_log(self, payload: dict[str, Any]) -> None:
+        row = {"ts_utc": datetime.now(timezone.utc).isoformat()}
+        row.update(dict(payload or {}))
+        try:
+            self._news_pool_refresh_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._news_pool_refresh_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _news_pool_feed_fingerprint(self, feeds: list[str]) -> str:
+        merged = "\n".join([str(x or "").strip().lower() for x in (feeds or []) if str(x or "").strip()])
+        return hashlib.sha1(merged.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _slice_news_pool_feeds(
+        self,
+        feeds: list[str],
+        cursor: int,
+        max_feeds: int,
+    ) -> tuple[list[str], int]:
+        ordered = [str(x or "").strip() for x in (feeds or []) if str(x or "").strip()]
+        total = len(ordered)
+        if total <= 0:
+            return [], 0
+        safe_max = max(1, min(int(max_feeds or 1), total))
+        safe_cursor = int(cursor or 0) % total
+        selected: list[str] = []
+        idx = safe_cursor
+        for _ in range(safe_max):
+            selected.append(ordered[idx])
+            idx = (idx + 1) % total
+        return selected, int(idx)
+
+    def news_pool_refresh_tick_if_needed(self, force: bool = False) -> dict[str, Any]:
+        if not bool(getattr(self.settings.sources, "news_pool_background_tick_enabled", True)):
+            return {"status": "disabled"}
+        max_feeds = max(1, int(getattr(self.settings.sources, "news_pool_background_max_feeds_per_tick", 5) or 5))
+        note = self._refresh_news_pool_if_needed(
+            force=bool(force),
+            max_feeds_per_refresh=max_feeds,
+            trigger="background_tick",
+        )
+        status = "ok"
+        if "skipped" in note:
+            status = "skipped"
+        if "failed" in note or "error" in note:
+            status = "failed"
+        return {"status": status, "note": note}
+
+    def _refresh_news_pool_if_needed(
+        self,
+        force: bool = False,
+        *,
+        max_feeds_per_refresh: int | None = None,
+        trigger: str = "run_once",
+    ) -> str:
         feeds = [str(x or "").strip() for x in (getattr(self.settings.sources, "news_pool_feeds", []) or []) if str(x or "").strip()]
         if not feeds:
+            self._append_news_pool_refresh_log(
+                {"event": "news_pool_refresh_skipped", "reason": "no_feeds", "trigger": str(trigger or "")}
+            )
             return "news_pool_refresh_skipped:no_feeds"
         state = self._load_news_pool_state()
         now_utc = datetime.now(timezone.utc)
@@ -1717,7 +1763,28 @@ class AgentWorkflow:
         if (not force) and last_refresh is not None:
             elapsed_min = (now_utc - last_refresh).total_seconds() / 60.0
             if elapsed_min < interval_min:
+                self._append_news_pool_refresh_log(
+                    {
+                        "event": "news_pool_refresh_skipped",
+                        "reason": "interval_guard",
+                        "interval_min": int(interval_min),
+                        "elapsed_min": round(float(elapsed_min), 2),
+                        "trigger": str(trigger or ""),
+                    }
+                )
                 return f"news_pool_refresh_skipped:interval<{interval_min}m"
+
+        feeds_fp = self._news_pool_feed_fingerprint(feeds)
+        if str(state.get("feeds_fingerprint", "") or "") != feeds_fp:
+            state["feed_cursor"] = 0
+            state["feeds_fingerprint"] = feeds_fp
+        feed_cursor = int(state.get("feed_cursor", 0) or 0)
+        safe_max_feeds = (
+            max(1, int(max_feeds_per_refresh))
+            if max_feeds_per_refresh is not None
+            else max(1, int(getattr(self.settings.sources, "news_pool_background_max_feeds_per_tick", 5) or 5))
+        )
+        feed_batch, next_cursor = self._slice_news_pool_feeds(feeds, feed_cursor, safe_max_feeds)
 
         allow = [str(x or "").strip().lower() for x in (getattr(self.settings.sources, "news_pool_keywords_allow", []) or []) if str(x or "").strip()]
         block = [str(x or "").strip().lower() for x in (getattr(self.settings.sources, "news_pool_keywords_block", []) or []) if str(x or "").strip()]
@@ -1727,10 +1794,36 @@ class AgentWorkflow:
             if str(k or "").strip()
         }
         rows: list[dict[str, Any]] = []
+        per_feed_results: list[dict[str, Any]] = []
         fetched_items = 0
-        for feed in feeds[:20]:
-            items = fetch_feed(feed, timeout=20)
+        for feed in feed_batch:
+            detail = fetch_feed_detailed(feed, timeout=20)
+            feed_status = int(detail.get("status_code", 0) or 0)
+            feed_error = str(detail.get("error", "") or "").strip()
+            items = list(detail.get("items", []) or [])
+            if feed_status != 200:
+                items = []
             fetched_items += len(items or [])
+            per_feed_results.append(
+                {
+                    "feed": str(feed),
+                    "status_code": int(feed_status),
+                    "ok": bool(feed_status == 200),
+                    "items": int(len(items or [])),
+                    "error": feed_error[:140],
+                }
+            )
+            self._append_news_pool_refresh_log(
+                {
+                    "event": "news_pool_feed_result",
+                    "feed": str(feed),
+                    "status_code": int(feed_status),
+                    "ok": bool(feed_status == 200),
+                    "items": int(len(items or [])),
+                    "error": feed_error[:180],
+                    "trigger": str(trigger or ""),
+                }
+            )
             for item in items or []:
                 title = re.sub(r"\s+", " ", str((item or {}).get("title", "") or "")).strip()
                 url = re.sub(r"\s+", " ", str((item or {}).get("url", "") or "")).strip()
@@ -1783,23 +1876,51 @@ class AgentWorkflow:
                 "last_refresh_utc": now_utc.isoformat(),
                 "last_refresh_ok": True,
                 "feeds_count": int(len(feeds)),
+                "feeds_fetched_this_refresh": int(len(feed_batch)),
                 "fetched_items": int(fetched_items),
                 "upserted": int(upserted),
                 "queued_count": int(queued),
                 "purged": dict(purge_report or {}),
+                "feed_cursor": int(next_cursor),
+                "feeds_fingerprint": feeds_fp,
+                "last_trigger": str(trigger or ""),
             }
         )
         self._save_news_pool_state(state)
+        self._append_news_pool_refresh_log(
+            {
+                "event": "news_pool_refresh_summary",
+                "trigger": str(trigger or ""),
+                "feeds_total": int(len(feeds)),
+                "feeds_fetched": int(len(feed_batch)),
+                "feed_cursor_before": int(feed_cursor),
+                "feed_cursor_after": int(next_cursor),
+                "fetched_items": int(fetched_items),
+                "upserted": int(upserted),
+                "queued": int(queued),
+                "per_feed": per_feed_results[:12],
+            }
+        )
         return (
-            f"news_pool_refresh_ok:feeds={len(feeds)};"
+            f"news_pool_refresh_ok:feeds={len(feed_batch)}/{len(feeds)};"
+            f"cursor={feed_cursor}->{next_cursor};"
             f"fetched={fetched_items};upserted={upserted};queued={queued}"
         )
 
     def _claim_news_item(self, force_refresh_once: bool = True) -> dict[str, Any] | None:
+        rotation_state = self._load_news_rotation_state()
+        avoid_category = str(rotation_state.get("last_news_category", "") or "").strip().lower()
+        recent_domains = [
+            str(x or "").strip().lower()
+            for x in (rotation_state.get("last_domains_used", []) or [])
+            if str(x or "").strip()
+        ][:6]
         item = self.news_pool_store.claim_one(
             news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
             top_k=max(10, int(getattr(self.settings.sources, "news_pool_pick_top_k", 60) or 60)),
             source_weights=dict(getattr(self.settings.sources, "news_pool_source_weights", {}) or {}),
+            avoid_category=avoid_category,
+            recent_domains=recent_domains,
         )
         if item is not None:
             return item
@@ -1809,6 +1930,8 @@ class AgentWorkflow:
                 news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
                 top_k=max(10, int(getattr(self.settings.sources, "news_pool_pick_top_k", 60) or 60)),
                 source_weights=dict(getattr(self.settings.sources, "news_pool_source_weights", {}) or {}),
+                avoid_category=avoid_category,
+                recent_domains=recent_domains,
             )
         return None
 
@@ -1838,6 +1961,157 @@ class AgentWorkflow:
                 break
         return out
 
+    def _load_news_rotation_state(self) -> dict[str, Any]:
+        try:
+            if not self._news_rotation_state_path.exists():
+                return {}
+            payload = json.loads(self._news_rotation_state_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            return {}
+        return {}
+
+    def _save_news_rotation_state(self, payload: dict[str, Any]) -> None:
+        try:
+            self._news_rotation_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._news_rotation_state_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
+
+    def _update_news_rotation_state_on_publish(self, item: dict[str, Any], category: str) -> None:
+        source = str((item or {}).get("source", "") or "").strip().lower()
+        domain = source or (urlparse(str((item or {}).get("url", "") or "")).netloc or "").lower()
+        state = self._load_news_rotation_state()
+        domains = [
+            str(x or "").strip().lower()
+            for x in (state.get("last_domains_used", []) or [])
+            if str(x or "").strip()
+        ]
+        if domain:
+            domains = [domain, *[x for x in domains if x != domain]]
+        state.update(
+            {
+                "last_news_category": str(category or "").strip().lower(),
+                "last_domains_used": domains[:6],
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self._save_news_rotation_state(state)
+
+    def _rotate_log_if_large(self, path: Path, *, max_bytes: int = 50 * 1024 * 1024, keep: int = 10) -> None:
+        p = Path(path).resolve()
+        try:
+            if (not p.exists()) or p.stat().st_size <= int(max_bytes):
+                return
+        except Exception:
+            return
+        safe_keep = max(1, int(keep))
+        for idx in range(safe_keep - 1, 0, -1):
+            older = p.with_name(f"{p.name}.{idx}")
+            newer = p.with_name(f"{p.name}.{idx + 1}")
+            if older.exists():
+                try:
+                    newer.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                try:
+                    older.replace(newer)
+                except Exception:
+                    pass
+        first = p.with_name(f"{p.name}.1")
+        try:
+            first.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            p.replace(first)
+        except Exception:
+            return
+        try:
+            p.touch()
+        except Exception:
+            pass
+
+    def _maintenance_tick(self) -> None:
+        for rel in (
+            "storage/logs/visual_pipeline.jsonl",
+            "storage/logs/publisher_upload.jsonl",
+            "storage/logs/thumbnail_gate.jsonl",
+            "storage/logs/news_pool_refresh.jsonl",
+        ):
+            self._rotate_log_if_large(self.root / rel, max_bytes=50 * 1024 * 1024, keep=10)
+        try:
+            self.news_pack_manifest.prune_duplicates()
+        except Exception:
+            pass
+
+    def _run_legacy_news_cleanup_once(self) -> None:
+        if not is_news_mode(self.settings):
+            return
+        state_path = self.root / "storage" / "state" / "legacy_cleanup_state.json"
+        state: dict[str, Any] = {}
+        try:
+            if state_path.exists():
+                loaded = json.loads(state_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    state = loaded
+        except Exception:
+            state = {}
+        if bool(state.get("legacy_library_archived", False)):
+            return
+        src_root = (self.root / "assets" / "library").resolve()
+        if not src_root.exists():
+            state["legacy_library_archived"] = True
+            state["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+            try:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            return
+        archive_root = (self.root / "assets" / "library_legacy_archive").resolve()
+        try:
+            archive_root.mkdir(parents=True, exist_ok=True)
+            legacy_dirs = [
+                p.name
+                for p in src_root.glob("*")
+                if p.is_dir()
+            ]
+            (archive_root / "README.txt").write_text(
+                (
+                    "Legacy library paths are disabled in tech_news_only mode.\n"
+                    "This archive marker is logical-only (no file move).\n"
+                    f"Detected categories: {legacy_dirs}\n"
+                ),
+                encoding="utf-8",
+            )
+            state.update(
+                {
+                    "legacy_library_archived": True,
+                    "archived_mode": "logical",
+                    "archived_from": str(src_root),
+                    "archived_to": str(archive_root),
+                    "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            state.update(
+                {
+                    "legacy_library_archived": False,
+                    "error": str(exc)[:220],
+                    "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     def _news_item_to_candidate(self, item: dict[str, Any]) -> TopicCandidate:
         title = re.sub(r"\s+", " ", str((item or {}).get("title", "") or "")).strip()
         snippet = re.sub(r"\s+", " ", str((item or {}).get("snippet", "") or "")).strip()
@@ -1859,6 +2133,7 @@ class AgentWorkflow:
                 "news_pool_id": int((item or {}).get("id", 0) or 0),
                 "news_category": category or "platform",
                 "published_at": str((item or {}).get("published_at", "") or ""),
+                "topic_fp": str((item or {}).get("topic_fp", "") or ""),
             },
         )
 
@@ -1887,6 +2162,21 @@ class AgentWorkflow:
             source_items.append(f'<li><a href="{escape(source_url)}" rel="nofollow noopener" target="_blank">Original source</a></li>')
         for link in safe_authorities:
             source_items.append(f'<li><a href="{escape(link)}" rel="nofollow noopener" target="_blank">{escape(link)}</a></li>')
+        question_pool = [
+            "What changes first for regular users this week?",
+            "Should teams update immediately or watch rollout signals first?",
+            "Could this affect background sync, sign-in, or notifications for your setup?",
+            "What is the fastest low-risk check you can run today?",
+        ]
+        random.shuffle(question_pool)
+        question_lines = question_pool[:2]
+        compare_block = random.choice(
+            [
+                "Comparison: immediate rollout is faster, but staged rollout lowers rollback risk if issues spread.",
+                "Comparison: waiting 24 hours may delay benefits, but it reduces disruption for mission-critical workflows.",
+                "Comparison: broad policy push gives consistency, while pilot-first gives safer validation data.",
+            ]
+        )
         what_to_do = (
             "<ul>"
             "<li>Check the official update notes and your current app or OS version.</li>"
@@ -1899,8 +2189,10 @@ class AgentWorkflow:
             f"<p>{escape(snippet or title)}</p>"
             "<h2>What Happened</h2>"
             f"<p>According to reports, this {escape(cat)} update affects users who rely on daily workflows.</p>"
+            f"<p>{escape(question_lines[0])}</p>"
             "<h2>Why It Matters (for normal users)</h2>"
             "<p>If this change impacts login, sync, notifications, or background tasks, normal usage can degrade quickly.</p>"
+            f"<p>{escape(question_lines[1])}</p>"
             "<h2>What To Do Now</h2>"
             f"{what_to_do}"
             "<h2>Key Details</h2>"
@@ -1909,6 +2201,7 @@ class AgentWorkflow:
             "<li>Risk level: low to medium depending on current rollout status.</li>"
             "<li>Best practice: test first, then expand changes gradually.</li>"
             "</ul>"
+            f"<p><strong>Example:</strong> {escape(compare_block)}</p>"
             "<h2>What To Watch Next</h2>"
             "<p>Watch official release notes, support advisories, and confirmed user impact updates.</p>"
             "<h2>Sources</h2>"
@@ -2055,6 +2348,13 @@ class AgentWorkflow:
             )
             final_html = self._sanitize_publish_html(base_html, domain=current_domain)
             final_html = self._canonicalize_html_payload(final_html)
+            final_html, removed_news_links = self._strip_forbidden_news_links(final_html)
+            if removed_news_links > 0:
+                degraded_note = self._append_note(degraded_note, f"news_google_link_removed={removed_news_links}")
+                self._append_workflow_perf(
+                    "news_link_sanitize",
+                    {"removed": int(removed_news_links), "domain": current_domain},
+                )
 
             self._progress("qa", "품질 게이트 점검", 56)
             qa_result = self._qa_evaluate(
@@ -2063,22 +2363,44 @@ class AgentWorkflow:
                 domain=current_domain,
                 keyword=selected.title,
                 context="news_initial",
-                include_image_integrity=False,
+                phase="pre_images",
             )
             if self.settings.quality.enabled and self.settings.quality.strict_mode:
                 min_quality = int(getattr(self.settings.quality, "min_quality_score", 85) or 85)
-                if qa_result.score < min_quality:
+                max_passes = 15
+                no_progress_limit = 2
+                pass_no = 0
+                no_progress = 0
+                while (qa_result.score < min_quality) and pass_no < max_passes and no_progress < no_progress_limit:
+                    pass_no += 1
                     improved = self.qa.satisfy_requirements(final_html, qa_result)
-                    if improved != final_html:
-                        final_html = self._canonicalize_html_payload(improved)
-                        qa_result = self._qa_evaluate(
-                            final_html,
-                            title=draft.title,
-                            domain=current_domain,
-                            keyword=selected.title,
-                            context="news_strict_complete",
-                            include_image_integrity=False,
-                        )
+                    improved = self._sanitize_publish_html(improved, domain=current_domain)
+                    improved = self._canonicalize_html_payload(improved)
+                    if improved == final_html:
+                        no_progress += 1
+                        continue
+                    final_html = improved
+                    new_result = self._qa_evaluate(
+                        final_html,
+                        title=draft.title,
+                        domain=current_domain,
+                        keyword=selected.title,
+                        context=f"news_strict_pass_{pass_no}",
+                        phase="pre_images",
+                    )
+                    prev_score = int(qa_result.score)
+                    prev_hard_list = sorted(list(qa_result.hard_failures or []))
+                    next_score = int(new_result.score)
+                    next_hard_list = sorted(list(new_result.hard_failures or []))
+                    qa_result = new_result
+                    improved_score = next_score > prev_score
+                    reduced_hard = len(next_hard_list) < len(prev_hard_list)
+                    if not (improved_score or reduced_hard):
+                        no_progress += 1
+                    else:
+                        no_progress = 0
+                if no_progress >= no_progress_limit and qa_result.score < min_quality:
+                    degraded_note = self._append_note(degraded_note, "qa_no_progress_streak=2")
                 if qa_result.score < min_quality:
                     hold_reason = f"qa_below_threshold:{qa_result.score}/{min_quality}"
                     self.logs.append_run(
@@ -2212,7 +2534,7 @@ class AgentWorkflow:
                 domain=current_domain,
                 keyword=selected.title,
                 context="news_post_image",
-                include_image_integrity=True,
+                phase="post_images",
             )
             if post_image_qa.has_hard_failure:
                 hold_reason = "post_image_qa_hard_fail:" + ",".join(list(post_image_qa.hard_failures or [])[:3])
@@ -2330,6 +2652,7 @@ class AgentWorkflow:
             if claimed_id:
                 self.news_pool_store.mark_used(claimed_id, str(getattr(published, "url", "") or ""))
                 claim_finalized = True
+            self._update_news_rotation_state_on_publish(claimed_item or {}, category)
             self._mark_news_pack_used(images, str(getattr(published, "post_id", "") or ""))
 
             self.logs.add_scheduled_post(
@@ -2386,6 +2709,7 @@ class AgentWorkflow:
 
     def run_once(self, manual_trigger: bool = False) -> WorkflowResult:
         self._workflow_perf_start_run(manual_trigger=bool(manual_trigger))
+        self._maintenance_tick()
         self._pending_keyword_claims = []
         self._active_slot_id = ""
         self._set_image_pipeline_state(
@@ -4043,11 +4367,7 @@ class AgentWorkflow:
 
     def _cleanup_local_image_files(self, images: list[ImageAsset]) -> int:
         removed = 0
-        protected_roots = [
-            (self.root / "assets" / "library").resolve(),
-            (self.root / "assets" / "fallback").resolve(),
-            (self.root / "assets" / "news_pack_cache").resolve(),
-        ]
+        temp_root = (self.root / "storage" / "temp_images").resolve()
         for img in (images or []):
             try:
                 p = Path(getattr(img, "path", ""))
@@ -4057,7 +4377,7 @@ class AgentWorkflow:
                 continue
             try:
                 rp = p.resolve()
-                if any(str(rp).startswith(str(pr)) for pr in protected_roots):
+                if not str(rp).startswith(str(temp_root)):
                     continue
                 if p.exists():
                     p.unlink(missing_ok=True)
@@ -5816,8 +6136,12 @@ class AgentWorkflow:
 
         if re.search(r"(https?://(?:www\.)?google\.com(?:/search)?[^\s\"<]*)", merged, flags=re.IGNORECASE):
             errors.append("forbidden_google_link_detected")
+        if re.search(r"(https?://[^\s\"<]*(?:googleusercontent\.com|googleapis\.com)[^\s\"<]*)", merged, flags=re.IGNORECASE):
+            errors.append("forbidden_google_service_link_detected")
         if "<figcaption" in merged:
             errors.append("forbidden_figcaption_detected")
+        if re.search(r"<h[23][^>]*>\s*faq\s*</h[23]>", str(final_html or ""), flags=re.IGNORECASE):
+            errors.append("forbidden_faq_detected")
 
         banned_tokens = list(getattr(self.settings.quality, "banned_debug_patterns", []) or [])
         if not banned_tokens:
@@ -6397,6 +6721,18 @@ class AgentWorkflow:
             out,
             flags=re.IGNORECASE,
         )
+        out = re.sub(
+            r"<a[^>]+href=\"https?://[^\"]*(?:googleusercontent\.com|googleapis\.com)[^\"]*\"[^>]*>(.*?)</a>",
+            r"\1",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        out = re.sub(
+            r"https?://[^\s\"<]*(?:googleusercontent\.com|googleapis\.com)[^\s\"<]*",
+            "",
+            out,
+            flags=re.IGNORECASE,
+        )
         # Translate common heavy technical terms into plain language.
         jargon_map = {
             r"\bCUDA kernel\b": "AI processing engine",
@@ -6424,6 +6760,19 @@ class AgentWorkflow:
                 out,
                 flags=re.IGNORECASE,
             )
+        # FAQ is prohibited for production news posts.
+        out = re.sub(
+            r"<h2[^>]*>\s*faq\s*</h2>.*?(?=<h2\b|$)",
+            "",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        out = re.sub(
+            r"<h3[^>]*>\s*faq\s*</h3>.*?(?=<h2\b|<h3\b|$)",
+            "",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         # Collapse accidental repeated fallback lines from QA no-progress loops.
         out = self._collapse_repeated_paragraph_line(
             out,
@@ -6538,6 +6887,26 @@ class AgentWorkflow:
                 continue
             return out + block
         return out
+
+    def _strip_forbidden_news_links(self, html: str) -> tuple[str, int]:
+        src = str(html or "")
+        if not src:
+            return src, 0
+        removed = 0
+        out = src
+        patterns = [
+            r"<a[^>]+href=[\"']https?://(?:www\.)?google\.com[^\"']*[\"'][^>]*>.*?</a>",
+            r"<a[^>]+href=[\"']https?://[^\"']*googleusercontent\.com[^\"']*[\"'][^>]*>.*?</a>",
+            r"<a[^>]+href=[\"']https?://[^\"']*googleapis\.com[^\"']*[\"'][^>]*>.*?</a>",
+            r"https?://(?:www\.)?google\.com/[^\s\"'<>]+",
+            r"https?://[^/\s\"'<>]*googleusercontent\.com[^\s\"'<>]*",
+            r"https?://[^/\s\"'<>]*googleapis\.com[^\s\"'<>]*",
+        ]
+        for pat in patterns:
+            out, hit = re.subn(pat, "", out, flags=re.IGNORECASE | re.DOTALL)
+            removed += int(hit or 0)
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        return out, int(removed)
 
     def _collapse_repeated_paragraph_line(self, html: str, line: str) -> str:
         sentence = re.escape(line.strip())

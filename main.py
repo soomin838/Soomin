@@ -166,6 +166,12 @@ class AgentController:
         self.workflow.set_progress_hook(self._on_workflow_progress)
         self._apply_runtime_patch_if_present()
         self.lock = threading.Lock()
+        self._news_pool_tick_lock = threading.Lock()
+        self._next_news_pool_tick_epoch = time.time() + max(
+            30,
+            int(getattr(self.settings.sources, "news_pool_background_tick_minutes", 30) or 30) * 60
+            + random.randint(-20, 20),
+        )
         self.tz = safe_tz(self.settings.timezone)
         self.scheduler_state_path = ROOT / "storage" / "logs" / "run_schedule_state.json"
         self.scheduler_slots: list[datetime] = []
@@ -468,6 +474,11 @@ class AgentController:
             self.workflow = AgentWorkflow(ROOT, self.settings)
             self.workflow.set_progress_hook(self._on_workflow_progress)
             self._apply_runtime_patch_if_present()
+            self._next_news_pool_tick_epoch = time.time() + max(
+                30,
+                int(getattr(self.settings.sources, "news_pool_background_tick_minutes", 30) or 30) * 60
+                + random.randint(-20, 20),
+            )
             self.tz = safe_tz(self.settings.timezone)
             self._bootstrap_rolling_scheduler()
             self.qa.write(
@@ -613,6 +624,29 @@ class AgentController:
                 except Exception:
                     pass
                 last_news_pack_tick_epoch = now_epoch
+            if bool(getattr(self.settings.sources, "news_pool_background_tick_enabled", True)):
+                if now_epoch >= float(self._next_news_pool_tick_epoch or 0.0):
+                    acquired_tick = self._news_pool_tick_lock.acquire(blocking=False)
+                    interval_sec = max(
+                        60,
+                        int(getattr(self.settings.sources, "news_pool_background_tick_minutes", 30) or 30) * 60,
+                    )
+                    if not acquired_tick:
+                        # Keep loop non-blocking; try again soon.
+                        self._next_news_pool_tick_epoch = now_epoch + random.randint(8, 18)
+                    else:
+                        try:
+                            self.workflow.news_pool_refresh_tick_if_needed(force=False)
+                        except Exception:
+                            pass
+                        finally:
+                            try:
+                                self._news_pool_tick_lock.release()
+                            except Exception:
+                                pass
+                        self._next_news_pool_tick_epoch = (
+                            now_epoch + interval_sec + random.randint(-20, 20)
+                        )
 
             self._maybe_refresh_scheduler(force=False)
             now = datetime.now(self.tz)

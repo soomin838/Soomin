@@ -64,7 +64,8 @@ class ContentQAGate:
         title: str = "",
         domain: str = "tech_troubleshoot",
         keyword: str = "",
-        include_image_integrity: bool = True,
+        include_image_integrity: bool | None = None,
+        phase: str = "post_images",
     ) -> QAResult:
         start_all = time.perf_counter()
         run_id = uuid.uuid4().hex[:12]
@@ -76,9 +77,21 @@ class ContentQAGate:
             breakdown_ms[name] = int(round((time.perf_counter() - t0) * 1000))
             return value
 
+        phase_norm = str(phase or "post_images").strip().lower()
+        if phase_norm not in {"pre_images", "post_images"}:
+            phase_norm = "post_images"
+        if include_image_integrity is None:
+            include_image_integrity_effective = phase_norm != "pre_images"
+        else:
+            include_image_integrity_effective = bool(include_image_integrity)
+
         qa_mode = str(getattr(self.settings, "qa_mode", "quick") or "quick").strip().lower()
         if qa_mode not in {"quick", "full"}:
             qa_mode = "quick"
+        domain_norm = str(domain or "").strip().lower()
+        is_news_domain = domain_norm == "tech_news_explainer"
+        if is_news_domain:
+            qa_mode = "full"
 
         checks: list[QACheck] = []
         hard_failures: list[str] = []
@@ -207,7 +220,7 @@ class ContentQAGate:
             hard_reason="forbidden_phrase_or_format_detected",
         )
 
-        if bool(include_image_integrity):
+        if bool(include_image_integrity_effective):
             image_fail, image_detail = _timed(
                 "image_integrity_detect",
                 lambda: self._detect_image_integrity(html=html),
@@ -224,10 +237,22 @@ class ContentQAGate:
             _add_check(
                 "image_integrity",
                 True,
-                "image_integrity_skipped(pre_image_phase)",
+                f"image_integrity_skipped({phase_norm})",
                 weight=0,
                 hard_reason="",
             )
+
+        faq_fail, faq_detail = _timed(
+            "faq_section_detect",
+            lambda: self._detect_faq_section(html=html, text=text),
+        )
+        _add_check(
+            "forbid_faq",
+            not faq_fail,
+            faq_detail or "faq_absent",
+            weight=0,
+            hard_reason="faq_detected",
+        )
 
         title_intent_fail, title_intent_detail = _timed(
             "title_intent_detect",
@@ -315,7 +340,7 @@ class ContentQAGate:
 
         human_checks: list[QACheck] = []
         soft_score = 100
-        if qa_mode == "full" and self.settings.humanity_enabled and (not hard_failures):
+        if qa_mode == "full" and self.settings.humanity_enabled and (not hard_failures) and (not is_news_domain):
             human_checks, soft_score, human_hard = _timed(
                 "humanity_50_evaluate",
                 lambda: self._evaluate_humanity_50(text, html),
@@ -338,7 +363,7 @@ class ContentQAGate:
                     round((base_score * (100 - weight) / 100.0) + (soft_score * weight / 100.0))
                 )
 
-        if qa_mode == "full" and self.settings.humanity_enabled and soft_score < int(self.settings.humanity_min_soft_score):
+        if qa_mode == "full" and self.settings.humanity_enabled and (not is_news_domain) and soft_score < int(self.settings.humanity_min_soft_score):
             hard_failures.append(
                 f"humanity_soft_floor({soft_score}/{int(self.settings.humanity_min_soft_score)})"
             )
@@ -362,7 +387,8 @@ class ContentQAGate:
             breakdown_ms=breakdown_ms,
             passed=(not result.has_hard_failure),
             hard_failures=result.hard_failures,
-            include_image_integrity=bool(include_image_integrity),
+            include_image_integrity=bool(include_image_integrity_effective),
+            phase=phase_norm,
         )
         self._print_qa_timing(total_ms=total_ms, breakdown_ms=breakdown_ms, qa_mode=qa_mode)
         return result
@@ -1044,6 +1070,15 @@ class ContentQAGate:
             return True, "forbidden_markup:figcaption"
         return False, ""
 
+    def _detect_faq_section(self, html: str, text: str) -> tuple[bool, str]:
+        raw_html = str(html or "")
+        lower_text = str(text or "").lower()
+        if re.search(r"<h[23][^>]*>\s*faq\s*</h[23]>", raw_html, flags=re.IGNORECASE):
+            return True, "faq_heading_detected"
+        if re.search(r"(?m)^\s*faq\s*[:\-]", lower_text):
+            return True, "faq_block_detected"
+        return False, ""
+
     def _strip_non_english_lines(self, html: str) -> str:
         src = str(html or "")
         src = re.sub(
@@ -1150,6 +1185,7 @@ class ContentQAGate:
         passed: bool,
         hard_failures: list[str],
         include_image_integrity: bool = True,
+        phase: str = "post_images",
     ) -> None:
         path = self.qa_timing_path
         try:
@@ -1166,6 +1202,7 @@ class ContentQAGate:
                 "keyword": str(keyword or "").strip()[:180],
                 "domain": str(domain or "").strip(),
                 "qa_mode": str(qa_mode or "quick").strip().lower(),
+                "phase": str(phase or "post_images").strip().lower(),
                 "include_image_integrity": bool(include_image_integrity),
                 "total_ms": int(max(0, total_ms)),
                 "breakdown_ms": {str(k): int(max(0, int(v))) for k, v in (breakdown_ms or {}).items()},

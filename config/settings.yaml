@@ -268,11 +268,20 @@ sources:
   news_pool_min_items: 80
   news_pool_max_items: 800
   news_pool_refresh_interval_minutes: 120
+  news_pool_background_tick_enabled: true
+  news_pool_background_tick_minutes: 30
+  news_pool_background_max_feeds_per_tick: 5
   news_pool_feeds:
     - "https://techcrunch.com/feed/"
     - "https://www.theverge.com/rss/index.xml"
     - "https://www.wired.com/feed/rss"
+    - "https://feeds.arstechnica.com/arstechnica/index"
     - "https://venturebeat.com/feed/"
+    - "https://www.cisa.gov/uscert/ncas/alerts.xml"
+    - "https://www.cisa.gov/uscert/ncas/current-activity.xml"
+    - "https://aws.amazon.com/blogs/security/feed/"
+    - "https://security.googleblog.com/feeds/posts/default"
+    - "https://news.ycombinator.com/rss"
   news_pool_keywords_allow: []
   news_pool_keywords_block:
     - "deal"
@@ -283,7 +292,12 @@ sources:
     "techcrunch.com": 1.0
     "theverge.com": 1.0
     "wired.com": 1.0
+    "arstechnica.com": 1.0
     "venturebeat.com": 0.95
+    "cisa.gov": 1.1
+    "aws.amazon.com": 1.05
+    "security.googleblog.com": 1.05
+    "news.ycombinator.com": 0.9
   news_pool_pick_top_k: 60
   news_pool_keep_used_days: 30
 

@@ -136,3 +136,54 @@ def fetch_feed(feed_url: str, timeout: int = 20) -> list[dict[str, Any]]:
     except Exception:
         return []
 
+
+def fetch_feed_detailed(feed_url: str, timeout: int = 20) -> dict[str, Any]:
+    url = str(feed_url or "").strip()
+    if not url:
+        return {
+            "ok": False,
+            "status_code": 0,
+            "error": "empty_feed_url",
+            "items": [],
+            "feed_url": "",
+        }
+    try:
+        res = requests.get(
+            url,
+            timeout=max(5, int(timeout)),
+            headers={"User-Agent": "RezeroAgent-NewsPool/1.0"},
+        )
+        status = int(getattr(res, "status_code", 0) or 0)
+        if status != 200:
+            return {
+                "ok": False,
+                "status_code": status,
+                "error": f"http_{status}",
+                "items": [],
+                "feed_url": url,
+                "response_preview": str(getattr(res, "text", "") or "")[:220],
+            }
+        items = parse_feed_xml(str(getattr(res, "text", "") or ""), feed_url=url)
+        return {
+            "ok": True,
+            "status_code": status,
+            "error": "",
+            "items": items,
+            "feed_url": url,
+        }
+    except requests.Timeout:
+        return {
+            "ok": False,
+            "status_code": 0,
+            "error": "timeout",
+            "items": [],
+            "feed_url": url,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status_code": 0,
+            "error": str(exc)[:180] or "request_failed",
+            "items": [],
+            "feed_url": url,
+        }

@@ -55,6 +55,13 @@ class ThumbnailOverlayRenderer:
             draw.text((x + ox, y + oy), text, font=title_font, fill=(0, 0, 0, 230))
         draw.text((x, y), text, font=title_font, fill=(255, 255, 255, 255))
 
+        label_palettes = [
+            ((28, 90, 184, 210), (170, 215, 255, 220), (242, 248, 255, 255)),
+            ((18, 132, 105, 210), (160, 242, 214, 220), (236, 255, 247, 255)),
+            ((137, 62, 184, 210), (218, 189, 245, 220), (249, 240, 255, 255)),
+            ((185, 92, 38, 210), (245, 201, 170, 220), (255, 247, 238, 255)),
+        ]
+        fill_color, outline_color, text_color = random.choice(label_palettes)
         label_w = int(w * 0.22)
         label_h = int(h * 0.08)
         lx = int(w * 0.05)
@@ -62,11 +69,11 @@ class ThumbnailOverlayRenderer:
         draw.rounded_rectangle(
             [(lx, ly), (lx + label_w, ly + label_h)],
             radius=max(8, int(label_h * 0.25)),
-            fill=(28, 90, 184, 210),
-            outline=(170, 215, 255, 220),
+            fill=fill_color,
+            outline=outline_color,
             width=2,
         )
-        draw.text((lx + int(label_w * 0.1), ly + int(label_h * 0.22)), label, font=label_font, fill=(242, 248, 255, 255))
+        draw.text((lx + int(label_w * 0.1), ly + int(label_h * 0.22)), label, font=label_font, fill=text_color)
         image.convert("RGB").save(dst, format="PNG", optimize=True)
         return dst
 
@@ -76,6 +83,7 @@ class ThumbnailOverlayRenderer:
             "C:/Windows/Fonts/arialbd.ttf",
             "C:/Windows/Fonts/verdanab.ttf",
         ]
+        random.shuffle(candidates)
         for path in candidates:
             try:
                 return ImageFont.truetype(path, max(12, int(size)))
@@ -96,4 +104,3 @@ class ThumbnailOverlayRenderer:
         if not cleaned:
             return "TECH NEWS"
         return cleaned[:18]
-

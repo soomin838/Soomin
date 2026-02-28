@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import random
+import re
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,6 +48,7 @@ class NewsPoolItem:
     used_at: str
     published_url: str
     created_at: str
+    topic_fp: str
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +65,7 @@ class NewsPoolItem:
             "used_at": str(self.used_at or ""),
             "published_url": str(self.published_url or ""),
             "created_at": str(self.created_at or ""),
+            "topic_fp": str(self.topic_fp or ""),
         }
 
 
@@ -92,17 +97,39 @@ class NewsPoolStore:
                     claimed_at TEXT NOT NULL DEFAULT '',
                     used_at TEXT NOT NULL DEFAULT '',
                     published_url TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL DEFAULT ''
+                    created_at TEXT NOT NULL DEFAULT '',
+                    topic_fp TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            cols = {
+                str(r[1] or "").strip().lower()
+                for r in (conn.execute("PRAGMA table_info(news_items)").fetchall() or [])
+            }
+            if "topic_fp" not in cols:
+                conn.execute("ALTER TABLE news_items ADD COLUMN topic_fp TEXT NOT NULL DEFAULT ''")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_news_status_score ON news_items(status, score DESC, published_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_news_published_at ON news_items(published_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_news_used_at ON news_items(used_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_news_topic_fp_created ON news_items(topic_fp, created_at)")
+
+    @staticmethod
+    def _compute_topic_fp(title: str, snippet: str) -> str:
+        raw = f"{str(title or '')} {str(snippet or '')}".lower()
+        tokens = re.findall(r"[a-z0-9]{3,}", raw)
+        if not tokens:
+            return ""
+        counts = Counter(tokens)
+        top = [tok for tok, _ in sorted(counts.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))[:8]]
+        payload = " ".join(top).strip()
+        if not payload:
+            return ""
+        return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
 
     def upsert_items(self, rows: list[dict[str, Any]]) -> int:
         added_or_updated = 0
         now = _iso()
+        fp_cutoff = _iso(_utc_now() - timedelta(hours=72))
         with self._connect() as conn:
             for row in rows or []:
                 url = str((row or {}).get("url", "") or "").strip()
@@ -114,22 +141,41 @@ class NewsPoolStore:
                 snippet = str((row or {}).get("snippet", "") or "").strip()
                 category = str((row or {}).get("category", "") or "").strip().lower()
                 score = int((row or {}).get("score", 0) or 0)
+                topic_fp = str((row or {}).get("topic_fp", "") or "").strip().lower()
+                if not topic_fp:
+                    topic_fp = self._compute_topic_fp(title, snippet)
+                if topic_fp:
+                    dup = conn.execute(
+                        """
+                        SELECT id
+                        FROM news_items
+                        WHERE topic_fp=?
+                          AND url!=?
+                          AND created_at!=''
+                          AND created_at>=?
+                        LIMIT 1
+                        """,
+                        (topic_fp, url, fp_cutoff),
+                    ).fetchone()
+                    if dup is not None:
+                        continue
                 conn.execute(
                     """
                     INSERT INTO news_items (
-                        url, title, source, published_at, snippet, category, status, score, created_at
+                        url, title, source, published_at, snippet, category, status, score, created_at, topic_fp
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                     ON CONFLICT(url) DO UPDATE SET
                         title=excluded.title,
                         source=excluded.source,
                         published_at=excluded.published_at,
                         snippet=excluded.snippet,
                         category=excluded.category,
-                        score=excluded.score
+                        score=excluded.score,
+                        topic_fp=excluded.topic_fp
                     WHERE news_items.status IN ('queued', 'claimed')
                     """,
-                    (url, title, source, published_at, snippet, category, score, now),
+                    (url, title, source, published_at, snippet, category, score, now, topic_fp),
                 )
                 added_or_updated += 1
         return int(added_or_updated)
@@ -168,6 +214,8 @@ class NewsPoolStore:
         news_pool_days: int = 7,
         top_k: int = 60,
         source_weights: dict[str, float] | None = None,
+        avoid_category: str = "",
+        recent_domains: list[str] | None = None,
     ) -> dict[str, Any] | None:
         self._release_stale_claims()
         safe_days = max(1, int(news_pool_days))
@@ -178,13 +226,19 @@ class NewsPoolStore:
             for k, v in (source_weights or {}).items()
             if str(k or "").strip()
         }
+        avoid_category_norm = str(avoid_category or "").strip().lower()
+        recent_domain_list = [
+            str(x or "").strip().lower()
+            for x in (recent_domains or [])
+            if str(x or "").strip()
+        ][:6]
 
         for _ in range(2):
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
                     """
-                    SELECT id, url, title, source, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at
+                    SELECT id, url, title, source, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at, topic_fp
                     FROM news_items
                     WHERE status='queued'
                       AND (published_at='' OR published_at >= ?)
@@ -209,7 +263,19 @@ class NewsPoolStore:
                         recency_factor = max(0.10, 1.25 - min(1.15, age_h / 72.0))
                     src = str(row["source"] or "").strip().lower()
                     src_weight = float(source_weights.get(src, 1.0))
-                    weighted.append((max(1.0, score * recency_factor * max(0.2, src_weight)), row))
+                    category_penalty = 1.0
+                    row_category = str(row["category"] or "").strip().lower()
+                    if avoid_category_norm and row_category and row_category == avoid_category_norm:
+                        category_penalty = 0.35
+                    domain_penalty = 1.0
+                    if src and src in recent_domain_list:
+                        idx = recent_domain_list.index(src)
+                        domain_penalty = max(0.35, 1.0 - ((len(recent_domain_list) - idx) * 0.08))
+                    weighted_score = max(
+                        1.0,
+                        score * recency_factor * max(0.2, src_weight) * category_penalty * domain_penalty,
+                    )
+                    weighted.append((weighted_score, row))
 
                 choice_rows = [r for _, r in weighted]
                 choice_weights = [w for w, _ in weighted]
@@ -316,7 +382,7 @@ class NewsPoolStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, url, title, source, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at
+                SELECT id, url, title, source, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at, topic_fp
                 FROM news_items
                 WHERE id=?
                 LIMIT 1
@@ -339,5 +405,5 @@ class NewsPoolStore:
             used_at=str(row["used_at"] or ""),
             published_url=str(row["published_url"] or ""),
             created_at=str(row["created_at"] or ""),
+            topic_fp=str(row["topic_fp"] or ""),
         ).as_dict()
-

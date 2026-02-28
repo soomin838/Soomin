@@ -385,6 +385,22 @@ class GeminiBrain:
         category: str,
         plan: dict | None = None,
     ) -> DraftPost:
+        module_pool = [
+            "impact_by_user_type",
+            "timeline_snapshot",
+            "official_statement_summary",
+            "risk_level_breakdown",
+            "rollback_vs_wait_comparison",
+            "regional_rollout_note",
+            "known_unknowns",
+            "cost_or_effort_estimate",
+            "what_changed_since_last_update",
+            "edge_case_callout",
+            "one_concrete_example",
+            "what_to_watch_signal_list",
+        ]
+        random.shuffle(module_pool)
+        selected_modules = module_pool[: random.randint(6, 8)]
         plan_payload = dict(plan or {})
         category_norm = re.sub(r"\s+", " ", str(category or "platform").strip().lower()) or "platform"
         primary_topic = re.sub(
@@ -405,6 +421,7 @@ class GeminiBrain:
             "Tone: factual, concise, ad-safe, and attribution-first.\n"
             "No defamation. No unverified allegations.\n"
             "Use attribution phrasing for uncertain claims: reported, may, could, according to.\n"
+            "Do NOT include FAQ section.\n"
             "Required exact H2 section order:\n"
             "Quick Take\n"
             "What Happened\n"
@@ -414,6 +431,8 @@ class GeminiBrain:
             "What To Watch Next\n"
             "Sources\n"
             "What To Do Now must include 3-7 bullet steps.\n"
+            "The article must include at least 2 question sentences and one explicit comparison/example block.\n"
+            f"Use 6-8 diversity modules from this pool: {selected_modules}\n"
             "Sources must include the original source URL and 1-2 authority links when available.\n"
             "No screenshots, no logo references, no copyright-sensitive image instructions.\n"
             "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n"
@@ -439,6 +458,12 @@ class GeminiBrain:
         html = self._remove_ai_markers(
             str(payload.get("content_html", payload.get("html", ""))),
             domain="tech_news_explainer",
+        )
+        html = re.sub(
+            r"<h[23][^>]*>\s*faq\s*</h[23]>.*?(?=<h2\b|<h3\b|$)",
+            "",
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
         )
         html = self._enforce_html_minimum(html)
         _focus_keywords = payload.get("focus_keywords", [])

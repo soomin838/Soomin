@@ -72,6 +72,10 @@ class NewsActionabilityGate:
             reasons.append("external_links_missing")
             score -= 25
 
+        if re.search(r"<h[23][^>]*>\s*faq\s*</h[23]>", src, flags=re.IGNORECASE):
+            reasons.append("faq_detected")
+            score -= 40
+
         score = max(0, min(100, int(score)))
         ok = (not reasons) and score >= 70
         details = {
@@ -82,4 +86,3 @@ class NewsActionabilityGate:
             "has_sources_h2": bool(has_sources_h2),
         }
         return NewsActionabilityGateResult(ok=ok, score=score, reasons=reasons, details=details)
-

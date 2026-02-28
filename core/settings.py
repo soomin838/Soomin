@@ -52,12 +52,21 @@ class SourceSettings:
     news_pool_min_items: int = 80
     news_pool_max_items: int = 800
     news_pool_refresh_interval_minutes: int = 120
+    news_pool_background_tick_enabled: bool = True
+    news_pool_background_tick_minutes: int = 30
+    news_pool_background_max_feeds_per_tick: int = 5
     news_pool_feeds: list[str] = field(
         default_factory=lambda: [
             "https://techcrunch.com/feed/",
             "https://www.theverge.com/rss/index.xml",
             "https://www.wired.com/feed/rss",
+            "https://feeds.arstechnica.com/arstechnica/index",
             "https://venturebeat.com/feed/",
+            "https://www.cisa.gov/uscert/ncas/alerts.xml",
+            "https://www.cisa.gov/uscert/ncas/current-activity.xml",
+            "https://aws.amazon.com/blogs/security/feed/",
+            "https://security.googleblog.com/feeds/posts/default",
+            "https://news.ycombinator.com/rss",
         ]
     )
     news_pool_keywords_allow: list[str] = field(default_factory=list)
