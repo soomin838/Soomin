@@ -5933,27 +5933,152 @@ class AgentWorkflow:
                     " ",
                     str((getattr(candidate, "meta", {}) or {}).get("news_category", "") or ""),
                 ).strip().lower()
-            keyword_hint = re.sub(r"\s+", " ", str(pref or base_candidate_title or raw)).strip()
-            templates = [
-                f"{keyword_hint}: what changed for users",
-                f"{keyword_hint}: what it means and what to do now",
-                f"{keyword_hint}: who is affected and what to watch next",
+            topic_phrase = re.sub(r"\s+", " ", str(pref or base_candidate_title or raw)).strip()
+            if not topic_phrase:
+                topic_phrase = "Tech update"
+
+            banned_tokens = [
+                "shocking",
+                "disaster",
+                "scam",
+                "fraud",
+                "criminal",
+                "exposed",
+                "destroyed",
+                "caught",
+                "why everyone is talking",
+                "everyone is talking",
+                "ultimate guide",
+                "fixes that actually work",
             ]
-            if category_hint in {"security", "policy", "privacy", "ai", "platform", "mobile", "chips"}:
-                templates.insert(0, f"{keyword_hint} {category_hint} update: what changes for users")
-            candidate_title = templates[0] if len(raw) < 30 else raw
-            candidate_title = re.sub(
+            banned_tokens += [
+                str(x or "").strip().lower()
+                for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
+                if str(x or "").strip()
+            ]
+
+            recent_titles = self._get_recent_blogger_titles(limit=120, refresh_api=False)
+            api_ready = bool(
+                (self.settings.gemini.api_key or "").strip()
+                and (self.settings.gemini.api_key or "").strip() != "GEMINI_API_KEY"
+            )
+            allow_gemini = api_ready and (self._gemini_budget_remaining() > 0)
+
+            def score_news_title(t: str) -> int:
+                tt = re.sub(r"\s+", " ", str(t or "")).strip()
+                low = tt.lower()
+                if not tt:
+                    return -9999
+                if "faq" in low or "frequently asked" in low:
+                    return -9000
+                if "google.com" in low:
+                    return -9000
+                if re.search(
+                    r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
+                    low,
+                ):
+                    return -8000
+                n = len(tt)
+                s = 0
+                if 45 <= n <= 95:
+                    s += 25
+                elif 36 <= n <= 105:
+                    s += 10
+                else:
+                    s -= 10
+                if re.search(r"\b\d{1,4}\b", tt):
+                    s += 6
+                if any(
+                    w in low for w in ["update", "policy", "security", "ai", "rollout", "patch", "ban", "release"]
+                ):
+                    s += 8
+                if any(
+                    phrase in low
+                    for phrase in [
+                        "what changes",
+                        "what changed",
+                        "what it means",
+                        "who is affected",
+                        "what to do now",
+                    ]
+                ):
+                    s += 3
+                if self._is_recent_title_duplicate(tt):
+                    s -= 200
+                return s
+
+            best = raw
+            if allow_gemini:
+                try:
+                    variants = self.brain.generate_news_title_variants(
+                        category=(category_hint or "platform"),
+                        source_title=topic_phrase,
+                        source_snippet=(
+                            str(getattr(candidate, "body", "") or "")[:420]
+                            if isinstance(candidate, TopicCandidate)
+                            else ""
+                        ),
+                        recent_titles=recent_titles,
+                        banned_tokens=banned_tokens,
+                        limit=10,
+                    )
+                    if self.brain.call_count:
+                        self.logs.increment_today_gemini_count(self.brain.call_count)
+                        self.brain.reset_run_counter()
+                    if variants:
+                        best = max(variants, key=score_news_title)
+                except Exception:
+                    if self.brain.call_count:
+                        self.logs.increment_today_gemini_count(self.brain.call_count)
+                        self.brain.reset_run_counter()
+
+            verbs = ["shifts", "rolls out", "tightens", "expands", "pauses", "revises", "changes", "adds", "drops"]
+            angles = [
+                "what changes for users",
+                "what it means in practice",
+                "who is affected",
+                "what to do now",
+                "what to watch next",
+                "why it matters this week",
+                "what's different from last time",
+            ]
+            frames = [
+                "{topic} {verb}: {angle}",
+                "{topic} {verb} - {angle}",
+                "{verb_cap} at {topic}: {angle}",
+                "{topic}: {angle} after the latest {category} move",
+            ]
+            verb = random.choice(verbs)
+            verb_cap = verb[:1].upper() + verb[1:]
+            angle = random.choice(angles)
+            category_word = category_hint if category_hint else "platform"
+
+            if (not best) or len(best) < 36 or self._is_recent_title_duplicate(best):
+                candidates_local = []
+                for _ in range(18):
+                    tpl = random.choice(frames)
+                    title_local = tpl.format(
+                        topic=topic_phrase,
+                        verb=verb,
+                        verb_cap=verb_cap,
+                        angle=angle,
+                        category=category_word,
+                    )
+                    title_local = re.sub(r"\s+", " ", title_local).strip(" -:")[:100]
+                    candidates_local.append(title_local)
+                best = max(candidates_local, key=score_news_title)
+
+            best = re.sub(
                 r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
                 "",
-                candidate_title,
+                best,
                 flags=re.IGNORECASE,
             )
-            candidate_title = re.sub(r"\s+", " ", candidate_title).strip(" -:")
-            if len(candidate_title) > 95:
-                candidate_title = candidate_title[:95].rstrip(" ,.;:")
-            if len(candidate_title) < 42:
-                candidate_title = templates[min(1, len(templates) - 1)][:95]
-            return candidate_title
+            best = re.sub(r"\s+", " ", best).strip(" -:")
+            if len(best) > 95:
+                best = best[:95].rstrip(" ,.;:-")
+
+            return best
         banned_topics = [
             str(x or "").strip().lower()
             for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])

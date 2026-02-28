@@ -752,6 +752,10 @@ def load_settings(path: Path) -> AppSettings:
         )
     raw.setdefault("publish", {})
     publish_raw = dict(raw.get("publish", {}) or {})
+    raw.setdefault("gemini", {})
+    gemini_raw = dict(raw.get("gemini", {}) or {})
+    gemini_raw["api_key"] = str(os.getenv("GEMINI_API_KEY") or gemini_raw.get("api_key", "")).strip()
+    raw["gemini"] = gemini_raw
     publish_raw.setdefault("r2", {})
     r2_raw = dict(publish_raw.get("r2", {}) or {})
     # ENV-first override policy for secrets.

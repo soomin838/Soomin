@@ -721,6 +721,100 @@ class GeminiBrain:
         )
         return variants[:10]
 
+    def generate_news_title_variants(
+        self,
+        *,
+        category: str,
+        source_title: str,
+        source_snippet: str,
+        recent_titles: list[str],
+        banned_tokens: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[str]:
+        """
+        Generate diverse US-English *news explainer* titles.
+        Avoid templated patterns; avoid FAQ; avoid clickbait; avoid google.com references.
+        Returns up to `limit` unique titles.
+        """
+        banned = [
+            str(x or "").strip().lower()
+            for x in (banned_tokens or [])
+            if str(x or "").strip()
+        ]
+        recent = [
+            re.sub(r"\s+", " ", str(t or "")).strip()
+            for t in (recent_titles or [])
+            if str(t or "").strip()
+        ][:80]
+        cat = re.sub(r"\s+", " ", str(category or "platform")).strip().lower()[:30]
+        st = re.sub(r"\s+", " ", str(source_title or "")).strip()[:180]
+        sn = re.sub(r"\s+", " ", str(source_snippet or "")).strip()[:420]
+
+        prompt = (
+            "You are an experienced US tech news editor.\n"
+            "Task: write DISTINCT, non-templated blog headlines for a US tech news explainer article.\n"
+            "Language: American English only. Never output Korean.\n"
+            "Do NOT include FAQ. Do NOT include 'guide' in a generic way.\n"
+            "Avoid clickbait and sensational words. Avoid legal claims. No defamation.\n"
+            "Avoid repeated patterns across titles. Vary grammar, verbs, and structure.\n"
+            "Hard constraints:\n"
+            "- 45 to 95 characters ideal (hard max 100)\n"
+            "- Must be specific and factual\n"
+            "- Must not contain: shocking, disaster, scam, fraud, criminal, exposed, destroyed, caught\n"
+            "- Must not contain google.com or any search-engine references\n"
+            "- Must not start with the same first 3 words more than once\n"
+            f"- Category hint: {cat}\n"
+            f"- Source title: {st}\n"
+            f"- Source snippet: {sn}\n"
+            f"- Recent titles to avoid repeating: {recent[:50]}\n"
+            f"- Additional banned tokens: {banned[:20]}\n"
+            "Return strict JSON only: {\"titles\": [\"...\", ...]} with exactly 12 candidates.\n"
+        )
+
+        raw = self._generate_text_forced_model(
+            prompt=prompt,
+            model=(self.settings.model or "gemini-2.0-flash"),
+            system_instruction=(
+                "You write human, natural, US-native tech news headlines. "
+                "You avoid templates and vary structure aggressively while staying factual."
+            ),
+        )
+        payload = self._extract_json(raw)
+        titles = payload.get("titles", [])
+        if not isinstance(titles, list):
+            titles = []
+
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in titles:
+            t = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", str(item or ""))
+            t = re.sub(r"\s+", " ", t).strip().strip("\"'")[:110]
+            if not t:
+                continue
+            low = t.lower()
+            if "faq" in low or "frequently asked" in low:
+                continue
+            if "google.com" in low:
+                continue
+            if re.search(
+                r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
+                low,
+            ):
+                continue
+            if any(bt in low for bt in banned):
+                continue
+            if len(t) > 100:
+                t = t[:100].rstrip(" ,.;:-")
+            key = t.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(t)
+            if len(cleaned) >= max(1, int(limit)):
+                break
+
+        return cleaned[: max(1, int(limit))]
+
     def _normalize_headline_variants(self, payload: dict, raw_text: str, fallback_title: str) -> list[str]:
         raw = payload.get("variants", [])
         if not isinstance(raw, list):

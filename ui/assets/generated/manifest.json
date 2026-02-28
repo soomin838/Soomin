@@ -1,122 +1,12 @@
 {
-  "generated_at_utc": "2026-02-28T09:35:19.411120+00:00",
-  "asset_count": 9,
+  "generated_at_utc": "2026-02-28T10:20:12.451373+00:00",
+  "asset_count": 0,
   "api_only": true,
   "provider": "pollinations",
   "model": "gptimage",
-  "assets": [
-    {
-      "type": "icon",
-      "name": "workflow",
-      "path": "ui\\assets\\generated\\icons\\workflow.png",
-      "status": "error",
-      "provider": "pollinations",
-      "model": "gptimage",
-      "error": {
-        "reason": "http_error",
-        "status": 402,
-        "body": "{\"success\":false,\"error\":{\"message\":\"Insufficient pollen balance to use this model\",\"code\":\"PAYMENT_REQUIRED\",\"timestamp\":\"2026-02-28T09:34:32.134Z\"},\"status\":402}"
-      }
-    },
-    {
-      "type": "icon",
-      "name": "analytics",
-      "path": "ui\\assets\\generated\\icons\\analytics.png",
-      "status": "error",
-      "provider": "pollinations",
-      "model": "gptimage",
-      "error": {
-        "reason": "http_error",
-        "status": 402,
-        "body": "{\"success\":false,\"error\":{\"message\":\"Insufficient pollen balance to use this model\",\"code\":\"PAYMENT_REQUIRED\",\"timestamp\":\"2026-02-28T09:34:34.984Z\"},\"status\":402}"
-      }
-    },
-    {
-      "type": "icon",
-      "name": "document",
-      "path": "ui\\assets\\generated\\icons\\document.png",
-      "status": "error",
-      "provider": "pollinations",
-      "model": "gptimage",
-      "error": {
-        "reason": "http_error",
-        "status": 402,
-        "body": "{\"success\":false,\"error\":{\"message\":\"Insufficient pollen balance to use this model\",\"code\":\"PAYMENT_REQUIRED\",\"timestamp\":\"2026-02-28T09:34:37.589Z\"},\"status\":402}"
-      }
-    },
-    {
-      "type": "icon",
-      "name": "image",
-      "path": "ui\\assets\\generated\\icons\\image.png",
-      "status": "error",
-      "provider": "pollinations",
-      "model": "gptimage",
-      "error": {
-        "reason": "http_error",
-        "status": 402,
-        "body": "{\"success\":false,\"error\":{\"message\":\"Insufficient pollen balance to use this model\",\"code\":\"PAYMENT_REQUIRED\",\"timestamp\":\"2026-02-28T09:34:40.205Z\"},\"status\":402}"
-      }
-    },
-    {
-      "type": "icon",
-      "name": "success",
-      "path": "ui\\assets\\generated\\icons\\success.png",
-      "status": "error",
-      "provider": "pollinations",
-      "model": "gptimage",
-      "error": {
-        "reason": "http_error",
-        "status": 402,
-        "body": "{\"success\":false,\"error\":{\"message\":\"Insufficient pollen balance to use this model\",\"code\":\"PAYMENT_REQUIRED\",\"timestamp\":\"2026-02-28T09:34:42.763Z\"},\"status\":402}"
-      }
-    },
-    {
-      "type": "background",
-      "name": "glass_soft_pink_blue",
-      "path": "ui\\assets\\generated\\backgrounds\\glass_soft_pink_blue.png",
-      "status": "error",
-      "provider": "pollinations",
-      "model": "gptimage",
-      "error": {
-        "reason": "http_error",
-        "status": 402,
-        "body": "{\"success\":false,\"error\":{\"message\":\"Insufficient pollen balance to use this model\",\"code\":\"PAYMENT_REQUIRED\",\"timestamp\":\"2026-02-28T09:34:45.389Z\"},\"status\":402}"
-      }
-    },
-    {
-      "type": "background",
-      "name": "glass_cool_silver",
-      "path": "ui\\assets\\generated\\backgrounds\\glass_cool_silver.png",
-      "status": "error",
-      "provider": "pollinations",
-      "model": "gptimage",
-      "error": {
-        "reason": "http_error",
-        "status": 402,
-        "body": "{\"success\":false,\"error\":{\"message\":\"Insufficient pollen balance to use this model\",\"code\":\"PAYMENT_REQUIRED\",\"timestamp\":\"2026-02-28T09:34:47.993Z\"},\"status\":402}"
-      }
-    },
-    {
-      "type": "animation",
-      "name": "mascot_idle",
-      "status": "error",
-      "provider": "pollinations",
-      "model": "gptimage",
-      "frame_count": 6,
-      "generated_frames": 0,
-      "paths": [],
-      "failures": 6
-    },
-    {
-      "type": "animation",
-      "name": "pipeline_glow",
-      "status": "error",
-      "provider": "pollinations",
-      "model": "gptimage",
-      "frame_count": 5,
-      "generated_frames": 0,
-      "paths": [],
-      "failures": 5
-    }
-  ]
+  "error": {
+    "reason": "missing_api_key",
+    "message": "Pollinations API key is missing. API-only policy blocks local fallback."
+  },
+  "assets": []
 }

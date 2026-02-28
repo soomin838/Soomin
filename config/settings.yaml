@@ -47,8 +47,8 @@ publish:
   r2:
     endpoint_url: https://ce934d653dafbcac95b04449f5258bf3.r2.cloudflarestorage.com
     bucket: rezero-images
-    access_key_id: c011e641f61dc0cfc69ab94c271d2c6f
-    secret_access_key: 1255ea2592e4c2a67db768df0c3542cda348bb7270fce3190fa266eb9d6eddfd
+    access_key_id: R2_ACCESS_KEY_ID
+    secret_access_key: R2_SECRET_ACCESS_KEY
     public_base_url: https://pub-524e94bbdde74f518124321d92bc6937.r2.dev
     prefix: library
     cache_control: public, max-age=31536000, immutable
@@ -290,7 +290,7 @@ sources:
   news_pool_pick_top_k: 60
   news_pool_keep_used_days: 30
 gemini:
-  api_key: AIzaSyCmf9lSyn8Yug7yx0sVGgO2DUyoWtNLFos
+  api_key: GEMINI_API_KEY
   model: gemini-2.0-flash
   fallback_models:
   - gemini-2.0-flash
@@ -313,7 +313,7 @@ visual:
   gemini_image_model: models/imagen-3.0-generate-001
   image_request_interval_seconds: 20
   pollinations_enabled: false
-  pollinations_api_key: sk_sfHKDNAmHFEJGCGjlMNAQviaWr8iVWdz
+  pollinations_api_key: POLLINATIONS_API_KEY
   pollinations_base_url: ''
   pollinations_thumbnail_model: ''
   pollinations_content_model: ''
@@ -427,7 +427,12 @@ local_llm:
   max_calls_per_post: 2
 authority_links:
 - https://www.cisa.gov/news-events/cybersecurity-advisories
-- https://api.stackexchange.com/docs
-- https://github.com/HackerNews/API
-- https://docs.github.com/en/rest
-- https://docs.python.org/3/
+- https://www.cisa.gov/known-exploited-vulnerabilities-catalog
+- https://msrc.microsoft.com/update-guide
+- https://www.microsoft.com/en-us/security/blog/
+- https://support.apple.com/en-us/HT201222
+- https://security.googleblog.com/
+- https://aws.amazon.com/blogs/security/
+- https://www.cloudflare.com/blog/
+- https://www.nist.gov/cyberframework
+- https://www.consumerfinance.gov/about-us/newsroom/
