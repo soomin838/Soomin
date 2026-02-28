@@ -294,6 +294,20 @@ class NewsPackSeeder:
         ]
         if not order:
             order = ["pollinations_auth", "pollinations_anon", "gemini"]
+        # Enforce provider sequence so auth 429 always falls through to anon first.
+        normalized: list[str] = []
+        for name in order:
+            if name not in normalized:
+                normalized.append(name)
+        if "pollinations_auth" in normalized and "pollinations_anon" not in normalized:
+            auth_idx = normalized.index("pollinations_auth")
+            normalized.insert(auth_idx + 1, "pollinations_anon")
+        canonical = ["pollinations_auth", "pollinations_anon", "gemini"]
+        ordered: list[str] = [name for name in canonical if name in normalized]
+        for name in normalized:
+            if name not in ordered:
+                ordered.append(name)
+        order = ordered
         pollinations_service_limited = False
         attempts: list[dict[str, Any]] = []
 

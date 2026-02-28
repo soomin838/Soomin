@@ -25,6 +25,7 @@ from core.onboarding import has_missing_required
 from core.preflight import validate_runtime_settings
 from core.qa_logger import QALogger, classify_error
 from core.daily_vector import run_daily_vector_if_needed
+from core.secret_backup import backup_runtime_secrets
 from core.settings import load_settings
 from core.workflow import AgentWorkflow
 
@@ -166,11 +167,14 @@ class AgentController:
         self.workflow.set_progress_hook(self._on_workflow_progress)
         self._apply_runtime_patch_if_present()
         self.lock = threading.Lock()
-        self._news_pool_tick_lock = threading.Lock()
+        news_pool_jitter = max(
+            0,
+            int(getattr(self.settings.sources, "news_pool_background_tick_jitter_sec", 20) or 20),
+        )
         self._next_news_pool_tick_epoch = time.time() + max(
             30,
             int(getattr(self.settings.sources, "news_pool_background_tick_minutes", 30) or 30) * 60
-            + random.randint(-20, 20),
+            + random.randint(-news_pool_jitter, news_pool_jitter),
         )
         self.tz = safe_tz(self.settings.timezone)
         self.scheduler_state_path = ROOT / "storage" / "logs" / "run_schedule_state.json"
@@ -219,6 +223,23 @@ class AgentController:
                 "executable": str(getattr(sys, "executable", "")),
             },
         )
+        try:
+            backup_result = backup_runtime_secrets(ROOT, force=False)
+            self.qa.write(
+                "runtime",
+                "secrets_backup",
+                {
+                    "status": str((backup_result or {}).get("status", "") or ""),
+                    "tracked_files": int((backup_result or {}).get("tracked_files", 0) or 0),
+                    "missing": list((backup_result or {}).get("missing", []) or [])[:8],
+                },
+            )
+        except Exception as exc:
+            self.qa.write(
+                "runtime",
+                "secrets_backup_failed",
+                {"error": str(exc)[:220]},
+            )
         self._bootstrap_rolling_scheduler()
         # Warm usage snapshot asynchronously (non-blocking for UI startup).
         self._maybe_refresh_ui_usage_async(force=True)
@@ -626,13 +647,28 @@ class AgentController:
                 last_news_pack_tick_epoch = now_epoch
             if bool(getattr(self.settings.sources, "news_pool_background_tick_enabled", True)):
                 if now_epoch >= float(self._next_news_pool_tick_epoch or 0.0):
-                    acquired_tick = self._news_pool_tick_lock.acquire(blocking=False)
+                    acquired_tick = self.lock.acquire(blocking=False)
                     interval_sec = max(
                         60,
                         int(getattr(self.settings.sources, "news_pool_background_tick_minutes", 30) or 30) * 60,
                     )
+                    jitter_sec = max(
+                        0,
+                        int(getattr(self.settings.sources, "news_pool_background_tick_jitter_sec", 20) or 20),
+                    )
                     if not acquired_tick:
                         # Keep loop non-blocking; try again soon.
+                        try:
+                            self.qa.write(
+                                "runtime",
+                                "news_pool_tick_skipped_lock_busy",
+                                {
+                                    "next_retry_sec": 12,
+                                    "interval_sec": int(interval_sec),
+                                },
+                            )
+                        except Exception:
+                            pass
                         self._next_news_pool_tick_epoch = now_epoch + random.randint(8, 18)
                     else:
                         try:
@@ -641,11 +677,11 @@ class AgentController:
                             pass
                         finally:
                             try:
-                                self._news_pool_tick_lock.release()
+                                self.lock.release()
                             except Exception:
                                 pass
                         self._next_news_pool_tick_epoch = (
-                            now_epoch + interval_sec + random.randint(-20, 20)
+                            now_epoch + interval_sec + random.randint(-jitter_sec, jitter_sec)
                         )
 
             self._maybe_refresh_scheduler(force=False)

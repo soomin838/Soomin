@@ -183,7 +183,9 @@ class AgentWorkflow:
         self._news_pool_db_path = self.root / "storage" / "logs" / "news_pool.sqlite3"
         self._news_pool_state_path = self.root / "storage" / "logs" / "news_pool_state.json"
         self._news_pool_refresh_log_path = self.root / "storage" / "logs" / "news_pool_refresh.jsonl"
+        self._news_pool_refresh_tick_log_path = self.root / "storage" / "logs" / "news_pool_refresh_tick.jsonl"
         self._news_rotation_state_path = self.root / "storage" / "state" / "news_rotation_state.json"
+        self._last_news_pool_refresh_stats: dict[str, Any] = {}
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
         self.news_pack_manifest = NewsPackManifest(
             root=self.root,
@@ -304,6 +306,9 @@ class AgentWorkflow:
             if thumb_row and len(inline_rows) >= required_inline:
                 notes.append(f"emergency_fill_recovered={available_count}/{target_images}")
                 return picked, notes
+            # Bounded immediate recovery: short pause to avoid hot-looping providers.
+            if idx < max_fill:
+                time.sleep(random.uniform(0.6, 1.4))
         return picked, notes
 
     def _news_pack_record_to_asset(self, row: dict[str, Any], index: int) -> ImageAsset | None:
@@ -1704,6 +1709,16 @@ class AgentWorkflow:
         except Exception:
             return
 
+    def _append_news_pool_refresh_tick_log(self, payload: dict[str, Any]) -> None:
+        row = {"ts_utc": datetime.now(timezone.utc).isoformat()}
+        row.update(dict(payload or {}))
+        try:
+            self._news_pool_refresh_tick_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._news_pool_refresh_tick_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
     def _news_pool_feed_fingerprint(self, feeds: list[str]) -> str:
         merged = "\n".join([str(x or "").strip().lower() for x in (feeds or []) if str(x or "").strip()])
         return hashlib.sha1(merged.encode("utf-8", errors="ignore")).hexdigest()
@@ -1728,32 +1743,101 @@ class AgentWorkflow:
         return selected, int(idx)
 
     def news_pool_refresh_tick_if_needed(self, force: bool = False) -> dict[str, Any]:
+        started = time.perf_counter()
+        if not is_news_mode(self.settings):
+            status = "disabled"
+            payload = {
+                "status": status,
+                "reason": "not_news_mode",
+                "feed_limit": int(max(1, int(getattr(self.settings.sources, "news_pool_background_max_feeds_per_tick", 5) or 5))),
+                "cursor": int((self._load_news_pool_state() or {}).get("feed_cursor", 0) or 0),
+                "fetched_items": 0,
+                "upserted": 0,
+                "queued_count": int(self.news_pool_store.queued_count(days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)))),
+                "duration_ms": int(max(0.0, time.perf_counter() - started) * 1000),
+            }
+            self._append_news_pool_refresh_tick_log(payload)
+            return payload
         if not bool(getattr(self.settings.sources, "news_pool_background_tick_enabled", True)):
-            return {"status": "disabled"}
+            status = "disabled"
+            payload = {
+                "status": status,
+                "reason": "tick_disabled",
+                "feed_limit": int(max(1, int(getattr(self.settings.sources, "news_pool_background_max_feeds_per_tick", 5) or 5))),
+                "cursor": int((self._load_news_pool_state() or {}).get("feed_cursor", 0) or 0),
+                "fetched_items": 0,
+                "upserted": 0,
+                "queued_count": int(self.news_pool_store.queued_count(days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)))),
+                "duration_ms": int(max(0.0, time.perf_counter() - started) * 1000),
+            }
+            self._append_news_pool_refresh_tick_log(payload)
+            return payload
         max_feeds = max(1, int(getattr(self.settings.sources, "news_pool_background_max_feeds_per_tick", 5) or 5))
-        note = self._refresh_news_pool_if_needed(
-            force=bool(force),
-            max_feeds_per_refresh=max_feeds,
-            trigger="background_tick",
-        )
-        status = "ok"
-        if "skipped" in note:
-            status = "skipped"
-        if "failed" in note or "error" in note:
-            status = "failed"
-        return {"status": status, "note": note}
+        try:
+            note = self._refresh_news_pool_if_needed(
+                force=bool(force),
+                feed_limit=max_feeds,
+                source="tick",
+            )
+        except Exception as exc:
+            payload = {
+                "status": "failed",
+                "feed_limit": int(max_feeds),
+                "cursor": int((self._load_news_pool_state() or {}).get("feed_cursor", 0) or 0),
+                "fetched_items": 0,
+                "upserted": 0,
+                "queued_count": int(self.news_pool_store.queued_count(days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)))),
+                "duration_ms": int(max(0.0, time.perf_counter() - started) * 1000),
+                "note": f"tick_failed:{str(exc)[:160]}",
+            }
+            self._append_news_pool_refresh_tick_log(payload)
+            return payload
+        stats = dict(self._last_news_pool_refresh_stats or {})
+        status = str(stats.get("status", "") or "").strip().lower()
+        if not status:
+            lowered = str(note or "").lower()
+            if "interval<" in lowered:
+                status = "skipped_interval"
+            elif "ok" in lowered:
+                status = "ok"
+            else:
+                status = "failed"
+        payload = {
+            "status": status,
+            "feed_limit": int(max_feeds),
+            "cursor": int(stats.get("feed_cursor_after", stats.get("feed_cursor", 0) or 0)),
+            "fetched_items": int(stats.get("fetched_items", 0) or 0),
+            "upserted": int(stats.get("upserted", 0) or 0),
+            "queued_count": int(stats.get("queued_count", 0) or 0),
+            "duration_ms": int(max(0.0, time.perf_counter() - started) * 1000),
+            "note": str(note or "")[:220],
+        }
+        self._append_news_pool_refresh_tick_log(payload)
+        return payload
 
     def _refresh_news_pool_if_needed(
         self,
         force: bool = False,
         *,
-        max_feeds_per_refresh: int | None = None,
-        trigger: str = "run_once",
+        feed_limit: int | None = None,
+        source: str = "publish",
     ) -> str:
+        started_mono = time.perf_counter()
         feeds = [str(x or "").strip() for x in (getattr(self.settings.sources, "news_pool_feeds", []) or []) if str(x or "").strip()]
         if not feeds:
+            self._last_news_pool_refresh_stats = {
+                "status": "no_feeds",
+                "source": str(source or ""),
+                "feed_limit": int(max(1, int(feed_limit or 1))),
+                "feed_cursor_before": 0,
+                "feed_cursor_after": 0,
+                "fetched_items": 0,
+                "upserted": 0,
+                "queued_count": int(self.news_pool_store.queued_count(days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)))),
+                "duration_ms": int(max(0.0, time.perf_counter() - started_mono) * 1000),
+            }
             self._append_news_pool_refresh_log(
-                {"event": "news_pool_refresh_skipped", "reason": "no_feeds", "trigger": str(trigger or "")}
+                {"event": "news_pool_refresh_skipped", "reason": "no_feeds", "source": str(source or "")}
             )
             return "news_pool_refresh_skipped:no_feeds"
         state = self._load_news_pool_state()
@@ -1763,25 +1847,39 @@ class AgentWorkflow:
         if (not force) and last_refresh is not None:
             elapsed_min = (now_utc - last_refresh).total_seconds() / 60.0
             if elapsed_min < interval_min:
+                cursor_now = int(state.get("feed_cursor", 0) or 0)
+                self._last_news_pool_refresh_stats = {
+                    "status": "skipped_interval",
+                    "source": str(source or ""),
+                    "feed_limit": int(max(1, int(feed_limit or getattr(self.settings.sources, "news_pool_background_max_feeds_per_tick", 5) or 5))),
+                    "feed_cursor_before": int(cursor_now),
+                    "feed_cursor_after": int(cursor_now),
+                    "fetched_items": 0,
+                    "upserted": 0,
+                    "queued_count": int(self.news_pool_store.queued_count(days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)))),
+                    "duration_ms": int(max(0.0, time.perf_counter() - started_mono) * 1000),
+                }
                 self._append_news_pool_refresh_log(
                     {
                         "event": "news_pool_refresh_skipped",
                         "reason": "interval_guard",
                         "interval_min": int(interval_min),
                         "elapsed_min": round(float(elapsed_min), 2),
-                        "trigger": str(trigger or ""),
+                        "source": str(source or ""),
                     }
                 )
                 return f"news_pool_refresh_skipped:interval<{interval_min}m"
 
         feeds_fp = self._news_pool_feed_fingerprint(feeds)
-        if str(state.get("feeds_fingerprint", "") or "") != feeds_fp:
+        last_feeds_hash = str(state.get("feeds_hash", state.get("feeds_fingerprint", "")) or "")
+        if last_feeds_hash != feeds_fp:
             state["feed_cursor"] = 0
+            state["feeds_hash"] = feeds_fp
             state["feeds_fingerprint"] = feeds_fp
         feed_cursor = int(state.get("feed_cursor", 0) or 0)
         safe_max_feeds = (
-            max(1, int(max_feeds_per_refresh))
-            if max_feeds_per_refresh is not None
+            max(1, int(feed_limit))
+            if feed_limit is not None
             else max(1, int(getattr(self.settings.sources, "news_pool_background_max_feeds_per_tick", 5) or 5))
         )
         feed_batch, next_cursor = self._slice_news_pool_feeds(feeds, feed_cursor, safe_max_feeds)
@@ -1797,7 +1895,10 @@ class AgentWorkflow:
         per_feed_results: list[dict[str, Any]] = []
         fetched_items = 0
         for feed in feed_batch:
-            detail = fetch_feed_detailed(feed, timeout=20)
+            try:
+                detail = fetch_feed_detailed(feed, timeout=20)
+            except Exception as exc:
+                detail = {"status_code": 0, "error": str(exc)[:160], "items": []}
             feed_status = int(detail.get("status_code", 0) or 0)
             feed_error = str(detail.get("error", "") or "").strip()
             items = list(detail.get("items", []) or [])
@@ -1821,7 +1922,7 @@ class AgentWorkflow:
                     "ok": bool(feed_status == 200),
                     "items": int(len(items or [])),
                     "error": feed_error[:180],
-                    "trigger": str(trigger or ""),
+                    "source": str(source or ""),
                 }
             )
             for item in items or []:
@@ -1882,15 +1983,30 @@ class AgentWorkflow:
                 "queued_count": int(queued),
                 "purged": dict(purge_report or {}),
                 "feed_cursor": int(next_cursor),
+                "feeds_hash": feeds_fp,
                 "feeds_fingerprint": feeds_fp,
-                "last_trigger": str(trigger or ""),
+                "last_source": str(source or ""),
             }
         )
         self._save_news_pool_state(state)
+        duration_ms = int(max(0.0, time.perf_counter() - started_mono) * 1000)
+        self._last_news_pool_refresh_stats = {
+            "status": "ok",
+            "source": str(source or ""),
+            "feed_limit": int(safe_max_feeds),
+            "feed_cursor_before": int(feed_cursor),
+            "feed_cursor_after": int(next_cursor),
+            "fetched_items": int(fetched_items),
+            "upserted": int(upserted),
+            "queued_count": int(queued),
+            "feeds_total": int(len(feeds)),
+            "feeds_fetched": int(len(feed_batch)),
+            "duration_ms": int(duration_ms),
+        }
         self._append_news_pool_refresh_log(
             {
                 "event": "news_pool_refresh_summary",
-                "trigger": str(trigger or ""),
+                "source": str(source or ""),
                 "feeds_total": int(len(feeds)),
                 "feeds_fetched": int(len(feed_batch)),
                 "feed_cursor_before": int(feed_cursor),
@@ -1899,6 +2015,7 @@ class AgentWorkflow:
                 "upserted": int(upserted),
                 "queued": int(queued),
                 "per_feed": per_feed_results[:12],
+                "duration_ms": int(duration_ms),
             }
         )
         return (
@@ -1925,7 +2042,7 @@ class AgentWorkflow:
         if item is not None:
             return item
         if force_refresh_once:
-            self._refresh_news_pool_if_needed(force=True)
+            self._refresh_news_pool_if_needed(force=True, source="claim_refill")
             return self.news_pool_store.claim_one(
                 news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
                 top_k=max(10, int(getattr(self.settings.sources, "news_pool_pick_top_k", 60) or 60)),
@@ -2238,7 +2355,7 @@ class AgentWorkflow:
         try:
             refresh_note = self._profile_call(
                 "news_pool_refresh_if_needed",
-                lambda: self._refresh_news_pool_if_needed(force=False),
+                lambda: self._refresh_news_pool_if_needed(force=False, source="publish"),
                 slow_ms=2600,
             )
             degraded_note = self._append_note(degraded_note, refresh_note)
@@ -2249,7 +2366,7 @@ class AgentWorkflow:
             if queued_now < min_items:
                 force_note = self._profile_call(
                     "news_pool_refresh_force",
-                    lambda: self._refresh_news_pool_if_needed(force=True),
+                    lambda: self._refresh_news_pool_if_needed(force=True, source="publish_force"),
                     slow_ms=2600,
                 )
                 degraded_note = self._append_note(
@@ -2451,7 +2568,7 @@ class AgentWorkflow:
             inline_rows = list(getattr(picked_pack, "inline_bg", []) or [])
             if (not thumb_row) or len(inline_rows) < required_inline:
                 available_count = (1 if thumb_row else 0) + len(inline_rows)
-                hold_reason = f"news_pack_understock({available_count}/{target_images})"
+                hold_reason = f"image_understock_after_recovery({available_count}/{target_images})"
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -2491,7 +2608,7 @@ class AgentWorkflow:
                     continue
                 images.append(asset)
             if len(images) < target_images:
-                hold_reason = f"news_pack_understock({len(images)}/{target_images})"
+                hold_reason = f"image_understock_after_recovery({len(images)}/{target_images})"
                 self.logs.append_run(
                     RunRecord(
                         status="hold",

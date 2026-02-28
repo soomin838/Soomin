@@ -1,41 +1,37 @@
-﻿timezone: "America/New_York"
-
+timezone: America/New_York
 schedule:
   interval_hours: 2.4
   min_interval_hours: 1.0
   max_interval_hours: 4.5
   jitter_minutes: 30
   max_retry_backoff_minutes: 30
-
 monthly_scheduler:
   enabled: true
-  timezone: "America/New_York"
-  output_dir: "storage/schedules"
+  timezone: America/New_York
+  output_dir: storage/schedules
   publish_slots_per_day: 5
   buffer_slots_min: 1
   buffer_slots_max: 2
   consume_hold_slots: false
-
 windows:
   use_task_scheduler: true
-
 budget:
   free_mode: true
   dry_run: false
   daily_post_limit: 6
   daily_gemini_call_limit: 50
-
 sync:
   enabled: true
   run_on_startup: true
   interval_hours: 24
   purge_deleted_after_days: 7
-  include_statuses: ["live", "scheduled"]
+  include_statuses:
+  - live
+  - scheduled
   max_results_per_status: 500
   max_pages: 20
   strict_url_validation: true
-  log_path: "storage/logs/sync_blogger.jsonl"
-
+  log_path: storage/logs/sync_blogger.jsonl
 publish:
   use_blogger_schedule: true
   min_delay_minutes: 10
@@ -45,28 +41,28 @@ publish:
   random_min_gap_floor_minutes: 180
   random_min_gap_ceiling_minutes: 360
   daily_publish_cap: 5
-  image_hosting_backend: "r2"
-  gcs_bucket_name: ""
-  gcs_public_base_url: ""
+  image_hosting_backend: r2
+  gcs_bucket_name: ''
+  gcs_public_base_url: ''
   r2:
-    endpoint_url: "https://ce934d653dafbcac95b04449f5258bf3.r2.cloudflarestorage.com"
-    bucket: "rezero-images"
-    access_key_id: ""
-    secret_access_key: ""
-    public_base_url: "https://pub-524e94bbdde74f518124321d92bc6937.r2.dev"
-    prefix: "library"
-    cache_control: "public, max-age=31536000, immutable"
+    endpoint_url: https://ce934d653dafbcac95b04449f5258bf3.r2.cloudflarestorage.com
+    bucket: rezero-images
+    access_key_id: c011e641f61dc0cfc69ab94c271d2c6f
+    secret_access_key: 1255ea2592e4c2a67db768df0c3542cda348bb7270fce3190fa266eb9d6eddfd
+    public_base_url: https://pub-524e94bbdde74f518124321d92bc6937.r2.dev
+    prefix: library
+    cache_control: public, max-age=31536000, immutable
   mobile_duplicate_block_enabled: true
   enable_semantic_html: true
   related_posts_min: 2
   related_posts_max: 3
-  time_window_start: "09:00"
-  time_window_end: "23:00"
-  randomness_level: "medium"
+  time_window_start: 09:00
+  time_window_end: '23:00'
+  randomness_level: medium
   min_gap_minutes: 180
   quiet_hours_enabled: true
-  quiet_hours_start: "02:00"
-  quiet_hours_end: "07:00"
+  quiet_hours_start: 02:00
+  quiet_hours_end: 07:00
   buffer_target_days: 5
   buffer_min_days: 3
   schedule_horizon_days: 14
@@ -81,7 +77,7 @@ publish:
 quality:
   enabled: true
   strict_mode: true
-  qa_mode: "full"
+  qa_mode: full
   min_quality_score: 91
   qa_retry_max_passes: 0
   humanity_enabled: true
@@ -98,130 +94,125 @@ quality:
   min_external_links_tech_troubleshoot: 1
   min_authority_links_tech_troubleshoot: 1
   banned_markers:
-    - "delve"
-    - "comprehensive"
-    - "cutting-edge"
-    - "in conclusion"
+  - delve
+  - comprehensive
+  - cutting-edge
+  - in conclusion
   llm_judge_enabled: false
   llm_judge_min_score: 70
   prompt_leak_patterns:
-    - "real-time trend focus"
-    - "write plain business language"
-    - "you are a system that"
-    - "for generated image context"
-    - "for quick take you are"
-    - "section context visual"
-    - "concept visual"
-    - "supporting chart"
+  - real-time trend focus
+  - write plain business language
+  - you are a system that
+  - for generated image context
+  - for quick take you are
+  - section context visual
+  - concept visual
+  - supporting chart
   disallowed_terms_office_experiment:
-    - "rollback"
-    - "rollback criteria"
-    - "incident count"
-    - "staging"
-    - "prod parity"
-    - "sre"
-    - "deployment pipeline"
-    - "latency budget"
-    - "on-call"
-    - "incident severity"
+  - rollback
+  - rollback criteria
+  - incident count
+  - staging
+  - prod parity
+  - sre
+  - deployment pipeline
+  - latency budget
+  - on-call
+  - incident severity
   disallowed_terms_tech_troubleshoot:
-    - "anthropic"
-    - "openai"
-    - "new ai"
-    - "this week"
-    - "trending"
-    - "everyone is talking"
-    - "why everyone is talking"
-    - "productivity breakthrough"
-    - "innovation culture"
-    - "team morale"
-    - "office influencer"
-    - "viral trend"
-    - "executive context"
-    - "authority snapshot"
-    - "action framework"
-    - "decision criteria"
+  - anthropic
+  - openai
+  - new ai
+  - this week
+  - trending
+  - everyone is talking
+  - why everyone is talking
+  - productivity breakthrough
+  - innovation culture
+  - team morale
+  - office influencer
+  - viral trend
+  - executive context
+  - authority snapshot
+  - action framework
+  - decision criteria
   require_story_block: true
   require_story_block_min_count: 1
   prompt_example_section_titles:
-    - "Prompt example"
-    - "Prompt examples"
-    - "Example prompt"
-    - "Try this"
-    - "Prompt snippets"
-  meta_block_start: "[[META]]"
-  meta_block_end: "[[/META]]"
+  - Prompt example
+  - Prompt examples
+  - Example prompt
+  - Try this
+  - Prompt snippets
+  meta_block_start: '[[META]]'
+  meta_block_end: '[[/META]]'
   partial_fix_enabled: true
   partial_fix_story_first: true
-
 actionability_gate:
   enabled: true
   min_steps: 8
   min_word_count: 900
   max_generic_ratio: 0.012
-
 generation:
-  mode: "local_first"
+  mode: local_first
   gemini_daily_budget_calls: 12
   gemini_only_on_fail: true
-
 qa:
   prompt_leak_patterns:
-    - "real-time trend focus"
-    - "write plain business language"
-    - "you are a system that"
-    - "for generated image context"
-    - "for quick take you are"
-    - "section context visual"
-    - "concept visual"
-    - "supporting chart"
+  - real-time trend focus
+  - write plain business language
+  - you are a system that
+  - for generated image context
+  - for quick take you are
+  - section context visual
+  - concept visual
+  - supporting chart
   disallowed_terms:
     office_experiment:
-      - "rollback"
-      - "rollback criteria"
-      - "incident count"
-      - "staging"
-      - "prod parity"
-      - "sre"
-      - "deployment pipeline"
-      - "latency budget"
-      - "on-call"
-      - "incident severity"
+    - rollback
+    - rollback criteria
+    - incident count
+    - staging
+    - prod parity
+    - sre
+    - deployment pipeline
+    - latency budget
+    - on-call
+    - incident severity
     tech_troubleshoot:
-      - "anthropic"
-      - "openai"
-      - "new ai"
-      - "this week"
-      - "trending"
-      - "everyone is talking"
-      - "why everyone is talking"
-      - "productivity breakthrough"
-      - "innovation culture"
-      - "team morale"
-      - "office influencer"
-      - "viral trend"
-      - "executive context"
-      - "authority snapshot"
-      - "action framework"
-      - "decision criteria"
+    - anthropic
+    - openai
+    - new ai
+    - this week
+    - trending
+    - everyone is talking
+    - why everyone is talking
+    - productivity breakthrough
+    - innovation culture
+    - team morale
+    - office influencer
+    - viral trend
+    - executive context
+    - authority snapshot
+    - action framework
+    - decision criteria
   require_story_block:
     enabled: true
     min_count: 1
   fail_if_intro_matches_alt: true
   alt_similarity_threshold: 0.75
   banned_debug_patterns:
-    - "workflow checkpoint stage"
-    - "av reference context"
-    - "jobtitle"
-    - "sameas"
-    - "selected topic"
-    - "source trending_entities"
-
+  - workflow checkpoint stage
+  - av reference context
+  - jobtitle
+  - sameas
+  - selected topic
+  - source trending_entities
 topic_growth:
   enabled: true
   daily_new_topics: 10
   min_seed_score: 75
-
 keyword_pool:
   enabled: true
   daily_target: 100
@@ -229,40 +220,37 @@ keyword_pool:
   active_pool_max: 250
   pick_per_run: 1
   retry_per_run_when_under_target: 0
-
 topic_pool:
   target_size: 200
   min_size: 140
   refill_batch: 80
   avoid_reuse_days: 30
   per_run_pick: 1
-
 integrations:
   enabled: true
   refresh_minutes: 15
   adsense_enabled: true
   analytics_enabled: true
   search_console_enabled: true
-  ga4_property_id: ""
-  search_console_site_url: ""
-
+  ga4_property_id: ''
+  search_console_site_url: ''
 sources:
-  mode: "news_pool"
-  seeds_path: "storage/seeds/seeds.json"
-  stackexchange_site: "superuser"
-  stackexchange_tagged: "windows-11;macos;iphone;android;audio;drivers;networking"
+  mode: news_pool
+  seeds_path: storage/seeds/seeds.json
+  stackexchange_site: superuser
+  stackexchange_tagged: windows-11;macos;iphone;android;audio;drivers;networking
   stackexchange_sites:
-    - site: "superuser"
-      tagged: "windows-11;wifi;bluetooth;audio;drivers;networking"
-    - site: "apple"
-      tagged: "iphone;ios;macos;wifi;bluetooth;airpods;audio"
-    - site: "android"
-      tagged: "android;wifi;bluetooth;audio;battery;updates"
+  - site: superuser
+    tagged: windows-11;wifi;bluetooth;audio;drivers;networking
+  - site: apple
+    tagged: iphone;ios;macos;wifi;bluetooth;airpods;audio
+  - site: android
+    tagged: android;wifi;bluetooth;audio;battery;updates
   stackexchange_min_score: 5
   hn_min_score: 30
   github_repos: []
   github_min_reactions: 2
-  github_token: ""
+  github_token: ''
   max_candidates: 20
   news_pool_days: 7
   news_pool_min_items: 80
@@ -270,73 +258,72 @@ sources:
   news_pool_refresh_interval_minutes: 120
   news_pool_background_tick_enabled: true
   news_pool_background_tick_minutes: 30
+  news_pool_background_tick_jitter_sec: 20
   news_pool_background_max_feeds_per_tick: 5
   news_pool_feeds:
-    - "https://techcrunch.com/feed/"
-    - "https://www.theverge.com/rss/index.xml"
-    - "https://www.wired.com/feed/rss"
-    - "https://feeds.arstechnica.com/arstechnica/index"
-    - "https://venturebeat.com/feed/"
-    - "https://www.cisa.gov/uscert/ncas/alerts.xml"
-    - "https://www.cisa.gov/uscert/ncas/current-activity.xml"
-    - "https://aws.amazon.com/blogs/security/feed/"
-    - "https://security.googleblog.com/feeds/posts/default"
-    - "https://news.ycombinator.com/rss"
+  - https://techcrunch.com/feed/
+  - https://www.theverge.com/rss/index.xml
+  - https://www.wired.com/feed/rss
+  - https://feeds.arstechnica.com/arstechnica/index
+  - https://venturebeat.com/feed/
+  - https://www.cisa.gov/uscert/ncas/alerts.xml
+  - https://www.cisa.gov/uscert/ncas/current-activity.xml
+  - https://aws.amazon.com/blogs/security/feed/
+  - https://security.googleblog.com/feeds/posts/default
+  - https://news.ycombinator.com/rss
   news_pool_keywords_allow: []
   news_pool_keywords_block:
-    - "deal"
-    - "coupon"
-    - "sponsored"
-    - "affiliate"
+  - deal
+  - coupon
+  - sponsored
+  - affiliate
   news_pool_source_weights:
-    "techcrunch.com": 1.0
-    "theverge.com": 1.0
-    "wired.com": 1.0
-    "arstechnica.com": 1.0
-    "venturebeat.com": 0.95
-    "cisa.gov": 1.1
-    "aws.amazon.com": 1.05
-    "security.googleblog.com": 1.05
-    "news.ycombinator.com": 0.9
+    techcrunch.com: 1.0
+    theverge.com: 1.0
+    wired.com: 1.0
+    arstechnica.com: 1.0
+    venturebeat.com: 0.95
+    cisa.gov: 1.1
+    aws.amazon.com: 1.05
+    security.googleblog.com: 1.05
+    news.ycombinator.com: 0.9
   news_pool_pick_top_k: 60
   news_pool_keep_used_days: 30
-
 gemini:
-  api_key: "GEMINI_API_KEY"
-  model: "gemini-2.0-flash"
+  api_key: AIzaSyCmf9lSyn8Yug7yx0sVGgO2DUyoWtNLFos
+  model: gemini-2.0-flash
   fallback_models:
-    - "gemini-2.0-flash"
-    - "gemini-2.5-flash-lite"
-    - "gemini-2.5-flash"
+  - gemini-2.0-flash
+  - gemini-2.5-flash-lite
+  - gemini-2.5-flash
   min_publish_score: 70
-  editor_persona: "You are a native English tech influencer writing for US/UK/global office workers. Your tone is human, clear, practical, and experience-driven."
+  editor_persona: You are a native English tech influencer writing for US/UK/global
+    office workers. Your tone is human, clear, practical, and experience-driven.
   max_calls_per_day: 50
   max_calls_per_run: 4
   min_request_interval_seconds: 30
-
 visual:
   target_images_per_post: 5
   max_banner_images: 1
   max_inline_images: 4
-  image_provider: "library"
+  image_provider: library
   enable_gemini_image_generation: false
   allow_chart_fallback: false
-  gemini_prompt_model: "gemini-2.0-flash"
-  gemini_image_model: "models/imagen-3.0-generate-001"
+  gemini_prompt_model: gemini-2.0-flash
+  gemini_image_model: models/imagen-3.0-generate-001
   image_request_interval_seconds: 20
   pollinations_enabled: false
-  pollinations_api_key: ""
-  pollinations_base_url: ""
-  pollinations_thumbnail_model: ""
-  pollinations_content_model: ""
+  pollinations_api_key: sk_sfHKDNAmHFEJGCGjlMNAQviaWr8iVWdz
+  pollinations_base_url: ''
+  pollinations_thumbnail_model: ''
+  pollinations_content_model: ''
   pollinations_timeout_sec: 0
-  prompt_suffix: "no text, no letters, no numbers, no logos, no watermark"
+  prompt_suffix: no text, no letters, no numbers, no logos, no watermark
   thumbnail_ocr_verify: false
   thumbnail_text_overlay_enabled: true
-  thumbnail_text_style: "yt_clean"
+  thumbnail_text_style: yt_clean
   thumbnail_text_max_words: 3
   screenshot_priority_keywords: []
-
 news_pack:
   enabled: true
   daily_target_total: 10
@@ -353,85 +340,83 @@ news_pack:
   emergency_fill_max_items: 3
   max_consecutive_failures: 5
   provider_order:
-    - "pollinations_auth"
-    - "pollinations_anon"
-    - "gemini"
-  pollinations_api_key: ""
+  - pollinations_auth
+  - pollinations_anon
+  - gemini
+  pollinations_api_key: ''
   pollinations_timeout_sec: 35
   gemini_fallback_enabled: true
   gemini_fallback_daily_cap: 1
   allow_gemini_on_pollinations_rate_limit: false
   r2_upload_enabled: true
-  r2_prefix: "news_pack"
-  manifest_path: "storage/state/news_pack_manifest.jsonl"
-  state_path: "storage/state/news_pack_state.json"
+  r2_prefix: news_pack
+  manifest_path: storage/state/news_pack_manifest.jsonl
+  state_path: storage/state/news_pack_state.json
   thumb_hook_max_words: 3
   thumb_overlay_enabled: true
-  thumb_overlay_style: "yt_clean"
+  thumb_overlay_style: yt_clean
   thumb_overlay_font_paths:
-    - "C:/Windows/Fonts/segoeuib.ttf"
-    - "C:/Windows/Fonts/arialbd.ttf"
+  - C:/Windows/Fonts/segoeuib.ttf
+  - C:/Windows/Fonts/arialbd.ttf
   tags:
-    - "security"
-    - "policy"
-    - "ai"
-    - "platform"
-    - "mobile"
-    - "chips"
-
+  - security
+  - policy
+  - ai
+  - platform
+  - mobile
+  - chips
 blogger:
-  blog_id: "BLOGGER_BLOG_ID"
-  credentials_path: "config/blogger_token.json"
-
+  blog_id: '3798794568809192736'
+  credentials_path: config/blogger_token.json
 indexing:
   enabled: true
-  service_account_path: "config/service_account.json"
+  service_account_path: config/service_account.json
   daily_quota: 200
-
 images:
-  provider: "library"
+  provider: library
   pollinations:
-    model: ""
-    size: ""
+    model: ''
+    size: ''
     timeout_sec: 0
   banner_count: 1
   inline_count: 4
-  cache_dir: "storage/image_cache"
-  prompt_suffix: "no text, no letters, no numbers, no logos, no watermark"
-  fallback_banner: "assets/fallback/banner.png"
-  fallback_inline: "assets/fallback/inline.png"
-
+  cache_dir: storage/image_cache
+  prompt_suffix: no text, no letters, no numbers, no logos, no watermark
+  fallback_banner: assets/fallback/banner.png
+  fallback_inline: assets/fallback/inline.png
 llm:
-  provider: "gemini"
+  provider: gemini
   max_calls_per_post: 3
   enable_refine_loop: false
   enable_judge_post: false
   enable_image_generation: false
-
 content_mode:
-  mode: "tech_news_only"
-  allowed_devices: ["windows", "mac", "iphone", "galaxy"]
+  mode: tech_news_only
+  allowed_devices:
+  - windows
+  - mac
+  - iphone
+  - galaxy
   banned_topic_keywords:
-    - "shocking"
-    - "disaster"
-    - "scam"
-    - "fraud"
-    - "criminal"
-    - "exposed"
-    - "destroyed"
-    - "caught"
+  - shocking
+  - disaster
+  - scam
+  - fraud
+  - criminal
+  - exposed
+  - destroyed
+  - caught
   required_title_tokens_any:
-    - "what changed"
-    - "what it means"
-    - "who is affected"
-    - "what to do now"
-
+  - what changed
+  - what it means
+  - who is affected
+  - what to do now
 local_llm:
   enabled: true
-  provider: "ollama"
+  provider: ollama
   plan_json_enabled: true
-  model: "qwen2.5:3b"
-  base_url: "http://127.0.0.1:11434"
+  model: qwen2.5:3b
+  base_url: http://127.0.0.1:11434
   num_ctx: 2048
   num_thread: 2
   max_loaded_models: 1
@@ -440,16 +425,9 @@ local_llm:
   pull_model_if_missing: true
   request_timeout_sec: 60
   max_calls_per_post: 2
-
 authority_links:
-  - "https://www.cisa.gov/news-events/cybersecurity-advisories"
-  - "https://api.stackexchange.com/docs"
-  - "https://github.com/HackerNews/API"
-  - "https://docs.github.com/en/rest"
-  - "https://docs.python.org/3/"
-
-
-
-
-
-
+- https://www.cisa.gov/news-events/cybersecurity-advisories
+- https://api.stackexchange.com/docs
+- https://github.com/HackerNews/API
+- https://docs.github.com/en/rest
+- https://docs.python.org/3/
