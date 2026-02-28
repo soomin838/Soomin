@@ -1267,6 +1267,14 @@ def run_cli(force_once: bool) -> None:
         controller.stop()
 
 
+def run_weekly_refresh_cli() -> int:
+    print(f"Running version: {resolve_running_version()}")
+    controller = AgentController()
+    report = controller.workflow.weekly_refresh_topic_pool(force=True)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def run_qt(force_once: bool, setup_only: bool) -> int:
     print(f"Running version: {resolve_running_version()}")
     mutex_handle = None
@@ -1376,7 +1384,11 @@ def main() -> None:
     parser.add_argument("--setup", action="store_true", help="설정 UI 실행")
     parser.add_argument("--once", action="store_true", help="시작 시 즉시 1회 실행")
     parser.add_argument("--cli", action="store_true", help="터미널 모드 실행")
+    parser.add_argument("--weekly-refresh", action="store_true", help="주간 토픽 풀 리필 실행")
     args = parser.parse_args()
+
+    if args.weekly_refresh:
+        raise SystemExit(run_weekly_refresh_cli())
 
     if args.cli:
         run_cli(force_once=args.once)

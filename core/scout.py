@@ -459,7 +459,14 @@ class SourceScout:
         for c in candidates or []:
             if not self._passes_troubleshoot_mode(c):
                 continue
-            c.title = self._normalize_troubleshoot_title(c.title, c.main_entity)
+            normalized = self._normalize_troubleshoot_title(
+                c.title,
+                c.main_entity,
+                body=str(getattr(c, "body", "") or ""),
+            )
+            if not normalized:
+                continue
+            c.title = normalized
             out.append(c)
         if out:
             return out
@@ -492,23 +499,98 @@ class SourceScout:
         has_fix_intent = any(token in text for token in self._FIX_INTENT_TERMS)
         return bool(has_device and has_fix_intent)
 
-    def _normalize_troubleshoot_title(self, title: str, entity: str = "") -> str:
-        clean = re.sub(r"\s+", " ", str(title or "")).strip()
-        lower = clean.lower()
-        if any(token in lower for token in ("not working", "fix", "error", "after update")):
-            return clean
-        device_hint = ""
-        for token in ("windows", "mac", "iphone", "galaxy", "android", "samsung"):
+    def _extract_device_hint(self, text: str, entity: str = "") -> str:
+        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if "windows 11" in lower:
+            return "Windows 11"
+        if "windows 10" in lower:
+            return "Windows 10"
+        for token, label in (
+            ("windows", "Windows"),
+            ("macos", "macOS"),
+            ("mac", "Mac"),
+            ("iphone", "iPhone"),
+            ("ios", "iPhone"),
+            ("galaxy", "Galaxy"),
+            ("samsung", "Galaxy"),
+            ("android", "Android"),
+        ):
             if token in lower:
-                device_hint = token
-                break
-        if not device_hint:
-            entity_lower = str(entity or "").strip().lower()
-            if entity_lower in {"windows", "mac", "iphone", "galaxy", "android", "samsung"}:
-                device_hint = entity_lower
-        if not device_hint:
-            device_hint = "device"
-        return f"{device_hint.title()} not working? 3 fixes that actually work"
+                return label
+        ent = str(entity or "").strip().lower()
+        for token, label in (
+            ("windows", "Windows"),
+            ("mac", "Mac"),
+            ("iphone", "iPhone"),
+            ("ios", "iPhone"),
+            ("galaxy", "Galaxy"),
+            ("samsung", "Galaxy"),
+            ("android", "Android"),
+        ):
+            if token in ent:
+                return label
+        return ""
+
+    def _extract_feature_hint(self, text: str) -> str:
+        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        mapping = [
+            ("wifi", "Wi-Fi"),
+            ("wi-fi", "Wi-Fi"),
+            ("bluetooth", "Bluetooth"),
+            ("usb", "USB"),
+            ("printer", "printer"),
+            ("microphone", "microphone"),
+            ("mic", "microphone"),
+            ("camera", "camera"),
+            ("keyboard", "keyboard"),
+            ("mouse", "mouse"),
+            ("driver", "driver"),
+            ("ethernet", "Ethernet"),
+            ("vpn", "VPN"),
+            ("audio", "audio"),
+            ("sound", "audio"),
+            ("battery", "battery"),
+            ("charging", "charging"),
+            ("update", "update"),
+        ]
+        for token, label in mapping:
+            if token in lower:
+                return label
+        return ""
+
+    def _normalize_troubleshoot_title(self, title: str, entity: str = "", body: str = "") -> str:
+        clean = re.sub(r"\s+", " ", str(title or "")).strip()
+        if not clean:
+            return ""
+        lower = clean.lower()
+        feature_hint = self._extract_feature_hint(f"{title}\n{body}")
+        device_hint = self._extract_device_hint(f"{title}\n{body}", entity=entity)
+        has_fix_intent = any(token in lower for token in ("not working", "fix", "error", "after update"))
+
+        # Strict mode: drop vague generic titles when device/feature cannot be inferred.
+        if not device_hint or not feature_hint:
+            return ""
+        if has_fix_intent and (feature_hint.lower() in lower):
+            return clean
+        return f"{device_hint} {feature_hint} not working? 5 fixes that actually work"
+
+    def _stackexchange_site_specs(self) -> list[dict[str, str]]:
+        specs: list[dict[str, str]] = []
+        raw = getattr(self.settings, "stackexchange_sites", None)
+        if isinstance(raw, list):
+            for row in raw:
+                if not isinstance(row, dict):
+                    continue
+                site = str(row.get("site", "") or "").strip().lower()
+                tagged = str(row.get("tagged", "") or "").strip()
+                if not site:
+                    continue
+                specs.append({"site": site, "tagged": tagged})
+        if specs:
+            return specs
+        site = str(getattr(self.settings, "stackexchange_site", "superuser") or "superuser").strip().lower()
+        tagged = str(getattr(self.settings, "stackexchange_tagged", "") or "").strip()
+        return [{"site": site or "superuser", "tagged": tagged}]
 
     def _collect_seeds(self) -> list[TopicCandidate]:
         seed_path = self.root / self.settings.seeds_path
@@ -562,34 +644,48 @@ class SourceScout:
 
     def _collect_stackexchange(self) -> list[TopicCandidate]:
         endpoint = "https://api.stackexchange.com/2.3/questions"
-        params = {
-            "order": "desc",
-            "sort": "votes",
-            "site": self.settings.stackexchange_site,
-            "pagesize": 20,
-            "filter": "withbody",
-        }
-        if self.settings.stackexchange_tagged:
-            params["tagged"] = self.settings.stackexchange_tagged
-
-        response = requests.get(endpoint, params=params, timeout=30)
-        response.raise_for_status()
-        items = response.json().get("items", [])
-
         out: list[TopicCandidate] = []
-        for item in items:
-            score = int(item.get("score", 0))
-            if score < self.settings.stackexchange_min_score:
+        seen: set[str] = set()
+        for spec in self._stackexchange_site_specs():
+            site = str(spec.get("site", "") or "").strip().lower()
+            tagged = str(spec.get("tagged", "") or "").strip()
+            if not site:
                 continue
-            out.append(
-                TopicCandidate(
-                    source="stackexchange",
-                    title=str(item.get("title", "")).strip(),
-                    body=str(item.get("body_markdown", "") or item.get("body", ""))[:4000],
-                    score=score,
-                    url=str(item.get("link", "")),
-                )
-            )
+            for sort_mode in ("activity", "creation", "votes"):
+                params = {
+                    "order": "desc",
+                    "sort": sort_mode,
+                    "site": site,
+                    "pagesize": 35,
+                    "filter": "withbody",
+                }
+                if tagged:
+                    params["tagged"] = tagged
+                try:
+                    response = requests.get(endpoint, params=params, timeout=30)
+                    response.raise_for_status()
+                    items = response.json().get("items", [])
+                except Exception:
+                    continue
+                for item in items:
+                    score = int(item.get("score", 0))
+                    if score < self.settings.stackexchange_min_score:
+                        continue
+                    title = str(item.get("title", "")).strip()
+                    url = str(item.get("link", "")).strip()
+                    key = (url or title.lower()).strip()
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(
+                        TopicCandidate(
+                            source=f"stackexchange:{site}:{sort_mode}",
+                            title=title,
+                            body=str(item.get("body_markdown", "") or item.get("body", ""))[:4000],
+                            score=score,
+                            url=url,
+                        )
+                    )
         return out
 
     def _collect_hackernews(self) -> list[TopicCandidate]:

@@ -35,6 +35,13 @@ class SourceSettings:
     seeds_path: str = "storage/seeds/seeds.json"
     stackexchange_site: str = "superuser"
     stackexchange_tagged: str = "windows-11;macos;iphone;android;audio;drivers;networking"
+    stackexchange_sites: list[dict[str, str]] = field(
+        default_factory=lambda: [
+            {"site": "superuser", "tagged": "windows-11;wifi;bluetooth;audio;drivers;networking"},
+            {"site": "apple", "tagged": "iphone;ios;macos;wifi;bluetooth;airpods;audio"},
+            {"site": "android", "tagged": "android;wifi;bluetooth;audio;battery;updates"},
+        ]
+    )
     stackexchange_min_score: int = 3
     hn_min_score: int = 30
     github_repos: list[str] = field(default_factory=list)
@@ -273,7 +280,7 @@ class ActionabilityGateSettings:
 
 @dataclass
 class GenerationSettings:
-    mode: str = "hybrid"  # local_first | hybrid | cloud_first
+    mode: str = "local_first"  # local_first | hybrid | cloud_first
     gemini_daily_budget_calls: int = 12
     gemini_only_on_fail: bool = True
 
@@ -293,6 +300,15 @@ class KeywordPoolSettings:
     active_pool_max: int = 250
     pick_per_run: int = 5
     retry_per_run_when_under_target: int = 0
+
+
+@dataclass
+class TopicPoolSettings:
+    target_size: int = 200
+    min_size: int = 140
+    refill_batch: int = 80
+    avoid_reuse_days: int = 30
+    per_run_pick: int = 1
 
 
 @dataclass
@@ -449,6 +465,7 @@ class AppSettings:
     generation: GenerationSettings = field(default_factory=GenerationSettings)
     topic_growth: TopicGrowthSettings = field(default_factory=TopicGrowthSettings)
     keyword_pool: KeywordPoolSettings = field(default_factory=KeywordPoolSettings)
+    topic_pool: TopicPoolSettings = field(default_factory=TopicPoolSettings)
     integrations: IntegrationSettings = field(default_factory=IntegrationSettings)
     blogger: BloggerSettings = field(default_factory=BloggerSettings)
     indexing: IndexingSettings = field(default_factory=IndexingSettings)
@@ -483,6 +500,7 @@ def load_settings(path: Path) -> AppSettings:
     quality_raw = dict(raw.get("quality", {}) or {})
     actionability_raw = dict(raw.get("actionability_gate", {}) or {})
     generation_raw = dict(raw.get("generation", {}) or {})
+    topic_pool_raw = dict(raw.get("topic_pool", {}) or {})
     qa_raw = raw.get("qa", {}) or {}
     content_raw = dict(raw.get("content", {}) or {})
     content_mode_raw = dict(raw.get("content_mode", {}) or {})
@@ -698,6 +716,7 @@ def load_settings(path: Path) -> AppSettings:
         generation=_construct_dc(GenerationSettings, generation_raw),
         topic_growth=_construct_dc(TopicGrowthSettings, raw.get("topic_growth", {})),
         keyword_pool=_construct_dc(KeywordPoolSettings, raw.get("keyword_pool", {})),
+        topic_pool=_construct_dc(TopicPoolSettings, topic_pool_raw),
         integrations=_construct_dc(IntegrationSettings, raw.get("integrations", {})),
         blogger=_construct_dc(BloggerSettings, raw.get("blogger", {})),
         indexing=_construct_dc(IndexingSettings, raw.get("indexing", {})),

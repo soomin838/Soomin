@@ -160,7 +160,7 @@ actionability_gate:
   max_generic_ratio: 0.012
 
 generation:
-  mode: "hybrid"
+  mode: "local_first"
   gemini_daily_budget_calls: 12
   gemini_only_on_fail: true
 
@@ -229,6 +229,13 @@ keyword_pool:
   pick_per_run: 5
   retry_per_run_when_under_target: 0
 
+topic_pool:
+  target_size: 200
+  min_size: 140
+  refill_batch: 80
+  avoid_reuse_days: 30
+  per_run_pick: 1
+
 integrations:
   enabled: true
   refresh_minutes: 15
@@ -243,6 +250,13 @@ sources:
   seeds_path: "storage/seeds/seeds.json"
   stackexchange_site: "superuser"
   stackexchange_tagged: "windows-11;macos;iphone;android;audio;drivers;networking"
+  stackexchange_sites:
+    - site: "superuser"
+      tagged: "windows-11;wifi;bluetooth;audio;drivers;networking"
+    - site: "apple"
+      tagged: "iphone;ios;macos;wifi;bluetooth;airpods;audio"
+    - site: "android"
+      tagged: "android;wifi;bluetooth;audio;battery;updates"
   stackexchange_min_score: 5
   hn_min_score: 30
   github_repos: []

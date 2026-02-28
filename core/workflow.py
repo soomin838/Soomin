@@ -125,6 +125,7 @@ class AgentWorkflow:
         self._keyword_pool_path = self.root / "storage" / "logs" / "keyword_pool.json"
         self._blogger_recent_14d_path = self.root / "storage" / "logs" / "blogger_recent_14d.json"
         self._cluster_rotation_state_path = self.root / "storage" / "state" / "cluster_rotation_state.json"
+        self._feature_rotation_state_path = self.root / "storage" / "state" / "feature_rotation_state.json"
         self._title_fingerprint_path = self.root / "storage" / "logs" / "title_fingerprints.json"
         self.keyword_assets = KeywordAssetStore(
             db_path=self.root / str(getattr(self.settings.keywords, "db_path", "storage/keywords.sqlite")),
@@ -613,6 +614,74 @@ class AgentWorkflow:
                 {"purpose": "plan_json", "success": False, "fallback_used": True},
             )
             return fallback_plan
+        if self._local_llm_calls_in_post >= max_calls:
+            self._log_ollama_event(
+                "ollama_plan_json_skipped_budget",
+                {"purpose": "plan_json", "success": False, "fallback_used": True},
+            )
+            return fallback_plan
+        ready, reason = self._prepare_local_llm()
+        if not ready:
+            self._log_ollama_event(
+                "ollama_plan_json_skipped_unavailable",
+                {"purpose": "plan_json", "success": False, "fallback_used": True, "reason": reason},
+            )
+            return fallback_plan
+
+        long_tails = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (getattr(selected, "long_tail_keywords", []) or [])
+            if str(x or "").strip()
+        ]
+        keyword = long_tails[0] if long_tails else re.sub(r"\s+", " ", str(getattr(selected, "title", "") or "")).strip()
+        keyword = keyword or "device not working fix"
+        device_type = self._infer_device_type(f"{keyword}\n{selected.title}")
+        cluster_id = self._infer_cluster_id_from_keyword(keyword)
+        context = self._build_troubleshooting_context(selected)
+        prompt_len_est = len(keyword) + len(device_type) + len(cluster_id) + sum(len(str(v or "")) for v in context.values())
+        started = time.perf_counter()
+        try:
+            plan = self.ollama_client.build_troubleshooting_plan(
+                keyword=keyword,
+                device_type=device_type,
+                cluster_id=cluster_id,
+                context=context,
+            )
+            self._local_llm_calls_in_post += 1
+            self._local_llm_used_last_run = True
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            payload = asdict(plan)
+            payload["source"] = "ollama"
+            self._log_ollama_event(
+                "ollama_plan_json_ok",
+                {
+                    "purpose": "plan_json",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": True,
+                    "fallback_used": False,
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": int(len(json.dumps(payload, ensure_ascii=False))),
+                },
+            )
+            return payload
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            self._log_ollama_event(
+                "ollama_plan_json_failed",
+                {
+                    "purpose": "plan_json",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": False,
+                    "fallback_used": True,
+                    "error": str(exc),
+                    "reason": reason,
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": 0,
+                },
+            )
+            return fallback_plan
 
     def _generation_mode(self) -> str:
         mode = str(getattr(getattr(self.settings, "generation", None), "mode", "hybrid") or "hybrid").strip().lower()
@@ -726,74 +795,6 @@ class AgentWorkflow:
             path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             return
-        if self._local_llm_calls_in_post >= max_calls:
-            self._log_ollama_event(
-                "ollama_plan_json_skipped_budget",
-                {"purpose": "plan_json", "success": False, "fallback_used": True},
-            )
-            return fallback_plan
-        ready, reason = self._prepare_local_llm()
-        if not ready:
-            self._log_ollama_event(
-                "ollama_plan_json_skipped_unavailable",
-                {"purpose": "plan_json", "success": False, "fallback_used": True, "reason": reason},
-            )
-            return fallback_plan
-
-        long_tails = [
-            re.sub(r"\s+", " ", str(x or "")).strip()
-            for x in (getattr(selected, "long_tail_keywords", []) or [])
-            if str(x or "").strip()
-        ]
-        keyword = long_tails[0] if long_tails else re.sub(r"\s+", " ", str(getattr(selected, "title", "") or "")).strip()
-        keyword = keyword or "device not working fix"
-        device_type = self._infer_device_type(f"{keyword}\n{selected.title}")
-        cluster_id = self._infer_cluster_id_from_keyword(keyword)
-        context = self._build_troubleshooting_context(selected)
-        prompt_len_est = len(keyword) + len(device_type) + len(cluster_id) + sum(len(str(v or "")) for v in context.values())
-        started = time.perf_counter()
-        try:
-            plan = self.ollama_client.build_troubleshooting_plan(
-                keyword=keyword,
-                device_type=device_type,
-                cluster_id=cluster_id,
-                context=context,
-            )
-            self._local_llm_calls_in_post += 1
-            self._local_llm_used_last_run = True
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            payload = asdict(plan)
-            payload["source"] = "ollama"
-            self._log_ollama_event(
-                "ollama_plan_json_ok",
-                {
-                    "purpose": "plan_json",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": True,
-                    "fallback_used": False,
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": int(len(json.dumps(payload, ensure_ascii=False))),
-                },
-            )
-            return payload
-        except Exception as exc:
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            self._log_ollama_event(
-                "ollama_plan_json_failed",
-                {
-                    "purpose": "plan_json",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": False,
-                    "fallback_used": True,
-                    "error": str(exc),
-                    "reason": reason,
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": 0,
-                },
-            )
-            return fallback_plan
 
     def _evaluate_actionability_gate(self, title: str, html: str) -> ActionabilityGateResult:
         cfg = getattr(self.settings, "actionability_gate", None)
@@ -1581,6 +1582,41 @@ class AgentWorkflow:
                 score = max(score, int(getattr(selected, "score", 70)))
                 reason = self._append_note(reason, f"cluster_rotation_applied:{last_cluster}->{self._infer_cluster_id_from_keyword(' '.join(getattr(selected, 'long_tail_keywords', [])[:2]) or str(getattr(selected, 'title', '') or ''))}")
 
+        selected_cluster = self._infer_cluster_id_from_keyword(
+            " ".join(getattr(selected, "long_tail_keywords", [])[:2]) or str(getattr(selected, "title", "") or "")
+        )
+        selected_feature = self._infer_feature_token(
+            " ".join(getattr(selected, "long_tail_keywords", [])[:3]) or str(getattr(selected, "title", "") or "")
+        )
+        if selected_cluster and selected_feature:
+            last_feature = self._last_feature_for_cluster(selected_cluster)
+            if last_feature and selected_feature == last_feature:
+                feature_alternates = []
+                for c in (candidates or []):
+                    cid = self._infer_cluster_id_from_keyword(
+                        " ".join(getattr(c, "long_tail_keywords", [])[:2]) or str(getattr(c, "title", "") or "")
+                    )
+                    if cid != selected_cluster:
+                        continue
+                    feat = self._infer_feature_token(
+                        " ".join(getattr(c, "long_tail_keywords", [])[:3]) or str(getattr(c, "title", "") or "")
+                    )
+                    if feat == last_feature:
+                        continue
+                    if not self._candidate_matches_content_mode(c):
+                        continue
+                    feature_alternates.append(c)
+                if feature_alternates:
+                    selected = max(feature_alternates, key=lambda x: int(getattr(x, "score", 0)))
+                    score = max(score, int(getattr(selected, "score", 70)))
+                    selected_feature = self._infer_feature_token(
+                        " ".join(getattr(selected, "long_tail_keywords", [])[:3]) or str(getattr(selected, "title", "") or "")
+                    )
+                    reason = self._append_note(
+                        reason,
+                        f"feature_rotation_applied:{last_feature}->{selected_feature}",
+                    )
+
         if score < self.settings.gemini.min_publish_score:
             reason = self._append_note(reason, f"score_auto_raised_from_{score}")
             score = max(score, int(self.settings.gemini.min_publish_score))
@@ -1669,6 +1705,13 @@ class AgentWorkflow:
             self._workflow_perf_finish_run("hold", hold_reason)
             return WorkflowResult("hold", hold_reason)
         plan_source = str((troubleshooting_plan or {}).get("source", "fallback") or "fallback").strip().lower()
+        self._append_workflow_perf(
+            "plan_json_source",
+            {
+                "plan_source": plan_source,
+                "local_llm_enabled": bool(getattr(self.settings.local_llm, "enabled", False)),
+            },
+        )
         if plan_source != "ollama":
             generation_degraded_note = self._append_note(generation_degraded_note, f"plan_source={plan_source}")
         headline_note = ""
@@ -1796,12 +1839,40 @@ class AgentWorkflow:
                 )
 
         if draft is None:
-            generation_count += 1
-            draft = self.brain.generate_post_free(selected, self.settings.authority_links)
-            generation_degraded_note = self._append_note(
-                generation_degraded_note,
-                "degraded_to_free_mode_rewrite",
+            hold_reason = "draft_generation_unavailable"
+            if generation_mode in {"local_first", "hybrid"}:
+                hold_reason = self._append_note(hold_reason, "local_draft_missing")
+            if should_use_gemini_generate:
+                hold_reason = self._append_note(hold_reason, "gemini_generate_missing")
+            hold_labels = self._build_public_labels(
+                title=str(getattr(selected, "title", "") or ""),
+                candidate=selected,
+                global_keywords=global_keywords,
+                max_labels=6,
             )
+            working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                current_draft_post_id=working_draft_id,
+                stage="hold",
+                title=str(getattr(selected, "title", "") or "draft_generation_unavailable"),
+                html_body="<h2>Hold</h2><p>Draft generation path unavailable in local-first policy.</p>",
+                labels=hold_labels,
+                reason=hold_reason,
+            )
+            hold_msg = hold_reason
+            if hold_note:
+                hold_msg += f" | {hold_note}"
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=0,
+                    title=str(getattr(selected, "title", "") or ""),
+                    source_url=str(getattr(selected, "url", "") or ""),
+                    published_url="",
+                    note=hold_msg,
+                )
+            )
+            self._workflow_perf_finish_run("hold", hold_msg)
+            return WorkflowResult("hold", hold_msg)
 
         # Headline specialist step: dedicated CTR rewrite via Gemini 2.0 Pro.
         if (not free_local_mode) and self._gemini_budget_remaining() > 0:
@@ -2228,6 +2299,54 @@ class AgentWorkflow:
             )
             self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
+
+        self._progress("headline", "최종 제목 정합성 점검", 70)
+        final_title, final_title_reason = self._finalize_title_after_content(
+            current_title=draft.title,
+            final_html=final_html,
+            selected=selected,
+            global_keywords=global_keywords,
+            troubleshooting_plan=troubleshooting_plan,
+            allow_gemini=bool(not free_local_mode),
+        )
+        if final_title_reason:
+            hold_reason = f"final_title_generation_failed:{final_title_reason}"
+            hold_labels = self._build_public_labels(
+                title=draft.title,
+                candidate=selected,
+                global_keywords=global_keywords,
+                max_labels=6,
+            )
+            working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                current_draft_post_id=working_draft_id,
+                stage="hold",
+                title=draft.title,
+                html_body=final_html,
+                labels=hold_labels,
+                reason=hold_reason,
+            )
+            hold_msg = hold_reason
+            if hold_note:
+                hold_msg += f" | {hold_note}"
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=max(0, int(actionability_result.score)),
+                    title=draft.title,
+                    source_url=draft.source_url,
+                    published_url="",
+                    note=hold_msg,
+                )
+            )
+            self._workflow_perf_finish_run("hold", hold_msg)
+            return WorkflowResult("hold", hold_msg)
+        if final_title:
+            draft.title = self._enforce_seo_title(
+                title=final_title,
+                candidate=selected,
+                global_keywords=global_keywords,
+                preferred_keyword=str((troubleshooting_plan or {}).get("primary_keyword", "") or ""),
+            )
 
         working_draft_id, draft_note = self._sync_stage_draft_checkpoint(
             current_draft_post_id=working_draft_id,
@@ -2749,6 +2868,12 @@ class AgentWorkflow:
             )
         except Exception:
             pass
+        try:
+            cluster_key = self._infer_cluster_id_from_keyword(" ".join(global_keywords[:2]) or draft.title)
+            feature_key = self._infer_feature_token(" ".join(global_keywords[:3]) or draft.title)
+            self._save_last_feature_for_cluster(cluster_key, feature_key)
+        except Exception:
+            pass
         self._cleanup_local_image_files(images)
         self._progress("done", "회차 완료", 100)
         self._mark_active_slot("consumed", "publish_success", post_id=str(getattr(published, "post_id", "") or ""))
@@ -3039,6 +3164,16 @@ class AgentWorkflow:
         idx = (month_no - 1) % len(order)
         return order[idx]
 
+    def _topic_pool_cfg(self) -> tuple[int, int, int, int, int]:
+        cfg = getattr(self.settings, "topic_pool", None)
+        target_size = max(40, int(getattr(cfg, "target_size", 200) or 200))
+        min_size = max(20, int(getattr(cfg, "min_size", 140) or 140))
+        min_size = min(min_size, target_size)
+        refill_batch = max(20, int(getattr(cfg, "refill_batch", 80) or 80))
+        avoid_days = max(7, int(getattr(cfg, "avoid_reuse_days", getattr(self.settings.keywords, "avoid_reuse_days", 30)) or 30))
+        per_run_pick = max(1, int(getattr(cfg, "per_run_pick", 1) or 1))
+        return target_size, min_size, refill_batch, avoid_days, per_run_pick
+
     def _infer_cluster_id_from_keyword(self, keyword: str) -> str:
         text = re.sub(r"\s+", " ", str(keyword or "").strip().lower())
         if any(k in text for k in ("bluetooth", "wifi", "network", "internet")):
@@ -3083,22 +3218,133 @@ class AgentWorkflow:
         except Exception:
             return
 
+    def _infer_feature_token(self, text: str) -> str:
+        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        mapping = [
+            ("wi-fi", "wifi"),
+            ("wifi", "wifi"),
+            ("bluetooth", "bluetooth"),
+            ("ethernet", "ethernet"),
+            ("vpn", "vpn"),
+            ("usb", "usb"),
+            ("printer", "printer"),
+            ("microphone", "microphone"),
+            ("mic", "microphone"),
+            ("camera", "camera"),
+            ("keyboard", "keyboard"),
+            ("mouse", "mouse"),
+            ("audio", "audio"),
+            ("sound", "audio"),
+            ("battery", "battery"),
+            ("charging", "charging"),
+            ("driver", "driver"),
+            ("update", "update"),
+        ]
+        for token, canonical in mapping:
+            if token in lower:
+                return canonical
+        return "general"
+
+    def _load_feature_rotation_state(self) -> dict[str, Any]:
+        try:
+            if not self._feature_rotation_state_path.exists():
+                return {}
+            payload = json.loads(self._feature_rotation_state_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            return {}
+        return {}
+
+    def _last_feature_for_cluster(self, cluster_id: str) -> str:
+        cid = str(cluster_id or "").strip().lower()
+        if not cid:
+            return ""
+        payload = self._load_feature_rotation_state()
+        per_cluster = payload.get("per_cluster", {}) if isinstance(payload.get("per_cluster"), dict) else {}
+        return str(per_cluster.get(cid, "") or "").strip().lower()
+
+    def _save_last_feature_for_cluster(self, cluster_id: str, feature: str) -> None:
+        cid = str(cluster_id or "").strip().lower()
+        feat = str(feature or "").strip().lower()
+        if not cid or not feat:
+            return
+        payload = self._load_feature_rotation_state()
+        per_cluster = payload.get("per_cluster", {}) if isinstance(payload.get("per_cluster"), dict) else {}
+        per_cluster[cid] = feat
+        payload["per_cluster"] = per_cluster
+        payload["updated_utc"] = datetime.now(timezone.utc).isoformat()
+        try:
+            self._feature_rotation_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._feature_rotation_state_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
+
     def _build_template_keywords(self, device_type: str, limit: int = 120) -> list[str]:
         d = str(device_type or "device").strip().lower()
-        templates = [
-            f"{d} not working",
-            f"{d} update stuck",
-            f"{d} not responding",
-            "error code fix",
-            f"{d} connected but no internet",
-            f"{d} bluetooth not working",
-            f"{d} no sound after update",
-            f"{d} battery drain fix",
-            f"{d} app crashes fix",
-            f"{d} storage full fix",
-            f"{d} network reset steps",
-            f"{d} microphone not working",
+        device_variants = {
+            "windows": ["windows 11", "windows 10", "windows laptop"],
+            "mac": ["macbook", "macos", "imac"],
+            "iphone": ["iphone", "ios", "iphone 15"],
+            "galaxy": ["galaxy phone", "samsung galaxy", "android phone"],
+        }.get(d, [d, f"{d} device"])
+        features = [
+            "wifi",
+            "bluetooth",
+            "usb",
+            "printer",
+            "microphone",
+            "camera",
+            "keyboard",
+            "speaker",
+            "audio",
+            "battery",
+            "charging",
+            "network",
+            "driver",
+            "vpn",
         ]
+        triggers = [
+            "not working",
+            "after update",
+            "keeps disconnecting",
+            "not detected",
+            "error code",
+            "stuck",
+            "not responding",
+            "randomly drops",
+            "keeps turning off",
+            "failed to start",
+        ]
+        actions = [
+            "fix",
+            "troubleshooting steps",
+            "safe reset steps",
+            "quick repair guide",
+            "beginner checklist",
+        ]
+        templates: list[str] = []
+        for dv in device_variants:
+            for feat in features:
+                for trg in triggers:
+                    templates.append(f"{dv} {feat} {trg} fix")
+                    templates.append(f"{dv} {feat} {trg} troubleshooting steps")
+            for trg in triggers:
+                for act in actions:
+                    templates.append(f"{dv} {trg} {act}")
+            templates.extend(
+                [
+                    f"{dv} not working",
+                    f"{dv} update stuck",
+                    f"{dv} connected but no internet",
+                    f"{dv} no sound after update",
+                    f"{dv} app crashes fix",
+                    f"{dv} network reset steps",
+                ]
+            )
         out: list[str] = []
         seen: set[str] = set()
         for raw in templates:
@@ -3288,7 +3534,53 @@ class AgentWorkflow:
             score=80,
             url=source_url,
         )
-        draft = self.brain.generate_post_free(candidate, self.settings.authority_links)
+        fallback_plan = self._fallback_troubleshooting_plan(candidate)
+        draft = None
+        try:
+            draft = self._build_local_draft_with_ollama(
+                selected=candidate,
+                plan=fallback_plan,
+                internal_links_block="",
+            )
+        except Exception:
+            draft = None
+        if draft is None:
+            api_ready = bool(
+                (self.settings.gemini.api_key or "").strip()
+                and (self.settings.gemini.api_key or "").strip() != "GEMINI_API_KEY"
+            )
+            if api_ready and self._gemini_budget_remaining() > 0:
+                try:
+                    draft = self.brain.generate_post(
+                        candidate,
+                        self.settings.authority_links,
+                        "Resume draft generation after collect checkpoint.",
+                        self.references.build_guidance(),
+                        domain="tech_troubleshoot",
+                        plan=fallback_plan,
+                    )
+                    if self.brain.call_count:
+                        self.logs.increment_today_gemini_count(self.brain.call_count)
+                        self.brain.reset_run_counter()
+                except Exception:
+                    if self.brain.call_count:
+                        self.logs.increment_today_gemini_count(self.brain.call_count)
+                        self.brain.reset_run_counter()
+                    draft = None
+        if draft is None:
+            hold_msg = "resume_collect_draft_unavailable"
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=0,
+                    title=title or "Recovered Topic",
+                    source_url=source_url,
+                    published_url="",
+                    note=hold_msg,
+                )
+            )
+            self._workflow_perf_finish_run("hold", hold_msg)
+            return WorkflowResult("hold", hold_msg)
         labels = self._normalize_resume_labels(row.get("labels", []))
         if not labels:
             labels = self._build_public_labels(
@@ -4101,6 +4393,122 @@ class AgentWorkflow:
             )
         except Exception:
             return
+
+    def _is_recent_title_duplicate(self, title: str) -> bool:
+        norm = re.sub(r"\s+", " ", str(title or "")).strip().lower()
+        if not norm:
+            return True
+        fp = title_fingerprint(norm)
+        if fp and fp in self._load_recent_title_fingerprints():
+            return True
+        recent_titles = self._get_recent_blogger_titles(limit=30, refresh_api=False)
+        recent_norm = {re.sub(r"\s+", " ", str(x or "")).strip().lower() for x in (recent_titles or []) if str(x or "").strip()}
+        return norm in recent_norm
+
+    def _build_rule_title_candidates(
+        self,
+        *,
+        keyword: str,
+        device: str,
+        cluster: str,
+        attempt: int = 0,
+    ) -> list[str]:
+        kw = re.sub(r"\s+", " ", str(keyword or "")).strip()
+        dev = str(device or "device").strip().lower() or "device"
+        suffixes = [
+            "that actually work",
+            "without wasting time",
+            "for beginners",
+            "before you reset everything",
+            "in 2026",
+        ]
+        suffix = suffixes[attempt % len(suffixes)]
+        seeds = [
+            f"{kw}? 5 fixes {suffix}",
+            f"{kw} after update? 5 safe fixes {suffix}",
+            f"{kw} error fix: 5 steps {suffix}",
+            f"{dev.title()} {cluster.replace('_', ' ')} issue? 5 fixes {suffix}",
+            f"{dev.title()} not working? 5 troubleshooting fixes {suffix}",
+            f"How to fix {kw}: 5 steps {suffix}",
+        ]
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in seeds:
+            t = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", str(raw or ""))
+            t = re.sub(r"\s+", " ", t).strip(" -:")
+            if not t:
+                continue
+            key = t.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(t[:120])
+        return out
+
+    def _finalize_title_after_content(
+        self,
+        *,
+        current_title: str,
+        final_html: str,
+        selected: TopicCandidate,
+        global_keywords: list[str],
+        troubleshooting_plan: dict[str, Any],
+        allow_gemini: bool,
+    ) -> tuple[str, str]:
+        keyword = re.sub(
+            r"\s+",
+            " ",
+            str((troubleshooting_plan or {}).get("primary_keyword", "") or (global_keywords[0] if global_keywords else current_title)),
+        ).strip()
+        if not keyword:
+            keyword = re.sub(r"\s+", " ", str(current_title or selected.title or "device not working fix")).strip()
+        device = self._infer_device_type(f"{keyword}\n{selected.title}\n{current_title}")
+        cluster = self._infer_cluster_id_from_keyword(keyword)
+        summary = self._normalize_excerpt(final_html)[:1200]
+        candidates: list[str] = []
+
+        if allow_gemini and self._gemini_budget_remaining() > 0:
+            try:
+                optimized_title, variants = self.brain.optimize_headline_ctr(
+                    summary=summary,
+                    trending_keywords=(global_keywords or [])[:8],
+                    current_title=current_title or selected.title,
+                )
+                if self.brain.call_count:
+                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                    self.brain.reset_run_counter()
+                candidates.extend([str(optimized_title or "").strip(), *[str(v or "").strip() for v in (variants or [])]])
+            except Exception:
+                if self.brain.call_count:
+                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                    self.brain.reset_run_counter()
+
+        candidates.append(str(current_title or "").strip())
+        for attempt in range(0, 3):
+            candidates.extend(
+                self._build_rule_title_candidates(
+                    keyword=keyword,
+                    device=device,
+                    cluster=cluster,
+                    attempt=attempt,
+                )
+            )
+            dedup: list[str] = []
+            seen: set[str] = set()
+            for c in candidates:
+                t = re.sub(r"\s+", " ", str(c or "")).strip()
+                if not t:
+                    continue
+                key = t.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                dedup.append(t)
+            candidates = dedup[:16]
+            for cand in candidates:
+                if not self._is_recent_title_duplicate(cand):
+                    return cand, ""
+        return "", "title_duplicate_exhausted"
 
     def _go_live_gate_checklist(
         self,
@@ -5984,16 +6392,18 @@ class AgentWorkflow:
     def _acquire_run_keywords(self, candidates) -> tuple[list[str], str]:
         note = ""
         device_type = self._current_rotated_device_type()
-        refill_threshold = max(10, int(getattr(self.settings.keywords, "refill_threshold_per_device", 100) or 100))
-        avoid_days = max(7, int(getattr(self.settings.keywords, "avoid_reuse_days", 30) or 30))
+        target_size, min_size, refill_batch, avoid_days, per_run_pick = self._topic_pool_cfg()
         # One post is generated per run; reserve exactly one primary keyword per run.
-        pick_count = 1
+        pick_count = 1 if per_run_pick >= 1 else 1
 
         available = self.keyword_assets.available_count(device_type=device_type, avoid_reuse_days=avoid_days)
         note = self._append_note(note, f"kw_device={device_type}")
         note = self._append_note(note, f"kw_available={available}")
-        if available < refill_threshold:
-            local_candidates = self._build_local_keyword_candidates(candidates, limit=max(200, refill_threshold * 3))
+        note = self._append_note(note, f"topic_pool_target={target_size}")
+        note = self._append_note(note, f"topic_pool_min={min_size}")
+        if available < min_size:
+            local_candidates = self._build_local_keyword_candidates(candidates, limit=max(200, refill_batch * 4))
+            target_add = min(refill_batch, max(0, target_size - available))
             rows: list[tuple[str, str, str, float, float]] = []
             for kw in local_candidates:
                 rows.append(
@@ -6005,7 +6415,7 @@ class AgentWorkflow:
                         min(1.0, len(kw.split()) / 8.0),
                     )
                 )
-            for kw in self._build_template_keywords(device_type=device_type, limit=max(80, refill_threshold)):
+            for kw in self._build_template_keywords(device_type=device_type, limit=max(80, refill_batch * 2)):
                 rows.append(
                     (
                         kw,
@@ -6015,7 +6425,13 @@ class AgentWorkflow:
                         0.2,
                     )
                 )
-            added = self.keyword_assets.upsert_keywords(device_type=device_type, rows=rows)
+            if target_add <= 0:
+                added = 0
+            else:
+                added = self.keyword_assets.upsert_keywords(
+                    device_type=device_type,
+                    rows=rows[: max(target_add * 4, 120)],
+                )
             note = self._append_note(note, f"kw_refill_added={added}")
 
         picks = self.keyword_assets.pick_keywords(
@@ -6033,6 +6449,90 @@ class AgentWorkflow:
         if spec_note:
             note = self._append_note(note, spec_note)
         return picks, note
+
+    def weekly_refresh_topic_pool(self, force: bool = False) -> dict[str, Any]:
+        target_size, min_size, refill_batch, avoid_days, _ = self._topic_pool_cfg()
+        default_order = ["windows", "mac", "iphone", "galaxy"]
+        devices = [
+            str(x or "").strip().lower()
+            for x in (getattr(self.settings.topics, "rotation_order", default_order) or default_order)
+            if str(x or "").strip()
+        ]
+        if not devices:
+            devices = default_order
+
+        try:
+            candidates = self._collect_candidates_with_retry(max_attempts=3)
+        except Exception:
+            candidates = []
+        base_local = self._build_local_keyword_candidates(candidates, limit=max(260, refill_batch * 5))
+        ts_utc = datetime.now(timezone.utc).isoformat()
+        report: dict[str, Any] = {
+            "ts_utc": ts_utc,
+            "target_size": int(target_size),
+            "min_size": int(min_size),
+            "refill_batch": int(refill_batch),
+            "avoid_reuse_days": int(avoid_days),
+            "devices": {},
+            "total_added": 0,
+        }
+
+        for device in devices:
+            before = self.keyword_assets.available_count(device_type=device, avoid_reuse_days=avoid_days)
+            added = 0
+            rows: list[tuple[str, str, str, float, float]] = []
+            if force or before < min_size:
+                want_total = max(min_size, target_size)
+                need = max(0, want_total - before)
+                target_add = min(refill_batch, need if need > 0 else refill_batch)
+                for kw in self._build_template_keywords(device_type=device, limit=max(120, target_add * 2)):
+                    rows.append(
+                        (
+                            kw,
+                            self._infer_cluster_id_from_keyword(kw),
+                            "weekly_templates",
+                            0.65,
+                            0.2,
+                        )
+                    )
+                for kw in base_local:
+                    normalized = self._normalize_keyword(kw)
+                    if not normalized:
+                        continue
+                    if device not in normalized.lower():
+                        normalized = self._normalize_keyword(f"{device} {normalized}")
+                    if not normalized:
+                        continue
+                    rows.append(
+                        (
+                            normalized,
+                            self._infer_cluster_id_from_keyword(normalized),
+                            "weekly_scout",
+                            0.8,
+                            min(1.0, len(normalized.split()) / 8.0),
+                        )
+                    )
+                    if len(rows) >= max(140, target_add * 4):
+                        break
+                if rows:
+                    added = self.keyword_assets.upsert_keywords(device_type=device, rows=rows)
+            after = self.keyword_assets.available_count(device_type=device, avoid_reuse_days=avoid_days)
+            report["devices"][device] = {
+                "available_before": int(before),
+                "available_after": int(after),
+                "added": int(added),
+                "rows_prepared": int(len(rows)),
+            }
+            report["total_added"] += int(added)
+
+        try:
+            log_path = self.root / "storage" / "logs" / "topic_pool_weekly_refresh.jsonl"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(report, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        return report
 
     def _load_blogger_recent_titles_cache(self) -> dict[str, Any]:
         if not self._blogger_recent_14d_path.exists():

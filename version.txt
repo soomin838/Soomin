@@ -1,2 +1,2 @@
-﻿build_date=2026-02-28T10:11:01+09:00
-commit=acb1593c02ddbc4fa013babe341a3c3a11cd6403
+﻿build_date=2026-02-28T12:37:35+09:00
+commit=a5a1da7917cf5c1b21309023bd6d57b045dc47d1
