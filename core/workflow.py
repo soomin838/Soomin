@@ -6203,36 +6203,37 @@ class AgentWorkflow:
         if not images:
             return
         thumb = images[0]
+
+        news_mode = is_news_mode(self.settings)
         long_tails = [
             re.sub(r"\s+", " ", str(k or "")).strip()
             for k in (getattr(candidate, "long_tail_keywords", []) or [])
             if str(k or "").strip()
         ]
         entity = re.sub(r"\s+", " ", str(getattr(candidate, "main_entity", "") or "")).strip()
+        title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
+
+        # pick subject
+        subject = ""
         if long_tails:
             base = re.sub(r"[?]+$", "", long_tails[0]).strip()
             base = re.sub(r"^(how|why|what)\s+", "", base, flags=re.IGNORECASE)
-            base = re.sub(
-                r"\b(trending today|mean for (?:team|daily) productivity|why everyone is talking|for office workflows?)\b",
-                "",
-                base,
-                flags=re.IGNORECASE,
-            )
             base = re.sub(r"\s+", " ", base).strip(" -")
-            if entity and entity.lower() not in base.lower():
-                base = f"{base} using {entity}"
             subject = base
-        else:
-            title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
-            if entity:
-                subject = entity
-            elif title:
-                subject = title
-            else:
-                subject = "visual summary"
-        thumb.alt = (
-            f"Practical troubleshooting process diagram for {subject}."
-        )[:180]
+        if not subject:
+            subject = entity or title or "this update"
+
+        subject = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", subject)
+        subject = re.sub(r"\s+", " ", subject).strip()
+        subject = subject[:120] if subject else "this update"
+
+        if news_mode:
+            # NEWS: never mention troubleshooting / diagram language
+            thumb.alt = f"Tech news thumbnail illustration about {subject}."[:180]
+            return
+
+        # Legacy troubleshoot mode
+        thumb.alt = f"Practical troubleshooting process diagram for {subject}."[:180]
 
     def _enforce_seo_title(
         self,
@@ -6323,16 +6324,7 @@ class AgentWorkflow:
                     w in low for w in ["update", "policy", "security", "ai", "rollout", "patch", "ban", "release"]
                 ):
                     s += 8
-                if any(
-                    phrase in low
-                    for phrase in [
-                        "what changes",
-                        "what changed",
-                        "what it means",
-                        "who is affected",
-                        "what to do now",
-                    ]
-                ):
+                if any(w in low for w in ["impact", "timeline", "response", "analysis", "outlook", "breakdown"]):
                     s += 3
                 if self._is_recent_title_duplicate(tt):
                     s -= 200
@@ -6363,7 +6355,20 @@ class AgentWorkflow:
                         self.logs.increment_today_gemini_count(self.brain.call_count)
                         self.brain.reset_run_counter()
 
-            verbs = ["shifts", "rolls out", "tightens", "expands", "pauses", "revises", "changes", "adds", "drops"]
+            verbs = [
+                "shifts",
+                "rolls out",
+                "tightens",
+                "expands",
+                "pauses",
+                "revises",
+                "changes",
+                "adds",
+                "drops",
+                "updates",
+                "adjusts",
+                "moves",
+            ]
             angles = [
                 "what changes for users",
                 "what it means in practice",
@@ -6372,21 +6377,33 @@ class AgentWorkflow:
                 "what to watch next",
                 "why it matters this week",
                 "what's different from last time",
+                "timeline and immediate impact",
+                "what teams should monitor",
+                "policy impact and rollout notes",
+                "market response and next signals",
+                "key details from official statements",
             ]
             frames = [
                 "{topic} {verb}: {angle}",
                 "{topic} {verb} - {angle}",
                 "{verb_cap} at {topic}: {angle}",
                 "{topic}: {angle} after the latest {category} move",
+                "{topic} update: {angle}",
+                "{topic} this week: {angle}",
+                "{topic} and users: {angle}",
+                "{topic} rollout: {angle}",
+                "{topic} policy shift: {angle}",
+                "{topic} analysis: {angle}",
+                "{topic}: quick breakdown of {angle}",
             ]
-            verb = random.choice(verbs)
-            verb_cap = verb[:1].upper() + verb[1:]
-            angle = random.choice(angles)
             category_word = category_hint if category_hint else "platform"
 
             if (not best) or len(best) < 36 or self._is_recent_title_duplicate(best):
                 candidates_local = []
                 for _ in range(18):
+                    verb = random.choice(verbs)
+                    verb_cap = verb[:1].upper() + verb[1:]
+                    angle = random.choice(angles)
                     tpl = random.choice(frames)
                     title_local = tpl.format(
                         topic=topic_phrase,
@@ -8397,6 +8414,18 @@ class AgentWorkflow:
         base = re.sub(r"<[^>]+>", " ", str(html or ""))
         base = re.sub(r"\s+", " ", base).strip()
         seed = re.sub(r"\s+", " ", str(summary or "")).strip()
+        if is_news_mode(self.settings):
+            t = re.sub(r"\s+", " ", str(title or "")).strip()
+            s = re.sub(r"\s+", " ", str(summary or "")).strip()
+            if len(s) < 80:
+                s = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(html or ""))).strip()[:220]
+            meta = f"{t}: {s}".strip()
+            meta = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]+", " ", meta)
+            meta = re.sub(r"\b(test|troubleshooting|fix guide)\b", " ", meta, flags=re.IGNORECASE)
+            meta = re.sub(r"\s+", " ", meta).strip()
+            if len(meta) > 160:
+                meta = meta[:157].rstrip(" ,.;:") + "..."
+            return meta
         if len(seed) < 80:
             seed = base[:260]
         seed = re.sub(r"\s+", " ", seed).strip()

@@ -408,11 +408,7 @@ content_mode:
   - exposed
   - destroyed
   - caught
-  required_title_tokens_any:
-  - what changed
-  - what it means
-  - who is affected
-  - what to do now
+  required_title_tokens_any: []
 local_llm:
   enabled: true
   provider: ollama
@@ -437,4 +433,3 @@ authority_links:
 - https://aws.amazon.com/blogs/security/
 - https://www.cloudflare.com/blog/
 - https://www.nist.gov/cyberframework
-- https://www.consumerfinance.gov/about-us/newsroom/
