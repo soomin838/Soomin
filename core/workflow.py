@@ -28,6 +28,9 @@ from .logstore import LogStore, RunRecord
 from .news_pool import NewsPoolStore
 from .news_rss import fetch_feed
 from .news_score import classify_category, contains_allow_keywords, has_blocked_keywords, score_news_item
+from .news_pack_manifest import NewsPackManifest
+from .news_pack_picker import NewsPackPicker
+from .news_pack_seeder import NewsPackSeeder
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
 from .patterns import PatternEngine
@@ -40,8 +43,10 @@ from .scout import SourceScout, TopicCandidate
 from .settings import AppSettings, is_news_mode
 from .preflight import validate_secrets
 from .text_segmenter import section_bundle_for_llm
+from .thumbnail_overlay import ThumbnailOverlayRenderer
 from .topic_growth import TopicGrower
 from .visual import ImageAsset, VisualPipeline
+from .r2_uploader import R2Config, upload_file as r2_upload_file
 
 
 @dataclass
@@ -178,6 +183,28 @@ class AgentWorkflow:
         self._news_pool_db_path = self.root / "storage" / "logs" / "news_pool.sqlite3"
         self._news_pool_state_path = self.root / "storage" / "logs" / "news_pool_state.json"
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
+        self.news_pack_manifest = NewsPackManifest(
+            root=self.root,
+            manifest_path=str(getattr(self.settings.news_pack, "manifest_path", "storage/state/news_pack_manifest.jsonl")),
+        )
+        self.news_pack_picker = NewsPackPicker(
+            root=self.root,
+            manifest_path=str(getattr(self.settings.news_pack, "manifest_path", "storage/state/news_pack_manifest.jsonl")),
+        )
+        self.news_pack_seeder = NewsPackSeeder(
+            root=self.root,
+            settings=self.settings.news_pack,
+            ollama_client=self.ollama_client,
+            gemini_api_key=str(getattr(self.settings.gemini, "api_key", "") or ""),
+            gemini_model=str(getattr(self.settings.gemini, "model", "gemini-2.0-flash") or "gemini-2.0-flash"),
+            r2_config=getattr(self.settings.publish, "r2", None),
+        )
+        self.thumbnail_overlay = ThumbnailOverlayRenderer(
+            style=str(getattr(self.settings.news_pack, "thumb_overlay_style", "yt_clean") or "yt_clean"),
+            font_paths=list(getattr(self.settings.news_pack, "thumb_overlay_font_paths", []) or []),
+            max_words=int(getattr(self.settings.news_pack, "thumb_hook_max_words", 3) or 3),
+        )
+        self._news_pack_last_tick_mono = 0.0
         self._news_domain = "tech_news_explainer"
         self._start_posts_index_bootstrap()
 
@@ -194,6 +221,160 @@ class AgentWorkflow:
                 self._progress_hook(phase_key, phase_msg, phase_pct)
         except Exception:
             pass
+
+    def news_pack_seed_tick_if_needed(self, force: bool = False, min_interval_sec: int = 100) -> dict[str, Any]:
+        if not bool(getattr(self.settings.news_pack, "enabled", True)):
+            return {"status": "disabled"}
+        now_mono = time.monotonic()
+        if (not force) and self._news_pack_last_tick_mono > 0:
+            if (now_mono - self._news_pack_last_tick_mono) < max(30, int(min_interval_sec)):
+                return {"status": "skipped", "reason": "interval_guard"}
+        self._news_pack_last_tick_mono = now_mono
+        try:
+            result = self.news_pack_seeder.seed_one_tick(force=bool(force))
+            return result if isinstance(result, dict) else {"status": "ok"}
+        except Exception as exc:
+            row = {
+                "event": "news_pack_tick_failed",
+                "error": str(exc)[:220],
+                "ts_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            try:
+                path = self.root / "storage" / "logs" / "news_pack_seeder.jsonl"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            return {"status": "failed", "error": str(exc)[:220]}
+
+    def _news_pack_tags_for_candidate(self, candidate: TopicCandidate, category: str) -> list[str]:
+        tags: list[str] = []
+        raw_meta = dict(getattr(candidate, "meta", {}) or {})
+        for value in (raw_meta.get("tags", []) or []):
+            t = re.sub(r"[^a-z0-9_-]", "", str(value or "").lower()).strip()
+            if t and t not in tags:
+                tags.append(t)
+        cat = re.sub(r"[^a-z0-9_-]", "", str(category or "").lower()).strip()
+        if cat and cat not in tags:
+            tags.insert(0, cat)
+        defaults = [str(x or "").strip().lower() for x in (getattr(self.settings.news_pack, "tags", []) or []) if str(x or "").strip()]
+        for t in defaults:
+            if t not in tags:
+                tags.append(t)
+            if len(tags) >= 4:
+                break
+        return tags[:4] if tags else ["platform"]
+
+    def _news_pack_record_to_asset(self, row: dict[str, Any], index: int) -> ImageAsset | None:
+        if not isinstance(row, dict):
+            return None
+        local_raw = str(row.get("local_path", "") or "").strip()
+        if not local_raw:
+            return None
+        local = Path(local_raw)
+        if not local.is_absolute():
+            local = (self.root / local_raw).resolve()
+        if not local.exists():
+            return None
+        kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
+        alt = "Editorial illustration supporting this tech news section."
+        if kind == "thumb_final":
+            alt = "Editorial thumbnail illustration for this tech news article."
+        src_url = str(row.get("r2_url", "") or "").strip()
+        return ImageAsset(
+            path=local,
+            alt=alt,
+            anchor_text="",
+            source_kind="news_pack",
+            source_url=src_url,
+            license_note="NewsPack generated background",
+        )
+
+    def _render_news_thumb_overlay(
+        self,
+        *,
+        thumb_row: dict[str, Any],
+        category: str,
+        title: str,
+    ) -> ImageAsset | None:
+        if not bool(getattr(self.settings.news_pack, "thumb_overlay_enabled", True)):
+            return self._news_pack_record_to_asset(thumb_row, 0)
+        base_asset = self._news_pack_record_to_asset(thumb_row, 0)
+        if base_asset is None:
+            return None
+        hooks: list[str] = []
+        for h in (thumb_row.get("hook_candidates", []) if isinstance(thumb_row.get("hook_candidates", []), list) else []):
+            txt = re.sub(r"[^A-Za-z0-9\s]", " ", str(h or "").upper())
+            txt = re.sub(r"\s+", " ", txt).strip()
+            if txt and txt not in hooks:
+                hooks.append(txt)
+        hook = hooks[0] if hooks else self.visual.pick_thumbnail_hook(category=category, title=title)
+        out_dir = self.root / "storage" / "temp_images" / "news_thumb_final"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        token = hashlib.sha1(f"{title}|{datetime.now(timezone.utc).isoformat()}".encode("utf-8", errors="ignore")).hexdigest()[:12]
+        out_path = out_dir / f"thumb_final_{token}.png"
+        rendered = self.thumbnail_overlay.render(
+            source_path=base_asset.path,
+            hook_text=hook,
+            tag_label=category or "tech",
+            output_path=out_path,
+        )
+        r2_cfg = R2Config(
+            endpoint_url=str(getattr(self.settings.publish.r2, "endpoint_url", "") or "").strip(),
+            bucket=str(getattr(self.settings.publish.r2, "bucket", "") or "").strip(),
+            access_key_id=str(getattr(self.settings.publish.r2, "access_key_id", "") or "").strip(),
+            secret_access_key=str(getattr(self.settings.publish.r2, "secret_access_key", "") or "").strip(),
+            public_base_url=str(getattr(self.settings.publish.r2, "public_base_url", "") or "").strip().rstrip("/"),
+            prefix=str(getattr(self.settings.news_pack, "r2_prefix", "news_pack") or "news_pack").strip() or "news_pack",
+            cache_control=str(getattr(self.settings.publish.r2, "cache_control", "public, max-age=31536000, immutable") or "public, max-age=31536000, immutable").strip(),
+        )
+        r2_url = r2_upload_file(
+            root=self.root,
+            cfg=r2_cfg,
+            file_path=rendered,
+            category="thumb_final",
+        )
+        if not self.publisher._is_allowed_image_url(str(r2_url), allow_data_uri=False):  # noqa: SLF001
+            raise RuntimeError("thumb_final_r2_host_invalid")
+        sha1 = hashlib.sha1(rendered.read_bytes()).hexdigest()
+        self.news_pack_manifest.append(
+            {
+                "kind": "thumb_final",
+                "tags": [str(category or "platform").lower()],
+                "provider": "local_overlay",
+                "prompt": f"overlay:{hook}",
+                "prompt_hash": hashlib.sha1(f"overlay:{hook}".encode("utf-8", errors="ignore")).hexdigest(),
+                "local_path": str(rendered),
+                "r2_key": str(r2_url).split(r2_cfg.public_base_url.rstrip("/") + "/", 1)[-1],
+                "r2_url": str(r2_url),
+                "sha1": sha1,
+                "width": 1280,
+                "height": 720,
+                "status": "ready",
+                "used_at": "",
+                "used_by": "",
+                "hook_candidates": hooks[:3],
+                "style_tags": ["yt_clean", "overlay"],
+            }
+        )
+        return ImageAsset(
+            path=rendered,
+            alt="Editorial thumbnail illustration for this tech news article.",
+            anchor_text="",
+            source_kind="news_pack",
+            source_url=str(r2_url),
+            license_note="NewsPack overlay thumbnail",
+        )
+
+    def _mark_news_pack_used(self, images: list[ImageAsset], post_id: str) -> None:
+        for image in images or []:
+            src = str(getattr(image, "source_url", "") or "").strip()
+            if not src:
+                continue
+            if not self.publisher._is_allowed_image_url(src, allow_data_uri=False):  # noqa: SLF001
+                continue
+            self.news_pack_manifest.mark_used(r2_url=src, used_by_post_id=str(post_id or ""))
 
     def _append_workflow_perf(self, event: str, payload: dict[str, Any] | None = None) -> None:
         row = {
@@ -1869,16 +2050,60 @@ class AgentWorkflow:
 
             self._progress("visual", "뉴스 이미지/썸네일 구성", 72)
             target_images = max(5, int(getattr(self.settings.visual, "target_images_per_post", 5) or 5))
-            images = self._profile_call(
-                "image_library_pick_news",
-                lambda: pick_images(
-                    title=f"{category} {draft.title}",
-                    min_count=target_images,
-                    root=self.root,
+            required_inline = max(0, target_images - 1)
+            news_tags = self._news_pack_tags_for_candidate(selected, category)
+            picked_pack = self._profile_call(
+                "news_pack_pick",
+                lambda: self.news_pack_picker.pick_for_post(
+                    tags=news_tags,
+                    thumb_count=1,
+                    inline_count=required_inline,
                 ),
-                slow_ms=2000,
+                slow_ms=1800,
             )
-            images = self.visual.ensure_unique_assets(images)
+            thumb_row = dict(getattr(picked_pack, "thumb_bg", {}) or {})
+            inline_rows = list(getattr(picked_pack, "inline_bg", []) or [])
+            if (not thumb_row) or len(inline_rows) < required_inline:
+                available_count = (1 if thumb_row else 0) + len(inline_rows)
+                hold_reason = f"image_library_shortage({available_count}/{target_images})"
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+            thumb_asset = self._render_news_thumb_overlay(
+                thumb_row=thumb_row,
+                category=category,
+                title=draft.title,
+            )
+            if thumb_asset is None:
+                hold_reason = "thumb_overlay_failed:no_thumb_asset"
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+
+            images: list[ImageAsset] = [thumb_asset]
+            for idx, row in enumerate(inline_rows[:required_inline], start=1):
+                asset = self._news_pack_record_to_asset(dict(row or {}), idx)
+                if asset is None:
+                    continue
+                images.append(asset)
             if len(images) < target_images:
                 hold_reason = f"image_library_shortage({len(images)}/{target_images})"
                 self.logs.append_run(
@@ -1893,22 +2118,22 @@ class AgentWorkflow:
                 )
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
-            hook_text = self.visual.pick_thumbnail_hook(category=category, title=draft.title)
-            self.visual.apply_news_thumbnail_overlay(images[0].path, hook_text)
 
             dry_run = bool(getattr(self.settings.budget, "dry_run", False))
             preflight_thumb_src = ""
             if dry_run:
                 gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
             else:
-                images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
-                    draft=draft,
-                    candidate=selected,
-                    images=images,
-                    prompt_plan={"source": "news_library"},
-                    max_attempts=3,
-                    manual_trigger=manual_trigger,
-                )
+                preflight_thumb_src = str(getattr(images[0], "source_url", "") or "").strip()
+                if not preflight_thumb_src:
+                    images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
+                        draft=draft,
+                        candidate=selected,
+                        images=images,
+                        prompt_plan={"source": "news_pack_picker"},
+                        max_attempts=2,
+                        manual_trigger=manual_trigger,
+                    )
                 creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
                 gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
                     final_html,
@@ -2002,6 +2227,7 @@ class AgentWorkflow:
             if claimed_id:
                 self.news_pool_store.mark_used(claimed_id, str(getattr(published, "url", "") or ""))
                 claim_finalized = True
+            self._mark_news_pack_used(images, str(getattr(published, "post_id", "") or ""))
 
             self.logs.add_scheduled_post(
                 publish_at=publish_at.isoformat(),

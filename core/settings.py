@@ -117,6 +117,40 @@ class VisualSettings:
 
 
 @dataclass
+class NewsPackSettings:
+    enabled: bool = True
+    daily_target_total: int = 10
+    daily_target_thumb_bg: int = 4
+    daily_target_inline_bg: int = 6
+    interval_minutes_base: int = 150
+    interval_minutes_jitter: int = 45
+    max_consecutive_failures: int = 5
+    provider_order: list[str] = field(
+        default_factory=lambda: ["pollinations_auth", "pollinations_anon", "gemini"]
+    )
+    pollinations_api_key: str = ""
+    pollinations_timeout_sec: int = 35
+    gemini_fallback_enabled: bool = True
+    gemini_fallback_daily_cap: int = 1
+    r2_upload_enabled: bool = True
+    r2_prefix: str = "news_pack"
+    manifest_path: str = "storage/state/news_pack_manifest.jsonl"
+    state_path: str = "storage/state/news_pack_state.json"
+    thumb_hook_max_words: int = 3
+    thumb_overlay_enabled: bool = True
+    thumb_overlay_style: str = "yt_clean"
+    thumb_overlay_font_paths: list[str] = field(
+        default_factory=lambda: [
+            "C:/Windows/Fonts/segoeuib.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+        ]
+    )
+    tags: list[str] = field(
+        default_factory=lambda: ["security", "policy", "ai", "platform", "mobile", "chips"]
+    )
+
+
+@dataclass
 class BudgetSettings:
     free_mode: bool = True
     dry_run: bool = False
@@ -495,6 +529,7 @@ class AppSettings:
     sources: SourceSettings = field(default_factory=SourceSettings)
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
     visual: VisualSettings = field(default_factory=VisualSettings)
+    news_pack: NewsPackSettings = field(default_factory=NewsPackSettings)
     budget: BudgetSettings = field(default_factory=BudgetSettings)
     publish: PublishSettings = field(default_factory=PublishSettings)
     quality: QualitySettings = field(default_factory=QualitySettings)
@@ -546,6 +581,7 @@ def load_settings(path: Path) -> AppSettings:
     publishing_raw = dict(raw.get("publishing", {}) or {})
     llm_raw = dict(raw.get("llm", {}) or {})
     local_llm_raw = dict(raw.get("local_llm", {}) or {})
+    news_pack_raw = dict(raw.get("news_pack", {}) or {})
     images_raw = dict(raw.get("images", {}) or {})
     internal_links_raw = dict(raw.get("internal_links", {}) or {})
     keywords_raw = dict(raw.get("keywords", {}) or {})
@@ -713,6 +749,10 @@ def load_settings(path: Path) -> AppSettings:
     )
     publish_raw["r2"] = r2_raw
     raw["publish"] = publish_raw
+    # ENV-first override for optional NewsPack provider secrets.
+    news_pack_raw["pollinations_api_key"] = str(
+        os.getenv("POLLINATIONS_API_KEY") or news_pack_raw.get("pollinations_api_key", "")
+    ).strip()
     if internal_links_raw:
         raw.setdefault("publish", {})
         raw["publish"]["related_posts_min"] = int(internal_links_raw.get("related_link_count", 2))
@@ -746,6 +786,7 @@ def load_settings(path: Path) -> AppSettings:
         sources=_construct_dc(SourceSettings, raw.get("sources", {})),
         gemini=_construct_dc(GeminiSettings, raw.get("gemini", {})),
         visual=_construct_dc(VisualSettings, raw.get("visual", {})),
+        news_pack=_construct_dc(NewsPackSettings, news_pack_raw),
         budget=_construct_dc(BudgetSettings, raw.get("budget", {})),
         publish=publish_obj,
         quality=_construct_dc(QualitySettings, quality_raw),

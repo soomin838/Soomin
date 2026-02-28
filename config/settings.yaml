@@ -323,6 +323,40 @@ visual:
   thumbnail_text_max_words: 3
   screenshot_priority_keywords: []
 
+news_pack:
+  enabled: true
+  daily_target_total: 10
+  daily_target_thumb_bg: 4
+  daily_target_inline_bg: 6
+  interval_minutes_base: 150
+  interval_minutes_jitter: 45
+  max_consecutive_failures: 5
+  provider_order:
+    - "pollinations_auth"
+    - "pollinations_anon"
+    - "gemini"
+  pollinations_api_key: ""
+  pollinations_timeout_sec: 35
+  gemini_fallback_enabled: true
+  gemini_fallback_daily_cap: 1
+  r2_upload_enabled: true
+  r2_prefix: "news_pack"
+  manifest_path: "storage/state/news_pack_manifest.jsonl"
+  state_path: "storage/state/news_pack_state.json"
+  thumb_hook_max_words: 3
+  thumb_overlay_enabled: true
+  thumb_overlay_style: "yt_clean"
+  thumb_overlay_font_paths:
+    - "C:/Windows/Fonts/segoeuib.ttf"
+    - "C:/Windows/Fonts/arialbd.ttf"
+  tags:
+    - "security"
+    - "policy"
+    - "ai"
+    - "platform"
+    - "mobile"
+    - "chips"
+
 blogger:
   blog_id: "BLOGGER_BLOG_ID"
   credentials_path: "config/blogger_token.json"

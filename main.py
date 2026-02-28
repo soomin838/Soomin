@@ -599,11 +599,20 @@ class AgentController:
     def loop(self) -> None:
         backoff_minutes = 1
         self._maybe_refresh_scheduler(force=True)
+        last_news_pack_tick_epoch = 0.0
 
         while True:
             if not self.running:
                 time.sleep(1)
                 continue
+
+            now_epoch = time.time()
+            if (now_epoch - last_news_pack_tick_epoch) >= 100:
+                try:
+                    self.workflow.news_pack_seed_tick_if_needed(force=False, min_interval_sec=100)
+                except Exception:
+                    pass
+                last_news_pack_tick_epoch = now_epoch
 
             self._maybe_refresh_scheduler(force=False)
             now = datetime.now(self.tz)
@@ -1052,6 +1061,39 @@ class AgentController:
                 changed = True
             if str(_nested_get(raw, "generation.gemini_only_on_fail") or "").strip().lower() in {"", "none"}:
                 _nested_set(raw, "generation.gemini_only_on_fail", True)
+                changed = True
+            if str(_nested_get(raw, "news_pack.enabled") or "").strip().lower() in {"", "none"}:
+                _nested_set(raw, "news_pack.enabled", True)
+                changed = True
+            try:
+                npt = int(_nested_get(raw, "news_pack.daily_target_total") or "0")
+            except Exception:
+                npt = 0
+            if npt <= 0:
+                _nested_set(raw, "news_pack.daily_target_total", 10)
+                changed = True
+            try:
+                np_thumb = int(_nested_get(raw, "news_pack.daily_target_thumb_bg") or "0")
+            except Exception:
+                np_thumb = 0
+            if np_thumb <= 0:
+                _nested_set(raw, "news_pack.daily_target_thumb_bg", 4)
+                changed = True
+            try:
+                np_inline = int(_nested_get(raw, "news_pack.daily_target_inline_bg") or "0")
+            except Exception:
+                np_inline = 0
+            if np_inline <= 0:
+                _nested_set(raw, "news_pack.daily_target_inline_bg", 6)
+                changed = True
+            if not (_nested_get(raw, "news_pack.r2_prefix") or "").strip():
+                _nested_set(raw, "news_pack.r2_prefix", "news_pack")
+                changed = True
+            if not (_nested_get(raw, "news_pack.manifest_path") or "").strip():
+                _nested_set(raw, "news_pack.manifest_path", "storage/state/news_pack_manifest.jsonl")
+                changed = True
+            if not (_nested_get(raw, "news_pack.state_path") or "").strip():
+                _nested_set(raw, "news_pack.state_path", "storage/state/news_pack_state.json")
                 changed = True
             if (_nested_get(raw, "images.provider") or "").strip().lower() != "library":
                 _nested_set(raw, "images.provider", "library")

@@ -255,6 +255,81 @@ class OllamaClient:
             style_tags=style_tags,
         )
 
+    def build_news_image_prompt(
+        self,
+        *,
+        tags: list[str],
+        kind: str,
+        seed: int,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean_tags = [str(t or "").strip().lower() for t in (tags or []) if str(t or "").strip()]
+        clean_kind = str(kind or "inline_bg").strip().lower()
+        clean_context = {
+            str(k or ""): re.sub(r"\s+", " ", str(v or "")).strip()[:220]
+            for k, v in (context or {}).items()
+            if str(k or "").strip()
+        }
+        system_prompt = (
+            "You generate visual prompt packs for US tech news blog images.\n"
+            "Return JSON only.\n"
+            "Fields: background_prompt, hook_candidates, style_tags.\n"
+            "Hard rules:\n"
+            "- Background image must contain NO readable text.\n"
+            "- No logos, no trademarks, no watermark, no screenshots.\n"
+            "- Prefer abstract editorial visuals over people.\n"
+            "- Keep it modern, high contrast, and thumbnail-friendly.\n"
+            "- hook_candidates must be 2-5 short uppercase hooks, max 3 words each.\n"
+            "- style_tags must be 3-6 tokens.\n"
+        )
+        user_payload = {
+            "tags": clean_tags[:4],
+            "kind": clean_kind,
+            "seed": int(seed),
+            "context": clean_context,
+        }
+        try:
+            data = self.generate_json(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                purpose="news_prompt_plan",
+            )
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        prompt = re.sub(r"\s+", " ", str(data.get("background_prompt", "") or "")).strip()
+        if not prompt:
+            prompt = (
+                f"tech news editorial background for {', '.join(clean_tags[:2]) or 'technology'}, "
+                "abstract modern geometry, high contrast, no text, no logos, no watermark, no screenshot"
+            )
+        hooks: list[str] = []
+        for item in (data.get("hook_candidates", []) if isinstance(data.get("hook_candidates", []), list) else []):
+            h = re.sub(r"[^A-Za-z0-9\s]", " ", str(item or "").upper())
+            h = re.sub(r"\s+", " ", h).strip()
+            h = " ".join(h.split()[:3])
+            if h and h not in hooks:
+                hooks.append(h)
+            if len(hooks) >= 5:
+                break
+        styles: list[str] = []
+        for item in (data.get("style_tags", []) if isinstance(data.get("style_tags", []), list) else []):
+            s = re.sub(r"[^a-z0-9_-]", "", str(item or "").lower()).strip()
+            if s and s not in styles:
+                styles.append(s)
+            if len(styles) >= 6:
+                break
+        if not hooks:
+            hooks = ["TECH UPDATE", "WHAT CHANGED", "BIG SHIFT"]
+        if not styles:
+            styles = ["editorial", "abstract", "minimal"]
+        return {
+            "background_prompt": prompt[:760],
+            "hook_candidates": hooks[:5],
+            "style_tags": styles[:6],
+        }
+
     def build_troubleshooting_plan(
         self,
         *,

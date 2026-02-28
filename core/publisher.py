@@ -862,6 +862,20 @@ class Publisher:
         hosted: dict[str, str] = {}
         for image in images or []:
             path = Path(getattr(image, "path", ""))
+            existing_src = str(getattr(image, "source_url", "") or "").strip()
+            if existing_src and self._is_r2_public_url(existing_src):
+                hosted[str(path)] = existing_src
+                payload = {
+                    "event": "r2_upload_reuse",
+                    "file": str(path),
+                    "category": self._classify_library_category(path),
+                    "status": 200,
+                    "url": existing_src,
+                    "error": "",
+                }
+                self._log_upload_event(payload)
+                self._log_r2_upload_event(payload)
+                continue
             if not path.exists():
                 payload = {
                     "event": "r2_upload_fail",
