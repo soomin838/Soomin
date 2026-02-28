@@ -534,7 +534,7 @@ class GeminiBrain:
             "- NEVER use generic labels like 'Introduction to...' or 'Guide for...'.\n"
             "- Keep troubleshooting search intent explicit.\n"
             "- Apply one of these 3 formulas:\n"
-            "  1) '[Device/Feature] not working? [Number] fixes that actually work in 2026.'\n"
+            "  1) '[Device/Feature] not working after update? [Number] safe fixes in 2026.'\n"
             "  2) 'How I fixed [Problem] after update: [Number] safe steps.'\n"
             "  3) '[Error] fix guide: what to try first and what to skip.'\n"
             "- Tone: Native US English, bold, intriguing, professional, and positive.\n"
@@ -557,6 +557,61 @@ class GeminiBrain:
         variants = self._normalize_headline_variants(payload, raw, current_title)
         best = max(variants, key=lambda t: self._headline_ctr_score(t, keywords))
         return best, variants
+
+    def generate_title_variants(
+        self,
+        *,
+        summary_payload: dict,
+        current_title: str,
+        recent_titles: list[str],
+    ) -> list[str]:
+        payload = dict(summary_payload or {})
+        short_summary = re.sub(r"\s+", " ", str(payload.get("short_summary", "") or "")).strip()[:420]
+        primary_issue = re.sub(r"\s+", " ", str(payload.get("primary_issue_phrase", "") or "")).strip()[:140]
+        device = re.sub(r"\s+", " ", str(payload.get("device_family", "") or "")).strip().lower()
+        feature = re.sub(r"\s+", " ", str(payload.get("feature", "") or "")).strip().lower()
+        must_terms = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (payload.get("must_include_terms", []) if isinstance(payload.get("must_include_terms", []), list) else [])
+            if str(x or "").strip()
+        ][:6]
+        prompt = (
+            "Generate exactly 10 unique troubleshooting blog title candidates.\n"
+            "Output must be US English only.\n"
+            "Return strict JSON only: {\"titles\": [\"...10 items...\"]}\n"
+            "Hard rules:\n"
+            "- Every title must include clear fix intent token: not working OR fix OR error OR after update.\n"
+            "- Include device and feature when provided.\n"
+            "- Prefer 45 to 90 characters.\n"
+            "- Avoid boilerplate phrases.\n"
+            "- Ban exact phrases: 'fixes that actually work', 'ultimate guide', 'device not working'.\n"
+            "- Avoid repeating templates from recent titles.\n"
+            f"Summary: {short_summary}\n"
+            f"Primary issue phrase: {primary_issue}\n"
+            f"Device family: {device}\n"
+            f"Feature: {feature}\n"
+            f"Must include terms: {must_terms}\n"
+            f"Current title: {current_title}\n"
+            f"Recent titles to avoid: {recent_titles[:60]}"
+        )
+        raw = self._generate_text_forced_model(
+            prompt=prompt,
+            model=(self.settings.model or "gemini-2.0-flash"),
+            system_instruction=(
+                "You produce high-CTR, ad-safe US-English troubleshooting headlines. "
+                "Never output Korean. Output JSON only."
+            ),
+        )
+        payload_out = self._extract_json(raw)
+        variants = self._normalize_title_variants_payload(
+            payload=payload_out,
+            raw_text=raw,
+            fallback_title=current_title,
+            device=device,
+            feature=feature,
+            must_terms=must_terms,
+        )
+        return variants[:10]
 
     def _normalize_headline_variants(self, payload: dict, raw_text: str, fallback_title: str) -> list[str]:
         raw = payload.get("variants", [])
@@ -594,6 +649,86 @@ class GeminiBrain:
                 out.append(fb)
 
         return out[:5] if len(out) >= 5 else (out + [fallback_title.strip()])[:5]
+
+    def _normalize_title_variants_payload(
+        self,
+        *,
+        payload: dict,
+        raw_text: str,
+        fallback_title: str,
+        device: str,
+        feature: str,
+        must_terms: list[str],
+    ) -> list[str]:
+        raw_titles = payload.get("titles", [])
+        if not isinstance(raw_titles, list):
+            raw_titles = []
+        if not raw_titles:
+            raw_titles = [m.strip() for m in re.findall(r"\"([^\"]{20,140})\"", raw_text or "")[:20]]
+        out: list[str] = []
+        seen: set[str] = set()
+        banned = ("fixes that actually work", "ultimate guide", "device not working")
+        for item in raw_titles:
+            title = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", str(item or ""))
+            title = re.sub(r"\s+", " ", title).strip(" -:\"'")
+            if not title:
+                continue
+            low = title.lower()
+            if any(b in low for b in banned):
+                continue
+            if not any(tok in low for tok in ("not working", "fix", "error", "after update")):
+                continue
+            if device and device not in low:
+                if device == "windows":
+                    title = f"Windows: {title}"
+                elif device == "mac":
+                    title = f"Mac: {title}"
+                elif device == "iphone":
+                    title = f"iPhone: {title}"
+                elif device == "galaxy":
+                    title = f"Galaxy: {title}"
+                low = title.lower()
+            if feature and feature not in low:
+                title = f"{title} ({feature})"
+                low = title.lower()
+            for term in must_terms[:2]:
+                t = re.sub(r"\s+", " ", str(term or "")).strip().lower()
+                if not t:
+                    continue
+                if t not in low:
+                    title = f"{title} - {term}"
+                    low = title.lower()
+                    break
+            if len(title) < 45:
+                title = f"{title} fix steps"
+            title = title[:95].rstrip(" -:")
+            key = title.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(title)
+            if len(out) >= 10:
+                break
+        fallback = re.sub(r"\s+", " ", str(fallback_title or "")).strip()
+        base = fallback or "Windows update issue fix: safe steps to try first"
+        for phrase in banned:
+            base = re.sub(re.escape(phrase), "", base, flags=re.IGNORECASE)
+        base = re.sub(r"\s+", " ", base).strip(" -:")
+        if not base:
+            base = "Windows update issue fix: safe steps to try first"
+        while len(out) < 10:
+            seed_idx = len(out) + 1
+            candidate = f"{base} ({seed_idx})"
+            candidate = re.sub(r"\s+", " ", candidate).strip()[:95]
+            key = candidate.lower()
+            if key in seen:
+                candidate = f"{base} - error fix {seed_idx}"[:95]
+                key = candidate.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(candidate)
+        return out[:10]
 
     def _headline_ctr_score(self, title: str, keywords: list[str] | None) -> float:
         t = (title or "").strip()

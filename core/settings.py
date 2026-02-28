@@ -298,7 +298,7 @@ class KeywordPoolSettings:
     daily_target: int = 100
     refill_threshold: int = 20
     active_pool_max: int = 250
-    pick_per_run: int = 5
+    pick_per_run: int = 1
     retry_per_run_when_under_target: int = 0
 
 

@@ -78,6 +78,17 @@ class KeywordAssetStore:
             )
 
     def available_count(self, device_type: str, avoid_reuse_days: int) -> int:
+        if int(avoid_reuse_days or 0) <= 0:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM keywords
+                    WHERE lower(device_type)=lower(?)
+                    """,
+                    (str(device_type or ""),),
+                ).fetchone()
+            return int(row[0]) if row else 0
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(avoid_reuse_days)))).isoformat()
         with self._connect() as conn:
             row = conn.execute(
@@ -160,6 +171,26 @@ class KeywordAssetStore:
         mark_used: bool = True,
     ) -> list[str]:
         cap = max(1, int(limit))
+        if int(avoid_reuse_days or 0) <= 0:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT keyword
+                    FROM keywords
+                    WHERE lower(device_type)=lower(?)
+                    ORDER BY priority_score DESC, difficulty_score ASC, created_at DESC
+                    LIMIT ?
+                    """,
+                    (str(device_type or ""), cap),
+                ).fetchall()
+                out = [str((r[0] if r else "") or "").strip() for r in rows if str((r[0] if r else "") or "").strip()]
+                if out and mark_used:
+                    now = _utc_now_iso()
+                    conn.executemany(
+                        "UPDATE keywords SET used_at=? WHERE keyword=?",
+                        [(now, kw) for kw in out],
+                    )
+            return out
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(avoid_reuse_days)))).isoformat()
         with self._connect() as conn:
             rows = conn.execute(
@@ -201,6 +232,17 @@ class KeywordAssetStore:
         with self._connect() as conn:
             conn.executemany(
                 "UPDATE keywords SET used_at=NULL WHERE lower(keyword)=lower(?)",
+                [(kw,) for kw in rows],
+            )
+            return int(conn.total_changes or 0)
+
+    def delete_keywords(self, keywords: Iterable[str]) -> int:
+        rows = [str(x or "").strip().lower() for x in (keywords or []) if str(x or "").strip()]
+        if not rows:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                "DELETE FROM keywords WHERE lower(keyword)=lower(?)",
                 [(kw,) for kw in rows],
             )
             return int(conn.total_changes or 0)

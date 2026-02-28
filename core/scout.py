@@ -160,13 +160,27 @@ class SourceScout:
         "galaxy",
         "samsung",
         "android",
+    ]
+    _FEATURE_TOKENS = [
         "wifi",
+        "wi-fi",
         "bluetooth",
+        "usb",
+        "printer",
         "microphone",
-        "speaker",
+        "mic",
+        "camera",
+        "keyboard",
+        "mouse",
+        "driver",
+        "vpn",
+        "ethernet",
         "audio",
+        "sound",
+        "wifi",
         "battery",
         "charging",
+        "speaker",
     ]
 
     def __init__(
@@ -316,7 +330,7 @@ class SourceScout:
         entities = self.get_trending_entities(within_hours=24, limit=12)
         out: list[TopicCandidate] = []
         title_patterns = [
-            "{entity} issue today: 3 troubleshooting fixes that actually work",
+            "{entity} issue today: 3 troubleshooting fixes to try first",
             "How to fix common {entity} setup errors in 2026",
             "{entity} problems this week: practical fixes for normal users",
             "I tested 3 ways to solve recent {entity} app/device issues",
@@ -459,23 +473,26 @@ class SourceScout:
         for c in candidates or []:
             if not self._passes_troubleshoot_mode(c):
                 continue
-            normalized = self._normalize_troubleshoot_title(
-                c.title,
-                c.main_entity,
-                body=str(getattr(c, "body", "") or ""),
-            )
-            if not normalized:
+            merged_text = f"{getattr(c, 'title', '')} {getattr(c, 'body', '')}"
+            feature = self._extract_feature_token(merged_text)
+            device = self._infer_device_token(merged_text)
+            if not feature or not device:
                 continue
-            c.title = normalized
+            cleaned_title = re.sub(r"\s+", " ", str(getattr(c, "title", "") or "")).strip(" -:")
+            cleaned_title = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", cleaned_title)
+            cleaned_title = re.sub(r"\s+", " ", cleaned_title).strip()
+            if not cleaned_title:
+                continue
+            c.title = cleaned_title
             out.append(c)
         if out:
             return out
         # deterministic fallback pool to avoid empty candidate set
         fallback_titles = [
-            "Windows 11 audio not working? 5 fixes that actually work",
-            "Mac microphone not working after update: step-by-step fix",
-            "iPhone Bluetooth not working? 4 quick fixes",
-            "Galaxy Wi-Fi not working after update: complete fix guide",
+            "Windows 11 Wi-Fi keeps disconnecting after update: 5 safe fixes",
+            "Mac Bluetooth pairing error after macOS update: step-by-step fix",
+            "iPhone USB tethering not working on iOS: 5 checks to try first",
+            "Galaxy printer connection error after update: practical fix flow",
         ]
         return [
             TopicCandidate(
@@ -495,9 +512,49 @@ class SourceScout:
         banned = [str(x or "").strip().lower() for x in (getattr(self.content_mode, "banned_topic_keywords", []) or []) if str(x or "").strip()]
         if any(token in text for token in banned):
             return False
-        has_device = any(token in text for token in self._DEVICE_TOKENS)
+        has_device = bool(self._infer_device_token(text))
+        has_feature = bool(self._extract_feature_token(text))
         has_fix_intent = any(token in text for token in self._FIX_INTENT_TERMS)
-        return bool(has_device and has_fix_intent)
+        return bool(has_device and has_feature and has_fix_intent)
+
+    def _extract_feature_token(self, text: str) -> str:
+        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        priority = [
+            "wifi",
+            "wi-fi",
+            "bluetooth",
+            "usb",
+            "printer",
+            "microphone",
+            "mic",
+            "camera",
+            "keyboard",
+            "mouse",
+            "driver",
+            "vpn",
+            "ethernet",
+            "audio",
+            "sound",
+            "battery",
+            "charging",
+            "speaker",
+        ]
+        for token in priority:
+            if token in lower:
+                return token
+        return ""
+
+    def _infer_device_token(self, text: str) -> str:
+        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if any(tok in lower for tok in ("windows 11", "windows 10", "windows")):
+            return "windows"
+        if any(tok in lower for tok in ("macos", "macbook", "mac")):
+            return "mac"
+        if any(tok in lower for tok in ("iphone", "ios")):
+            return "iphone"
+        if any(tok in lower for tok in ("galaxy", "samsung", "android")):
+            return "galaxy"
+        return ""
 
     def _extract_device_hint(self, text: str, entity: str = "") -> str:
         lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
@@ -562,17 +619,10 @@ class SourceScout:
         clean = re.sub(r"\s+", " ", str(title or "")).strip()
         if not clean:
             return ""
-        lower = clean.lower()
-        feature_hint = self._extract_feature_hint(f"{title}\n{body}")
-        device_hint = self._extract_device_hint(f"{title}\n{body}", entity=entity)
-        has_fix_intent = any(token in lower for token in ("not working", "fix", "error", "after update"))
-
-        # Strict mode: drop vague generic titles when device/feature cannot be inferred.
-        if not device_hint or not feature_hint:
-            return ""
-        if has_fix_intent and (feature_hint.lower() in lower):
-            return clean
-        return f"{device_hint} {feature_hint} not working? 5 fixes that actually work"
+        # Legacy helper retained for compatibility: never rewrite to generic templates.
+        clean = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", clean)
+        clean = re.sub(r"\s+", " ", clean).strip(" -:")
+        return clean
 
     def _stackexchange_site_specs(self) -> list[dict[str, str]]:
         specs: list[dict[str, str]] = []

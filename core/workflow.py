@@ -37,7 +37,6 @@ from .settings import AppSettings
 from .preflight import validate_secrets
 from .text_segmenter import section_bundle_for_llm
 from .topic_growth import TopicGrower
-from .title_variations import TitleContext, render_title, title_fingerprint
 from .visual import ImageAsset, VisualPipeline
 
 
@@ -126,7 +125,7 @@ class AgentWorkflow:
         self._blogger_recent_14d_path = self.root / "storage" / "logs" / "blogger_recent_14d.json"
         self._cluster_rotation_state_path = self.root / "storage" / "state" / "cluster_rotation_state.json"
         self._feature_rotation_state_path = self.root / "storage" / "state" / "feature_rotation_state.json"
-        self._title_fingerprint_path = self.root / "storage" / "logs" / "title_fingerprints.json"
+        self._title_fingerprint_path = self.root / "storage" / "logs" / "title_fingerprints.jsonl"
         self.keyword_assets = KeywordAssetStore(
             db_path=self.root / str(getattr(self.settings.keywords, "db_path", "storage/keywords.sqlite")),
         )
@@ -393,7 +392,7 @@ class AgentWorkflow:
     def _log_ollama_event(self, event: str, payload: dict[str, Any] | None = None) -> None:
         payload = dict(payload or {})
         purpose = str(payload.get("purpose", "") or "").strip().lower()
-        if purpose not in {"image_plan", "qa_review", "plan_json"}:
+        if purpose not in {"image_plan", "qa_review", "plan_json", "title_summary"}:
             return
         payload["purpose"] = purpose
         payload.setdefault("endpoint", "/api/generate")
@@ -485,7 +484,7 @@ class AgentWorkflow:
             if str(x or "").strip()
         ]
         keyword = long_tails[0] if long_tails else re.sub(r"\s+", " ", str(getattr(selected, "title", "") or "")).strip()
-        keyword = keyword or "device not working fix"
+        keyword = keyword or "windows update error fix"
         device = self._infer_device_type(f"{keyword}\n{selected.title}")
         cluster = self._infer_cluster_id_from_keyword(keyword)
         fix_steps = [
@@ -634,7 +633,7 @@ class AgentWorkflow:
             if str(x or "").strip()
         ]
         keyword = long_tails[0] if long_tails else re.sub(r"\s+", " ", str(getattr(selected, "title", "") or "")).strip()
-        keyword = keyword or "device not working fix"
+        keyword = keyword or "windows update error fix"
         device_type = self._infer_device_type(f"{keyword}\n{selected.title}")
         cluster_id = self._infer_cluster_id_from_keyword(keyword)
         context = self._build_troubleshooting_context(selected)
@@ -682,6 +681,213 @@ class AgentWorkflow:
                 },
             )
             return fallback_plan
+
+    def _fallback_title_summary_payload(
+        self,
+        *,
+        current_title: str,
+        final_html: str,
+        troubleshooting_plan: dict[str, Any],
+        selected: TopicCandidate,
+    ) -> dict[str, Any]:
+        issue_phrase = re.sub(
+            r"\s+",
+            " ",
+            str((troubleshooting_plan or {}).get("primary_keyword", "") or current_title or selected.title or "").strip(),
+        )[:140]
+        device_family = self._infer_device_type(f"{issue_phrase}\n{current_title}\n{selected.title}")
+        feature = self._infer_feature_token(f"{issue_phrase}\n{current_title}\n{selected.title}\n{final_html[:800]}")
+        summary = self._normalize_excerpt(final_html)[:380]
+        if not summary:
+            summary = f"This guide explains {issue_phrase} and gives step-by-step software fixes with expected results and fallback actions."
+        must_terms = [
+            issue_phrase,
+            device_family,
+            feature,
+            "fix",
+            "after update",
+        ]
+        dedup: list[str] = []
+        seen: set[str] = set()
+        for term in must_terms:
+            txt = re.sub(r"\s+", " ", str(term or "")).strip()
+            if not txt:
+                continue
+            key = txt.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(txt[:60])
+            if len(dedup) >= 6:
+                break
+        return {
+            "short_summary": summary,
+            "primary_issue_phrase": issue_phrase or current_title or selected.title,
+            "device_family": device_family or "windows",
+            "feature": feature or "network",
+            "must_include_terms": dedup[:6],
+            "source": "fallback",
+        }
+
+    def _build_title_summary_payload_with_local_llm(
+        self,
+        *,
+        current_title: str,
+        final_html: str,
+        troubleshooting_plan: dict[str, Any],
+        selected: TopicCandidate,
+    ) -> dict[str, Any]:
+        fallback = self._fallback_title_summary_payload(
+            current_title=current_title,
+            final_html=final_html,
+            troubleshooting_plan=troubleshooting_plan,
+            selected=selected,
+        )
+        ready, reason = self._prepare_local_llm()
+        if not ready:
+            self._log_ollama_event(
+                "ollama_title_summary_skipped_unavailable",
+                {"purpose": "title_summary", "success": False, "fallback_used": True, "reason": reason},
+            )
+            return fallback
+        started = time.perf_counter()
+        prompt_len_est = len(str(current_title or "")) + len(str(final_html or "")) + len(json.dumps(troubleshooting_plan or {}, ensure_ascii=False))
+        try:
+            payload = self.ollama_client.summarize_for_title(
+                title=current_title or selected.title,
+                html=final_html,
+                plan=troubleshooting_plan,
+            )
+            self._local_llm_used_last_run = True
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            normalized = self._fallback_title_summary_payload(
+                current_title=str(payload.get("primary_issue_phrase", "") or current_title),
+                final_html=final_html,
+                troubleshooting_plan={
+                    **dict(troubleshooting_plan or {}),
+                    "primary_keyword": str(payload.get("primary_issue_phrase", "") or (troubleshooting_plan or {}).get("primary_keyword", "")),
+                    "device_family": str(payload.get("device_family", "") or (troubleshooting_plan or {}).get("device_family", "")),
+                },
+                selected=selected,
+            )
+            normalized.update(
+                {
+                    "short_summary": str(payload.get("short_summary", "") or normalized.get("short_summary", ""))[:400],
+                    "primary_issue_phrase": str(payload.get("primary_issue_phrase", "") or normalized.get("primary_issue_phrase", ""))[:140],
+                    "device_family": str(payload.get("device_family", "") or normalized.get("device_family", "windows")).lower(),
+                    "feature": str(payload.get("feature", "") or normalized.get("feature", "network")).lower(),
+                    "must_include_terms": list(payload.get("must_include_terms", []) or normalized.get("must_include_terms", []))[:6],
+                    "source": "ollama",
+                }
+            )
+            self._log_ollama_event(
+                "ollama_title_summary_ok",
+                {
+                    "purpose": "title_summary",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": True,
+                    "fallback_used": False,
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": int(len(json.dumps(normalized, ensure_ascii=False))),
+                },
+            )
+            return normalized
+        except Exception as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            self._log_ollama_event(
+                "ollama_title_summary_failed",
+                {
+                    "purpose": "title_summary",
+                    "endpoint": "/api/generate",
+                    "latency_ms": latency_ms,
+                    "success": False,
+                    "fallback_used": True,
+                    "reason": reason,
+                    "error": str(exc),
+                    "prompt_len": int(prompt_len_est),
+                    "response_len": 0,
+                },
+            )
+            return fallback
+
+    def _score_title_candidate(
+        self,
+        title: str,
+        *,
+        summary_payload: dict[str, Any],
+        recent_fps: set[str],
+        recent_title_norm: set[str],
+    ) -> int:
+        raw = re.sub(r"\s+", " ", str(title or "")).strip()
+        if not raw:
+            return -10_000
+        normalized = self._normalize_title_for_fingerprint(raw)
+        if not normalized:
+            return -10_000
+        fp = self._title_fp(raw)
+        if fp and fp in recent_fps:
+            return -9_000
+        if normalized in recent_title_norm:
+            return -9_000
+        score = 0
+        lower = raw.lower()
+        banned = ("fixes that actually work", "ultimate guide", "device not working")
+        if any(b in lower for b in banned):
+            return -8_000
+        if not any(tok in lower for tok in ("not working", "fix", "error", "after update")):
+            score -= 120
+        device = str(summary_payload.get("device_family", "") or "").strip().lower()
+        if device and device in lower:
+            score += 40
+        feature = str(summary_payload.get("feature", "") or "").strip().lower()
+        if feature and feature in lower:
+            score += 38
+        if any(tok in lower for tok in ("after update", "error", "not detected", "keeps disconnecting", "not working")):
+            score += 28
+        length = len(raw)
+        if 45 <= length <= 90:
+            score += 24
+        elif 36 <= length <= 105:
+            score += 8
+        else:
+            score -= 16
+        must_terms = [str(x or "").strip().lower() for x in (summary_payload.get("must_include_terms", []) or []) if str(x or "").strip()]
+        for term in must_terms[:3]:
+            if term in lower:
+                score += 6
+        if "?" in raw:
+            score += 3
+        return score
+
+    def _choose_best_unique_title(
+        self,
+        *,
+        candidates: list[str],
+        summary_payload: dict[str, Any],
+        recent_titles: list[str],
+    ) -> tuple[str, str]:
+        recent_fps = self._load_recent_title_fingerprints(limit=50)
+        recent_title_norm = {
+            self._normalize_title_for_fingerprint(t)
+            for t in (recent_titles or [])
+            if str(t or "").strip()
+        }
+        best_title = ""
+        best_score = -10_000
+        for candidate in candidates or []:
+            score = self._score_title_candidate(
+                candidate,
+                summary_payload=summary_payload,
+                recent_fps=recent_fps,
+                recent_title_norm=recent_title_norm,
+            )
+            if score > best_score:
+                best_score = score
+                best_title = re.sub(r"\s+", " ", str(candidate or "")).strip()
+        if not best_title or best_score < -1000:
+            return "", "all_candidates_rejected"
+        return best_title, ""
 
     def _generation_mode(self) -> str:
         mode = str(getattr(getattr(self.settings, "generation", None), "mode", "hybrid") or "hybrid").strip().lower()
@@ -732,7 +938,7 @@ class AgentWorkflow:
         self._local_llm_calls_in_post += 1
         self._local_llm_used_last_run = True
         title_hint = re.sub(r"\s+", " ", str((plan or {}).get("primary_keyword", "") or selected.title or "")).strip()
-        title_hint = title_hint or "Device issue not working fix"
+        title_hint = title_hint or "Windows update error fix"
         return DraftPost(
             title=title_hint,
             alt_titles=[],
@@ -810,7 +1016,7 @@ class AgentWorkflow:
 
     def _scaled_content_risk(self, title: str, html: str, plan_fp: str = "") -> tuple[bool, list[str]]:
         reasons: list[str] = []
-        title_fp = title_fingerprint(title)
+        title_fp = self._title_fp(title)
         if title_fp and title_fp in self._load_recent_title_fingerprints():
             reasons.append("title_fp_duplicate")
         if plan_fp and self._is_recent_fix_steps_duplicate(plan_fp):
@@ -1478,7 +1684,7 @@ class AgentWorkflow:
         if not global_keywords:
             # Final non-API fallback from candidate text.
             local_pool = self._build_local_keyword_candidates(candidates, limit=24)
-            global_keywords = local_pool[: max(1, int(self.settings.keyword_pool.pick_per_run))]
+            global_keywords = local_pool[:1]
             if global_keywords:
                 keyword_fallback_note = self._append_note(keyword_fallback_note, "keyword_local_fallback")
         if keyword_fallback_note:
@@ -1874,47 +2080,9 @@ class AgentWorkflow:
             self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
 
-        # Headline specialist step: dedicated CTR rewrite via Gemini 2.0 Pro.
-        if (not free_local_mode) and self._gemini_budget_remaining() > 0:
-            self._progress("headline", "제목 CTR 최적화", 50)
-            try:
-                optimized_title, variants = self.brain.optimize_headline_ctr(
-                    summary=(draft.summary or self._normalize_excerpt(draft.html)[:1200]),
-                    trending_keywords=global_keywords,
-                    current_title=draft.title,
-                )
-                if self.brain.call_count:
-                    self.logs.increment_today_gemini_count(self.brain.call_count)
-                    self.brain.reset_run_counter()
-                if optimized_title.strip():
-                    draft.title = optimized_title.strip()
-                merged = [draft.title, *variants, *draft.alt_titles]
-                dedup: list[str] = []
-                seen: set[str] = set()
-                for title in merged:
-                    t = str(title or "").strip()
-                    if not t:
-                        continue
-                    key = t.lower()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    dedup.append(t)
-                draft.alt_titles = dedup[:5]
-                headline_note = f"headline_opt=ok, variants={len(draft.alt_titles)}"
-            except Exception as exc:
-                if self.brain.call_count:
-                    self.logs.increment_today_gemini_count(self.brain.call_count)
-                    self.brain.reset_run_counter()
-                headline_note = f"headline_opt=failed:{exc}"
-        elif not free_local_mode:
-            headline_note = "headline_opt=skipped_budget"
-        draft.title = self._enforce_seo_title(
-            title=draft.title,
-            candidate=selected,
-            global_keywords=global_keywords,
-            preferred_keyword=str((troubleshooting_plan or {}).get("primary_keyword", "") or ""),
-        )
+        headline_note = "headline_opt=deferred_to_post_body"
+        draft.title = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", str(draft.title or ""))
+        draft.title = re.sub(r"\s+", " ", draft.title).strip()
 
         similarity = self._similarity_ratio(draft.html, selected.body)
         if similarity >= 0.55:
@@ -2341,12 +2509,36 @@ class AgentWorkflow:
             self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
         if final_title:
-            draft.title = self._enforce_seo_title(
+            enforced_title = self._enforce_seo_title(
                 title=final_title,
                 candidate=selected,
                 global_keywords=global_keywords,
                 preferred_keyword=str((troubleshooting_plan or {}).get("primary_keyword", "") or ""),
             )
+            if self._is_banned_title_template(enforced_title):
+                summary_payload = self._fallback_title_summary_payload(
+                    current_title=final_title,
+                    final_html=final_html,
+                    troubleshooting_plan=troubleshooting_plan,
+                    selected=selected,
+                )
+                backup_candidates = [final_title]
+                backup_candidates.extend(
+                    self._build_rule_title_candidates(
+                        keyword=str((troubleshooting_plan or {}).get("primary_keyword", "") or final_title),
+                        device=self._infer_device_type(final_title),
+                        cluster=self._infer_cluster_id_from_keyword(final_title),
+                        attempt=2,
+                    )
+                )
+                fallback_title, _ = self._choose_best_unique_title(
+                    candidates=backup_candidates,
+                    summary_payload=summary_payload,
+                    recent_titles=self._get_recent_blogger_titles(limit=240, refresh_api=False),
+                )
+                if fallback_title and (not self._is_banned_title_template(fallback_title)):
+                    enforced_title = fallback_title
+            draft.title = enforced_title
 
         working_draft_id, draft_note = self._sync_stage_draft_checkpoint(
             current_draft_post_id=working_draft_id,
@@ -2830,11 +3022,11 @@ class AgentWorkflow:
             self.logs.add_excluded_post(str(published.post_id).strip(), reason="manual_trigger")
         if self._pending_keyword_claims:
             try:
-                used_count = self.keyword_assets.mark_keywords_used(self._pending_keyword_claims)
-                if used_count > 0:
+                deleted_count = self.keyword_assets.delete_keywords(self._pending_keyword_claims)
+                if deleted_count > 0:
                     generation_degraded_note = self._append_note(
                         generation_degraded_note,
-                        f"kw_mark_used={used_count}",
+                        f"kw_deleted={deleted_count}",
                     )
             except Exception:
                 pass
@@ -4279,131 +4471,152 @@ class AgentWorkflow:
     ) -> str:
         raw = re.sub(r"\s+", " ", str(title or "")).strip()
         base_candidate_title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
+        pref = re.sub(r"\s+", " ", str(preferred_keyword or "")).strip()
         if not raw:
-            raw = base_candidate_title or "Windows issue not working fix guide"
-
+            raw = pref or base_candidate_title or "Windows update error fix"
+        raw = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", raw)
+        banned_phrases = [
+            "fixes that actually work",
+            "ultimate guide",
+            "device not working",
+        ]
+        for phrase in banned_phrases:
+            raw = re.sub(re.escape(phrase), "", raw, flags=re.IGNORECASE)
         mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
-        banned = [
+        banned_topics = [
             str(x or "").strip().lower()
             for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
             if str(x or "").strip()
         ]
-        for token in banned:
+        for token in banned_topics:
             raw = re.sub(re.escape(token), "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\s+", " ", raw).strip(" -:")
-
-        device_hint = self._infer_device_type(f"{raw}\n{base_candidate_title}") or "windows"
-        req_tokens = [
-            str(x or "").strip().lower()
-            for x in (getattr(self.settings.content_mode, "required_title_tokens_any", []) or [])
-            if str(x or "").strip()
-        ] or ["not working", "fix", "error", "after update"]
-        lower = raw.lower()
-        if mode == "tech_troubleshoot_only" and not any(tok in lower for tok in req_tokens):
-            if "after update" in lower or "update" in lower:
-                raw = f"{device_hint.title()} not working after update"
-            elif re.search(r"\berror\b", lower):
-                raw = f"{device_hint.title()} error fix"
-            else:
-                raw = f"{device_hint.title()} not working fix"
-            lower = raw.lower()
-        cluster_id = self._infer_cluster_id_from_keyword(
-            " ".join(global_keywords[:2] if global_keywords else []) or raw
-        )
-        ctx = TitleContext(
-            keyword=(preferred_keyword or raw),
-            device=device_hint,
-            cluster=cluster_id,
-            year="2026",
-        )
-        recent_fp = self._load_recent_title_fingerprints()
-        for attempt in range(0, 4):
-            candidate_title = render_title(ctx, attempt=attempt)
-            if preferred_keyword and preferred_keyword.lower() not in candidate_title.lower():
-                candidate_title = f"{preferred_keyword}: {candidate_title}".strip(" :")
-            candidate_title = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", candidate_title)
-            candidate_title = re.sub(r"\s+", " ", candidate_title).strip()
-            fp = title_fingerprint(candidate_title)
-            if fp not in recent_fp:
-                raw = candidate_title
-                break
-        pref = re.sub(r"\s+", " ", str(preferred_keyword or "")).strip()
         if pref and pref.lower() not in raw.lower():
-            if len(pref) <= 75:
-                raw = f"{pref}: {raw}".strip(" :")
+            raw = f"{pref}: {raw}".strip(" :")
         req_tokens = [
             str(x or "").strip().lower()
             for x in (getattr(self.settings.content_mode, "required_title_tokens_any", []) or [])
             if str(x or "").strip()
         ] or ["not working", "fix", "error", "after update"]
-        if not any(tok in raw.lower() for tok in req_tokens):
+        if mode == "tech_troubleshoot_only" and not any(tok in raw.lower() for tok in req_tokens):
             raw = f"{raw} fix".strip()
-        raw = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", raw)
-        raw = re.sub(r"\s+", " ", raw).strip()
+        raw = re.sub(r"\s+", " ", raw).strip(" -:")
+        if len(raw) < 30:
+            device_hint = self._infer_device_type(f"{raw}\n{base_candidate_title}") or "windows"
+            raw = f"{device_hint.title()} update error fix: safe steps to try first"
         return raw[:120]
 
-    def _load_recent_title_fingerprints(self) -> set[str]:
-        fps: set[str] = set()
-        try:
-            rows = self.logs.get_recent_topic_history(days=30, limit=300)
-            for row in rows:
-                t = str((row or {}).get("title", "") or "").strip()
-                if t:
-                    fps.add(title_fingerprint(t))
-        except Exception:
-            pass
+    def _normalize_title_for_fingerprint(self, title: str) -> str:
+        norm = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", str(title or "").lower())
+        norm = re.sub(r"\b(20[0-9]{2})\b", " ", norm)
+        norm = re.sub(r"[^a-z0-9\s]", " ", norm)
+        norm = re.sub(r"\s+", " ", norm).strip()
+        return norm
+
+    def _title_fp(self, title: str) -> str:
+        norm = self._normalize_title_for_fingerprint(title)
+        if not norm:
+            return ""
+        return hashlib.sha1(norm.encode("utf-8")).hexdigest()
+
+    def _read_title_fingerprint_rows(self, limit: int = 200) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
         try:
             if self._title_fingerprint_path.exists():
-                payload = json.loads(self._title_fingerprint_path.read_text(encoding="utf-8"))
-                if isinstance(payload, list):
-                    for row in payload:
-                        if isinstance(row, dict):
-                            fp = str(row.get("fp", "") or "").strip().lower()
-                            if fp:
-                                fps.add(fp)
+                for line in self._title_fingerprint_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        rows.append(payload)
+        except Exception:
+            rows = []
+        if not rows:
+            legacy_path = self._title_fingerprint_path.with_suffix(".json")
+            try:
+                if legacy_path.exists():
+                    payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+                    if isinstance(payload, list):
+                        for item in payload:
+                            if isinstance(item, dict):
+                                rows.append(item)
+            except Exception:
+                pass
+        return rows[-max(1, int(limit)) :]
+
+    def _load_recent_title_fingerprints(self, limit: int = 200) -> set[str]:
+        fps: set[str] = set()
+        for row in self._read_title_fingerprint_rows(limit=limit):
+            fp = str(row.get("fp", "") or "").strip().lower()
+            if fp:
+                fps.add(fp)
+        try:
+            history = self.logs.get_recent_topic_history(days=30, limit=max(1, int(limit)))
+            for row in history:
+                t = str((row or {}).get("title", "") or "").strip()
+                fp = self._title_fp(t)
+                if fp:
+                    fps.add(fp)
         except Exception:
             pass
         return fps
 
     def _remember_title_fingerprint(self, title: str) -> None:
-        fp = title_fingerprint(title)
+        fp = self._title_fp(title)
         if not fp:
             return
-        rows: list[dict[str, str]] = []
-        try:
-            if self._title_fingerprint_path.exists():
-                payload = json.loads(self._title_fingerprint_path.read_text(encoding="utf-8"))
-                if isinstance(payload, list):
-                    rows = [x for x in payload if isinstance(x, dict)]
-        except Exception:
-            rows = []
-        rows.append(
-            {
-                "ts_utc": datetime.now(timezone.utc).isoformat(),
-                "fp": fp,
-                "title": str(title or "")[:160],
-            }
-        )
-        rows = rows[-240:]
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "fp": fp,
+            "title": str(title or "")[:180],
+            "normalized": self._normalize_title_for_fingerprint(title),
+        }
         try:
             self._title_fingerprint_path.parent.mkdir(parents=True, exist_ok=True)
-            self._title_fingerprint_path.write_text(
-                json.dumps(rows, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            with self._title_fingerprint_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+        try:
+            rows = self._read_title_fingerprint_rows(limit=240)
+            with self._title_fingerprint_path.open("w", encoding="utf-8") as fh:
+                for item in rows:
+                    fh.write(json.dumps(item, ensure_ascii=False) + "\n")
         except Exception:
             return
 
     def _is_recent_title_duplicate(self, title: str) -> bool:
-        norm = re.sub(r"\s+", " ", str(title or "")).strip().lower()
+        norm = self._normalize_title_for_fingerprint(title)
         if not norm:
             return True
-        fp = title_fingerprint(norm)
-        if fp and fp in self._load_recent_title_fingerprints():
+        fp = self._title_fp(title)
+        recent_fp = self._load_recent_title_fingerprints(limit=50)
+        if fp and fp in recent_fp:
             return True
-        recent_titles = self._get_recent_blogger_titles(limit=30, refresh_api=False)
-        recent_norm = {re.sub(r"\s+", " ", str(x or "")).strip().lower() for x in (recent_titles or []) if str(x or "").strip()}
+        recent_titles = self._get_recent_blogger_titles(limit=60, refresh_api=False)
+        recent_norm = {
+            self._normalize_title_for_fingerprint(str(x or ""))
+            for x in (recent_titles or [])
+            if str(x or "").strip()
+        }
         return norm in recent_norm
+
+    def _is_banned_title_template(self, title: str) -> bool:
+        lower = re.sub(r"\s+", " ", str(title or "").strip().lower())
+        if not lower:
+            return True
+        banned = (
+            "fixes that actually work",
+            "ultimate guide",
+            "device not working",
+        )
+        if any(tok in lower for tok in banned):
+            return True
+        return False
 
     def _build_rule_title_candidates(
         self,
@@ -4416,20 +4629,21 @@ class AgentWorkflow:
         kw = re.sub(r"\s+", " ", str(keyword or "")).strip()
         dev = str(device or "device").strip().lower() or "device"
         suffixes = [
-            "that actually work",
+            "for everyday users",
             "without wasting time",
-            "for beginners",
-            "before you reset everything",
+            "before full reset",
+            "after update",
             "in 2026",
         ]
         suffix = suffixes[attempt % len(suffixes)]
+        cluster_label = cluster.replace("_", " ").strip() or "software"
         seeds = [
             f"{kw}? 5 fixes {suffix}",
             f"{kw} after update? 5 safe fixes {suffix}",
             f"{kw} error fix: 5 steps {suffix}",
-            f"{dev.title()} {cluster.replace('_', ' ')} issue? 5 fixes {suffix}",
-            f"{dev.title()} not working? 5 troubleshooting fixes {suffix}",
-            f"How to fix {kw}: 5 steps {suffix}",
+            f"{dev.title()} {cluster_label} issue after update: 5 fixes",
+            f"{dev.title()} {cluster_label} error: 5 troubleshooting steps",
+            f"How to fix {kw}: 5 steps with expected results",
         ]
         out: list[str] = []
         seen: set[str] = set()
@@ -4455,60 +4669,93 @@ class AgentWorkflow:
         troubleshooting_plan: dict[str, Any],
         allow_gemini: bool,
     ) -> tuple[str, str]:
+        plan = dict(troubleshooting_plan or {})
+        summary_payload = self._build_title_summary_payload_with_local_llm(
+            current_title=current_title or selected.title,
+            final_html=final_html,
+            troubleshooting_plan=plan,
+            selected=selected,
+        )
+        recent_titles = self._get_recent_blogger_titles(limit=240, refresh_api=False)
         keyword = re.sub(
             r"\s+",
             " ",
-            str((troubleshooting_plan or {}).get("primary_keyword", "") or (global_keywords[0] if global_keywords else current_title)),
+            str(plan.get("primary_keyword", "") or (global_keywords[0] if global_keywords else current_title or selected.title)),
         ).strip()
         if not keyword:
-            keyword = re.sub(r"\s+", " ", str(current_title or selected.title or "device not working fix")).strip()
+            keyword = re.sub(r"\s+", " ", str(current_title or selected.title or "windows update error fix")).strip()
         device = self._infer_device_type(f"{keyword}\n{selected.title}\n{current_title}")
         cluster = self._infer_cluster_id_from_keyword(keyword)
-        summary = self._normalize_excerpt(final_html)[:1200]
         candidates: list[str] = []
-
         if allow_gemini and self._gemini_budget_remaining() > 0:
             try:
-                optimized_title, variants = self.brain.optimize_headline_ctr(
-                    summary=summary,
-                    trending_keywords=(global_keywords or [])[:8],
-                    current_title=current_title or selected.title,
+                generated = self.brain.generate_title_variants(
+                    summary_payload=summary_payload,
+                    current_title=(current_title or selected.title),
+                    recent_titles=recent_titles,
                 )
                 if self.brain.call_count:
                     self.logs.increment_today_gemini_count(self.brain.call_count)
                     self.brain.reset_run_counter()
-                candidates.extend([str(optimized_title or "").strip(), *[str(v or "").strip() for v in (variants or [])]])
+                candidates.extend([re.sub(r"\s+", " ", str(x or "")).strip() for x in generated if str(x or "").strip()])
             except Exception:
                 if self.brain.call_count:
                     self.logs.increment_today_gemini_count(self.brain.call_count)
                     self.brain.reset_run_counter()
-
-        candidates.append(str(current_title or "").strip())
-        for attempt in range(0, 3):
-            candidates.extend(
-                self._build_rule_title_candidates(
-                    keyword=keyword,
-                    device=device,
-                    cluster=cluster,
-                    attempt=attempt,
-                )
+        candidates.append(re.sub(r"\s+", " ", str(current_title or "").strip()))
+        candidates.extend(
+            self._build_rule_title_candidates(
+                keyword=keyword,
+                device=device,
+                cluster=cluster,
+                attempt=0,
             )
-            dedup: list[str] = []
-            seen: set[str] = set()
-            for c in candidates:
-                t = re.sub(r"\s+", " ", str(c or "")).strip()
-                if not t:
-                    continue
-                key = t.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                dedup.append(t)
-            candidates = dedup[:16]
-            for cand in candidates:
-                if not self._is_recent_title_duplicate(cand):
-                    return cand, ""
-        return "", "title_duplicate_exhausted"
+        )
+        chosen, reason = self._choose_best_unique_title(
+            candidates=candidates,
+            summary_payload=summary_payload,
+            recent_titles=recent_titles,
+        )
+        if chosen:
+            return chosen, ""
+
+        # One additional Gemini retry max.
+        if allow_gemini and self._gemini_budget_remaining() > 0:
+            try:
+                regenerated = self.brain.generate_title_variants(
+                    summary_payload=summary_payload,
+                    current_title=(current_title or selected.title),
+                    recent_titles=[*recent_titles, *candidates][:260],
+                )
+                if self.brain.call_count:
+                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                    self.brain.reset_run_counter()
+                retry_candidates = [
+                    re.sub(r"\s+", " ", str(x or "")).strip()
+                    for x in regenerated
+                    if str(x or "").strip()
+                ]
+                retry_candidates.extend(
+                    self._build_rule_title_candidates(
+                        keyword=keyword,
+                        device=device,
+                        cluster=cluster,
+                        attempt=1,
+                    )
+                )
+                chosen_retry, retry_reason = self._choose_best_unique_title(
+                    candidates=retry_candidates,
+                    summary_payload=summary_payload,
+                    recent_titles=[*recent_titles, *candidates][:260],
+                )
+                if chosen_retry:
+                    return chosen_retry, ""
+                return "", retry_reason or reason or "title_duplicate_exhausted"
+            except Exception:
+                if self.brain.call_count:
+                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                    self.brain.reset_run_counter()
+        return "", reason or "title_duplicate_exhausted"
 
     def _go_live_gate_checklist(
         self,
@@ -6396,7 +6643,7 @@ class AgentWorkflow:
         # One post is generated per run; reserve exactly one primary keyword per run.
         pick_count = 1 if per_run_pick >= 1 else 1
 
-        available = self.keyword_assets.available_count(device_type=device_type, avoid_reuse_days=avoid_days)
+        available = self.keyword_assets.available_count(device_type=device_type, avoid_reuse_days=0)
         note = self._append_note(note, f"kw_device={device_type}")
         note = self._append_note(note, f"kw_available={available}")
         note = self._append_note(note, f"topic_pool_target={target_size}")
@@ -6437,7 +6684,7 @@ class AgentWorkflow:
         picks = self.keyword_assets.pick_keywords(
             device_type=device_type,
             limit=pick_count,
-            avoid_reuse_days=avoid_days,
+            avoid_reuse_days=0,
             mark_used=False,
         )
         self._pending_keyword_claims = list(picks[:pick_count])
@@ -6478,7 +6725,7 @@ class AgentWorkflow:
         }
 
         for device in devices:
-            before = self.keyword_assets.available_count(device_type=device, avoid_reuse_days=avoid_days)
+            before = self.keyword_assets.available_count(device_type=device, avoid_reuse_days=0)
             added = 0
             rows: list[tuple[str, str, str, float, float]] = []
             if force or before < min_size:
@@ -6516,7 +6763,7 @@ class AgentWorkflow:
                         break
                 if rows:
                     added = self.keyword_assets.upsert_keywords(device_type=device, rows=rows)
-            after = self.keyword_assets.available_count(device_type=device, avoid_reuse_days=avoid_days)
+            after = self.keyword_assets.available_count(device_type=device, avoid_reuse_days=0)
             report["devices"][device] = {
                 "available_before": int(before),
                 "available_after": int(after),

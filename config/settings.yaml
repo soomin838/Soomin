@@ -226,7 +226,7 @@ keyword_pool:
   daily_target: 100
   refill_threshold: 20
   active_pool_max: 250
-  pick_per_run: 5
+  pick_per_run: 1
   retry_per_run_when_under_target: 0
 
 topic_pool:

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
@@ -112,7 +112,7 @@ class ActionabilityGate:
 
         branching_hits = len(
             re.findall(
-                r"\b(if not|if that doesn[’']t|otherwise|next try)\b",
+                r"\b(if not|if that does(?:n'|n)?t|otherwise|next try)\b",
                 lower_merged,
                 flags=re.IGNORECASE,
             )
@@ -171,3 +171,4 @@ class ActionabilityGate:
         cleaned = unescape(cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned)
         return cleaned.strip()
+

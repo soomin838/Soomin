@@ -58,14 +58,17 @@ Reinstall audio driver and reboot.
 
     images = pick_images(
         title="Windows microphone not working after update",
-        min_count=2,
+        min_count=5,
         root=ROOT,
     )
-    if len(images) < 2:
+    if len(images) < 5:
         banner = ROOT / "assets" / "fallback" / "banner.png"
         inline = ROOT / "assets" / "fallback" / "inline.png"
         images = [
             ImageAsset(path=banner, alt="Troubleshooting flow diagram for a Windows audio fix.", source_kind="library", source_url="local://fallback"),
+            ImageAsset(path=inline, alt="Checklist diagram for microphone troubleshooting steps.", source_kind="library", source_url="local://fallback"),
+            ImageAsset(path=inline, alt="Checklist diagram for microphone troubleshooting steps.", source_kind="library", source_url="local://fallback"),
+            ImageAsset(path=inline, alt="Checklist diagram for microphone troubleshooting steps.", source_kind="library", source_url="local://fallback"),
             ImageAsset(path=inline, alt="Checklist diagram for microphone troubleshooting steps.", source_kind="library", source_url="local://fallback"),
         ]
     merged = publisher.build_dry_run_html(canonical_html, images)
@@ -103,7 +106,7 @@ Reinstall audio driver and reboot.
 
     checks = [
         _check("markdown_tokens_zero", ("## " not in merged and "### " not in merged), "markdown heading token absent"),
-        _check("img_count_min2", len(re.findall(r"<img\b[^>]*\bsrc=", merged, flags=re.IGNORECASE)) >= 2, "img>=2"),
+        _check("img_count_min5", len(re.findall(r"<img\b[^>]*\bsrc=", merged, flags=re.IGNORECASE)) >= 5, "img>=5"),
         _check("figcaption_zero", "<figcaption" not in merged.lower(), "figcaption absent"),
         _check(
             "banned_debug_tokens_zero",

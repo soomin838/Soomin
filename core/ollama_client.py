@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -302,6 +302,75 @@ class OllamaClient:
             cluster_id=cluster_id,
         )
 
+    def summarize_for_title(
+        self,
+        *,
+        title: str,
+        html: str,
+        plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        compact_title = re.sub(r"\s+", " ", str(title or "")).strip()[:180]
+        compact_html = re.sub(r"\s+", " ", str(html or "")).strip()[:7000]
+        plan_payload = dict(plan or {})
+        plan_keyword = re.sub(r"\s+", " ", str(plan_payload.get("primary_keyword", "") or "")).strip()[:120]
+        plan_device = self._normalize_device_family(str(plan_payload.get("device_family", "") or ""))
+        system_prompt = (
+            "You summarize troubleshooting content for title generation.\n"
+            "Return JSON only.\n"
+            "US English only. No markdown.\n"
+            "No SEO/meta commentary.\n"
+            "short_summary must be 2-3 sentences and <= 400 chars.\n"
+            "Schema:\n"
+            "{"
+            "\"short_summary\":\"string\","
+            "\"primary_issue_phrase\":\"string\","
+            "\"device_family\":\"windows|mac|iphone|galaxy\","
+            "\"feature\":\"wifi|bluetooth|usb|printer|mic|camera|keyboard|mouse|driver|vpn|audio|battery|update|network\","
+            "\"must_include_terms\":[\"string\"]"
+            "}"
+        )
+        user_payload = {
+            "title": compact_title,
+            "html_excerpt": compact_html,
+            "plan_primary_keyword": plan_keyword,
+            "plan_device_family": plan_device,
+        }
+        try:
+            data = self.generate_json(
+                system_prompt=system_prompt,
+                user_payload=user_payload,
+                purpose="title_summary",
+            )
+        except Exception:
+            data = {}
+        summary = self._clean_plan_text(str((data or {}).get("short_summary", "") or ""), max_len=400)
+        issue_phrase = self._clean_plan_text(str((data or {}).get("primary_issue_phrase", "") or ""), max_len=140)
+        device_family = self._normalize_device_family(str((data or {}).get("device_family", "") or plan_device or "windows"))
+        feature = self._extract_feature(
+            str((data or {}).get("feature", "") or "")
+            or self._extract_feature(f"{compact_title} {compact_html} {plan_keyword}")
+        )
+        must_include_terms = self._normalize_title_terms(
+            raw_terms=(data or {}).get("must_include_terms", []),
+            title=compact_title,
+            primary_keyword=plan_keyword,
+            feature=feature,
+        )
+        if not issue_phrase:
+            issue_phrase = self._clean_plan_text(plan_keyword or compact_title or "software issue fix", max_len=120)
+        if not summary:
+            summary = self._clean_plan_text(
+                f"This guide explains {issue_phrase} and gives ordered software fixes with expected results and fallback actions.",
+                max_len=400,
+            )
+        return {
+            "short_summary": summary,
+            "primary_issue_phrase": issue_phrase,
+            "device_family": device_family,
+            "feature": feature,
+            "must_include_terms": must_include_terms[:6],
+        }
+
     def review_article_quality(
         self,
         *,
@@ -486,7 +555,7 @@ class OllamaClient:
         device_family = self._normalize_device_family(str(data.get("device_family", "") or device_type))
         primary_keyword = self._clean_plan_text(str(data.get("primary_keyword", "") or keyword), max_len=120)
         if not primary_keyword:
-            primary_keyword = self._clean_plan_text(str(keyword or "device not working fix"), max_len=120)
+            primary_keyword = self._clean_plan_text(str(keyword or "windows update error fix"), max_len=120)
 
         issue_summary = self._clean_plan_text(str(data.get("issue_summary", "") or ""), max_len=220)
         if not issue_summary:
@@ -591,6 +660,63 @@ class OllamaClient:
             cleaned = re.sub(re.escape(banned), "software issue", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" -")
         return cleaned[: max(20, int(max_len))]
+
+    def _extract_feature(self, text: str) -> str:
+        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        for token, canonical in (
+            ("wi-fi", "wifi"),
+            ("wifi", "wifi"),
+            ("bluetooth", "bluetooth"),
+            ("usb", "usb"),
+            ("printer", "printer"),
+            ("microphone", "mic"),
+            ("mic", "mic"),
+            ("camera", "camera"),
+            ("keyboard", "keyboard"),
+            ("mouse", "mouse"),
+            ("driver", "driver"),
+            ("vpn", "vpn"),
+            ("ethernet", "network"),
+            ("network", "network"),
+            ("audio", "audio"),
+            ("sound", "audio"),
+            ("battery", "battery"),
+            ("charging", "battery"),
+            ("update", "update"),
+        ):
+            if token in lower:
+                return canonical
+        return "network"
+
+    def _normalize_title_terms(self, raw_terms: Any, title: str, primary_keyword: str, feature: str) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        items = raw_terms if isinstance(raw_terms, list) else []
+        for item in items:
+            txt = self._clean_plan_text(str(item or ""), max_len=60)
+            if not txt:
+                continue
+            key = txt.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(txt)
+            if len(out) >= 6:
+                break
+        for seed in (primary_keyword, title, feature, "fix", "not working", "after update"):
+            txt = self._clean_plan_text(str(seed or ""), max_len=60)
+            if not txt:
+                continue
+            key = txt.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(txt)
+            if len(out) >= 6:
+                break
+        while len(out) < 3:
+            out.append(["fix", "error", "after update"][len(out) % 3])
+        return out[:6]
 
     def _normalize_text_list(
         self,
@@ -881,3 +1007,4 @@ class OllamaClient:
             "damaged hardware",
             "cracked screen",
         )
+
