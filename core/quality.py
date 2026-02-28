@@ -64,6 +64,7 @@ class ContentQAGate:
         title: str = "",
         domain: str = "tech_troubleshoot",
         keyword: str = "",
+        include_image_integrity: bool = True,
     ) -> QAResult:
         start_all = time.perf_counter()
         run_id = uuid.uuid4().hex[:12]
@@ -206,17 +207,27 @@ class ContentQAGate:
             hard_reason="forbidden_phrase_or_format_detected",
         )
 
-        image_fail, image_detail = _timed(
-            "image_integrity_detect",
-            lambda: self._detect_image_integrity(html=html),
-        )
-        _add_check(
-            "image_integrity",
-            not image_fail,
-            image_detail or "image_integrity_ok",
-            weight=0,
-            hard_reason="image_integrity_failed",
-        )
+        if bool(include_image_integrity):
+            image_fail, image_detail = _timed(
+                "image_integrity_detect",
+                lambda: self._detect_image_integrity(html=html),
+            )
+            _add_check(
+                "image_integrity",
+                not image_fail,
+                image_detail or "image_integrity_ok",
+                weight=0,
+                hard_reason="image_integrity_failed",
+            )
+        else:
+            breakdown_ms.setdefault("image_integrity_detect", 0)
+            _add_check(
+                "image_integrity",
+                True,
+                "image_integrity_skipped(pre_image_phase)",
+                weight=0,
+                hard_reason="",
+            )
 
         title_intent_fail, title_intent_detail = _timed(
             "title_intent_detect",
@@ -351,6 +362,7 @@ class ContentQAGate:
             breakdown_ms=breakdown_ms,
             passed=(not result.has_hard_failure),
             hard_failures=result.hard_failures,
+            include_image_integrity=bool(include_image_integrity),
         )
         self._print_qa_timing(total_ms=total_ms, breakdown_ms=breakdown_ms, qa_mode=qa_mode)
         return result
@@ -1137,6 +1149,7 @@ class ContentQAGate:
         breakdown_ms: dict[str, int],
         passed: bool,
         hard_failures: list[str],
+        include_image_integrity: bool = True,
     ) -> None:
         path = self.qa_timing_path
         try:
@@ -1153,6 +1166,7 @@ class ContentQAGate:
                 "keyword": str(keyword or "").strip()[:180],
                 "domain": str(domain or "").strip(),
                 "qa_mode": str(qa_mode or "quick").strip().lower(),
+                "include_image_integrity": bool(include_image_integrity),
                 "total_ms": int(max(0, total_ms)),
                 "breakdown_ms": {str(k): int(max(0, int(v))) for k, v in (breakdown_ms or {}).items()},
                 "is_slow": bool(int(max(0, total_ms)) >= 2000),

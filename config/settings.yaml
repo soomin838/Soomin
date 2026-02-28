@@ -81,7 +81,7 @@ publish:
 quality:
   enabled: true
   strict_mode: true
-  qa_mode: "quick"
+  qa_mode: "full"
   min_quality_score: 91
   qa_retry_max_passes: 0
   humanity_enabled: true
@@ -330,6 +330,13 @@ news_pack:
   daily_target_inline_bg: 6
   interval_minutes_base: 150
   interval_minutes_jitter: 45
+  bootstrap_min_interval_minutes: 10
+  bootstrap_max_interval_minutes: 20
+  min_ready_thumb_bg: 20
+  min_ready_inline_bg: 60
+  target_ready_thumb_bg: 40
+  target_ready_inline_bg: 120
+  emergency_fill_max_items: 3
   max_consecutive_failures: 5
   provider_order:
     - "pollinations_auth"
@@ -339,6 +346,7 @@ news_pack:
   pollinations_timeout_sec: 35
   gemini_fallback_enabled: true
   gemini_fallback_daily_cap: 1
+  allow_gemini_on_pollinations_rate_limit: false
   r2_upload_enabled: true
   r2_prefix: "news_pack"
   manifest_path: "storage/state/news_pack_manifest.jsonl"
@@ -420,7 +428,7 @@ local_llm:
   max_calls_per_post: 2
 
 authority_links:
-  - "https://developers.google.com/search/docs/fundamentals/creating-helpful-content"
+  - "https://www.cisa.gov/news-events/cybersecurity-advisories"
   - "https://api.stackexchange.com/docs"
   - "https://github.com/HackerNews/API"
   - "https://docs.github.com/en/rest"

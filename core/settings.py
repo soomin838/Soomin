@@ -124,6 +124,13 @@ class NewsPackSettings:
     daily_target_inline_bg: int = 6
     interval_minutes_base: int = 150
     interval_minutes_jitter: int = 45
+    bootstrap_min_interval_minutes: int = 10
+    bootstrap_max_interval_minutes: int = 20
+    min_ready_thumb_bg: int = 20
+    min_ready_inline_bg: int = 60
+    target_ready_thumb_bg: int = 40
+    target_ready_inline_bg: int = 120
+    emergency_fill_max_items: int = 3
     max_consecutive_failures: int = 5
     provider_order: list[str] = field(
         default_factory=lambda: ["pollinations_auth", "pollinations_anon", "gemini"]
@@ -132,6 +139,7 @@ class NewsPackSettings:
     pollinations_timeout_sec: int = 35
     gemini_fallback_enabled: bool = True
     gemini_fallback_daily_cap: int = 1
+    allow_gemini_on_pollinations_rate_limit: bool = False
     r2_upload_enabled: bool = True
     r2_prefix: str = "news_pack"
     manifest_path: str = "storage/state/news_pack_manifest.jsonl"
@@ -211,7 +219,7 @@ class PublishSettings:
 class QualitySettings:
     enabled: bool = True
     strict_mode: bool = True
-    qa_mode: str = "quick"
+    qa_mode: str = "full"
     min_quality_score: int = 91
     qa_retry_max_passes: int = 0
     humanity_enabled: bool = True
@@ -590,7 +598,7 @@ def load_settings(path: Path) -> AppSettings:
 
     if isinstance(qa_raw, dict):
         if "qa_mode" in qa_raw:
-            quality_raw["qa_mode"] = str(qa_raw.get("qa_mode", "quick") or "quick").strip().lower()
+            quality_raw["qa_mode"] = str(qa_raw.get("qa_mode", "full") or "full").strip().lower()
         if "prompt_leak_patterns" in qa_raw:
             quality_raw["prompt_leak_patterns"] = qa_raw.get("prompt_leak_patterns", [])
         disallowed = qa_raw.get("disallowed_terms", {}) or {}

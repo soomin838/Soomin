@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import re
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,10 @@ class NewsPromptPack:
     background_prompt: str
     hook_candidates: list[str]
     style_tags: list[str]
+    palette_hint: str
+    composition_hint: str
+    density_hint: str
+    mood_hint: str
 
 
 class NewsPackPromptFactory:
@@ -49,9 +54,32 @@ class NewsPackPromptFactory:
                 "tech news editorial background, abstract technology geometry, "
                 "clean modern composition, no text, no logos, no watermark"
             )
+        recent_hashes = {
+            str(x or "").strip()
+            for x in ((context or {}).get("recent_prompt_hashes", []) if isinstance(context, dict) else [])
+            if str(x or "").strip()
+        }
+        prompt_hash = hashlib.sha1(prompt.encode("utf-8", errors="ignore")).hexdigest()
+        if prompt_hash in recent_hashes:
+            recent_styles = [
+                str(x or "").strip().lower()
+                for x in ((context or {}).get("recent_style_tags", []) if isinstance(context, dict) else [])
+                if str(x or "").strip()
+            ]
+            alt_style_pool = ["isometric", "wireframe", "paper-cut", "glassmorphism", "low-poly"]
+            alt_style = next((s for s in alt_style_pool if s not in recent_styles), random.choice(alt_style_pool))
+            prompt = self._sanitize_prompt(f"{prompt}, variation style {alt_style}, alternate composition")
         hooks = self._normalize_hooks(payload.get("hook_candidates", []), tags=clean_tags, seed=seed)
         styles = self._normalize_style_tags(payload.get("style_tags", []))
-        return NewsPromptPack(background_prompt=prompt, hook_candidates=hooks, style_tags=styles)
+        return NewsPromptPack(
+            background_prompt=prompt,
+            hook_candidates=hooks,
+            style_tags=styles,
+            palette_hint=self._normalize_hint(payload.get("palette_hint"), default="blue-cyan"),
+            composition_hint=self._normalize_hint(payload.get("composition_hint"), default="centered layered geometry"),
+            density_hint=self._normalize_hint(payload.get("density_hint"), default="medium"),
+            mood_hint=self._normalize_hint(payload.get("mood_hint"), default="informative calm"),
+        )
 
     def _sanitize_prompt(self, prompt: str) -> str:
         text = re.sub(r"\s+", " ", str(prompt or "").strip())
@@ -117,6 +145,12 @@ class NewsPackPromptFactory:
             return out
         return ["editorial", "abstract", "high-contrast", "minimal"]
 
+    def _normalize_hint(self, raw: Any, *, default: str) -> str:
+        text = re.sub(r"\s+", " ", str(raw or "").strip())
+        if not text:
+            return default
+        return text[:80]
+
     def _fallback_payload(self, *, tags: list[str], kind: str, seed: int) -> dict[str, Any]:
         rng = random.Random(seed)
         tone = rng.choice(["dark teal", "cyan blue", "midnight blue", "graphite"])
@@ -130,5 +164,8 @@ class NewsPackPromptFactory:
             ),
             "hook_candidates": [],
             "style_tags": ["editorial", "abstract", "minimal"],
+            "palette_hint": tone,
+            "composition_hint": shape,
+            "density_hint": "medium",
+            "mood_hint": "informative",
         }
-

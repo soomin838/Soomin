@@ -2080,18 +2080,18 @@ class Publisher:
 
     def _alt_template_pool(self) -> list[str]:
         return [
-            "Minimal diagram explaining the main troubleshooting steps.",
-            "Practical workflow diagram for the section topic.",
-            "Clean process diagram showing a simplified fix sequence.",
-            "Concept diagram highlighting a repeatable troubleshooting pattern.",
-            "Visual summary of a practical device fix routine.",
-            "Diagram for a real-world implementation scenario.",
-            "Simple process diagram focused on practical execution.",
-            "Structured problem-solving flow diagram.",
-            "Infographic-style process for operational decision clarity.",
-            "Implementation-order diagram for beginner-friendly fixes.",
-            "Lightweight troubleshooting flow diagram.",
-            "Troubleshooting process visual for non-technical readers.",
+            "Editorial support graphic for this section.",
+            "Neutral visual summary for the reported update.",
+            "Context illustration for key details in this article.",
+            "Infographic-style support image for the current section.",
+            "Process snapshot related to this tech news topic.",
+            "Visual context panel supporting this article section.",
+            "Clean abstract illustration for news context.",
+            "Section-level explainer visual for readers.",
+            "Lightweight editorial diagram for article flow.",
+            "Supporting image for the latest reported changes.",
+            "Simple contextual graphic for non-technical readers.",
+            "Editorial concept visual for this update.",
         ]
 
     def _regen_alt_if_too_similar(self, alt: str, intro_text: str) -> str:
@@ -2102,15 +2102,15 @@ class Publisher:
         random_order = list(pool)
         import random as _random
         _random.shuffle(random_order)
-        candidate = base or (random_order[0] if random_order else "Troubleshooting diagram.")
+        candidate = base or (random_order[0] if random_order else "Editorial support visual.")
         tries = 0
         while tries < 5:
             sim = self._jaccard_similarity(intro, candidate)
             if sim < threshold:
                 return candidate[:180]
-            candidate = random_order[tries % len(random_order)] if random_order else "Troubleshooting diagram."
+            candidate = random_order[tries % len(random_order)] if random_order else "Editorial support visual."
             tries += 1
-        return "Troubleshooting diagram."
+        return "Editorial support visual."
 
     def _insert_banner_before_first_h2(self, html: str, block: str) -> str:
         src = str(html or "")
@@ -2181,12 +2181,27 @@ class Publisher:
         banner_block = self._image_block(str(banner_src or ""), safe_banner_alt)
         html = self._insert_banner_after_quick_take_or_first_paragraph(html, banner_block)
 
-        inline_patterns = [
-            r"\bFix\s*1\b",
-            r"\bFix\s*2\b",
-            r"\b(Advanced(?:\s+Fix)?|More\s+fix(?:es)?)\b",
-            r"\bChecklist\b",
-        ]
+        is_news_layout = bool(
+            re.search(
+                r"<h[23]\b[^>]*>\s*(What\s+Happened|Why\s+It\s+Matters|What\s+To\s+Do\s+Now|Key\s+Details|What\s+To\s+Watch\s+Next)\s*</h[23]>",
+                html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        )
+        if is_news_layout:
+            inline_patterns = [
+                r"\bWhat\s+Happened\b",
+                r"\bWhy\s+It\s+Matters\b",
+                r"\bWhat\s+To\s+Do\s+Now\b",
+                r"\b(Key\s+Details|What\s+To\s+Watch\s+Next)\b",
+            ]
+        else:
+            inline_patterns = [
+                r"\bFix\s*1\b",
+                r"\bFix\s*2\b",
+                r"\b(Advanced(?:\s+Fix)?|More\s+fix(?:es)?)\b",
+                r"\bChecklist\b",
+            ]
         inline_total = max(0, min(int(self.max_inline_images), len(entries) - 1))
         for idx in range(inline_total):
             src, alt = entries[idx + 1]

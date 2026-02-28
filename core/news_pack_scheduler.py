@@ -31,10 +31,21 @@ class NewsPackScheduler:
             minutes = random.randint(30, 90)
         return now + timedelta(minutes=minutes)
 
+    def compute_bootstrap_next(
+        self,
+        *,
+        now_utc: datetime | None = None,
+        min_minutes: int = 10,
+        max_minutes: int = 20,
+    ) -> datetime:
+        now = (now_utc or datetime.now(UTC)).astimezone(UTC)
+        lo = max(5, int(min_minutes or 10))
+        hi = max(lo, int(max_minutes or 20))
+        return now + timedelta(minutes=random.randint(lo, hi))
+
     def next_day_start_et(self, now_utc: datetime | None = None) -> datetime:
         now = (now_utc or datetime.now(UTC)).astimezone(ET)
         next_day = (now + timedelta(days=1)).date()
         base = datetime(next_day.year, next_day.month, next_day.day, 0, 20, tzinfo=ET)
         jitter_min = random.randint(0, 35)
         return (base + timedelta(minutes=jitter_min)).astimezone(UTC)
-

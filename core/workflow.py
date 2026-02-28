@@ -266,6 +266,43 @@ class AgentWorkflow:
                 break
         return tags[:4] if tags else ["platform"]
 
+    def _news_pack_pick_with_emergency_fill(
+        self,
+        *,
+        tags: list[str],
+        required_inline: int,
+        target_images: int,
+    ):
+        picked = self.news_pack_picker.pick_for_post(
+            tags=tags,
+            thumb_count=1,
+            inline_count=required_inline,
+        )
+        thumb_row = dict(getattr(picked, "thumb_bg", {}) or {})
+        inline_rows = list(getattr(picked, "inline_bg", []) or [])
+        if thumb_row and len(inline_rows) >= required_inline:
+            return picked, []
+        notes: list[str] = []
+        max_fill = max(1, int(getattr(self.settings.news_pack, "emergency_fill_max_items", 3) or 3))
+        for idx in range(1, max_fill + 1):
+            tick = self.news_pack_seed_tick_if_needed(force=True, min_interval_sec=0)
+            tick_status = str((tick or {}).get("status", "unknown") or "unknown")
+            tick_kind = str((tick or {}).get("kind", "") or "")
+            tick_provider = str((tick or {}).get("provider", "") or "")
+            notes.append(f"emergency_fill_{idx}={tick_status}:{tick_kind}:{tick_provider}")
+            picked = self.news_pack_picker.pick_for_post(
+                tags=tags,
+                thumb_count=1,
+                inline_count=required_inline,
+            )
+            thumb_row = dict(getattr(picked, "thumb_bg", {}) or {})
+            inline_rows = list(getattr(picked, "inline_bg", []) or [])
+            available_count = (1 if thumb_row else 0) + len(inline_rows)
+            if thumb_row and len(inline_rows) >= required_inline:
+                notes.append(f"emergency_fill_recovered={available_count}/{target_images}")
+                return picked, notes
+        return picked, notes
+
     def _news_pack_record_to_asset(self, row: dict[str, Any], index: int) -> ImageAsset | None:
         if not isinstance(row, dict):
             return None
@@ -354,6 +391,11 @@ class AgentWorkflow:
                 "status": "ready",
                 "used_at": "",
                 "used_by": "",
+                "used_count": 0,
+                "source_mode": "thumb_overlay",
+                "alt_text_template": "Editorial thumbnail illustration for this tech news article.",
+                "caption_template": "",
+                "overlay_hook_used": str(hook or "")[:80],
                 "hook_candidates": hooks[:3],
                 "style_tags": ["yt_clean", "overlay"],
             }
@@ -558,6 +600,7 @@ class AgentWorkflow:
         domain: str = "tech_troubleshoot",
         keyword: str = "",
         context: str = "qa",
+        include_image_integrity: bool = True,
     ):
         return self._profile_call(
             stage=f"qa_evaluate:{context}",
@@ -566,6 +609,7 @@ class AgentWorkflow:
                 title=title,
                 domain=domain,
                 keyword=keyword,
+                include_image_integrity=bool(include_image_integrity),
             ),
             slow_ms=1200,
             meta={
@@ -573,6 +617,22 @@ class AgentWorkflow:
                 "keyword": str(keyword or "")[:120],
                 "title": str(title or "")[:120],
             },
+        )
+
+    def _pick_images_from_library_or_guard(self, *, title: str, min_count: int) -> list[ImageAsset]:
+        if is_news_mode(self.settings):
+            self._append_workflow_perf(
+                "legacy_image_library_guard",
+                {
+                    "mode": str(getattr(self.settings.content_mode, "mode", "") or ""),
+                    "reason": "tech_news_only_disables_image_library_primary_path",
+                },
+            )
+            raise RuntimeError("news_mode_image_library_disabled")
+        return pick_images(
+            title=title,
+            min_count=max(1, int(min_count or 1)),
+            root=self.root,
         )
 
     def _reset_local_llm_budget(self) -> None:
@@ -2003,6 +2063,7 @@ class AgentWorkflow:
                 domain=current_domain,
                 keyword=selected.title,
                 context="news_initial",
+                include_image_integrity=False,
             )
             if self.settings.quality.enabled and self.settings.quality.strict_mode:
                 min_quality = int(getattr(self.settings.quality, "min_quality_score", 85) or 85)
@@ -2016,6 +2077,7 @@ class AgentWorkflow:
                             domain=current_domain,
                             keyword=selected.title,
                             context="news_strict_complete",
+                            include_image_integrity=False,
                         )
                 if qa_result.score < min_quality:
                     hold_reason = f"qa_below_threshold:{qa_result.score}/{min_quality}"
@@ -2052,20 +2114,22 @@ class AgentWorkflow:
             target_images = max(5, int(getattr(self.settings.visual, "target_images_per_post", 5) or 5))
             required_inline = max(0, target_images - 1)
             news_tags = self._news_pack_tags_for_candidate(selected, category)
-            picked_pack = self._profile_call(
+            picked_pack, emergency_notes = self._profile_call(
                 "news_pack_pick",
-                lambda: self.news_pack_picker.pick_for_post(
+                lambda: self._news_pack_pick_with_emergency_fill(
                     tags=news_tags,
-                    thumb_count=1,
-                    inline_count=required_inline,
+                    required_inline=required_inline,
+                    target_images=target_images,
                 ),
-                slow_ms=1800,
+                slow_ms=2400,
             )
+            for note in emergency_notes:
+                degraded_note = self._append_note(degraded_note, note)
             thumb_row = dict(getattr(picked_pack, "thumb_bg", {}) or {})
             inline_rows = list(getattr(picked_pack, "inline_bg", []) or [])
             if (not thumb_row) or len(inline_rows) < required_inline:
                 available_count = (1 if thumb_row else 0) + len(inline_rows)
-                hold_reason = f"image_library_shortage({available_count}/{target_images})"
+                hold_reason = f"news_pack_understock({available_count}/{target_images})"
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -2105,7 +2169,7 @@ class AgentWorkflow:
                     continue
                 images.append(asset)
             if len(images) < target_images:
-                hold_reason = f"image_library_shortage({len(images)}/{target_images})"
+                hold_reason = f"news_pack_understock({len(images)}/{target_images})"
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -2141,6 +2205,45 @@ class AgentWorkflow:
                     creds_for_gate,
                     preflight_thumbnail_src=preflight_thumb_src,
                 )
+
+            post_image_qa = self._qa_evaluate(
+                gate_preview_html,
+                title=draft.title,
+                domain=current_domain,
+                keyword=selected.title,
+                context="news_post_image",
+                include_image_integrity=True,
+            )
+            if post_image_qa.has_hard_failure:
+                hold_reason = "post_image_qa_hard_fail:" + ",".join(list(post_image_qa.hard_failures or [])[:3])
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=post_image_qa.score,
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+            if self.settings.quality.enabled and self.settings.quality.strict_mode:
+                min_quality = int(getattr(self.settings.quality, "min_quality_score", 85) or 85)
+                if post_image_qa.score < min_quality:
+                    hold_reason = f"post_image_qa_below_threshold:{post_image_qa.score}/{min_quality}"
+                    self.logs.append_run(
+                        RunRecord(
+                            status="hold",
+                            score=post_image_qa.score,
+                            title=draft.title,
+                            source_url=draft.source_url,
+                            published_url="",
+                            note=self._append_note(hold_reason, degraded_note),
+                        )
+                    )
+                    self._workflow_perf_finish_run("hold", hold_reason)
+                    return WorkflowResult("hold", hold_reason)
 
             go_live_errors, go_live_warnings = self._go_live_gate_checklist(
                 title=draft.title,
@@ -3428,10 +3531,9 @@ class AgentWorkflow:
         image_prompt_plan: dict[str, Any] = {"source": "library"}
         images = self._profile_call(
             "image_library_pick",
-            lambda: pick_images(
+            lambda: self._pick_images_from_library_or_guard(
                 title=draft.title,
                 min_count=target_images,
-                root=self.root,
             ),
             slow_ms=2000,
         )
@@ -3944,6 +4046,7 @@ class AgentWorkflow:
         protected_roots = [
             (self.root / "assets" / "library").resolve(),
             (self.root / "assets" / "fallback").resolve(),
+            (self.root / "assets" / "news_pack_cache").resolve(),
         ]
         for img in (images or []):
             try:

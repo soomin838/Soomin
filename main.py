@@ -900,7 +900,7 @@ class AgentController:
             if not isinstance(raw, dict):
                 return
             changed = False
-            migration_target = 1
+            migration_target = 2
             try:
                 current_ver = int(_nested_get(raw, "runtime.policy_migration_version") or "0")
             except Exception:
@@ -1111,6 +1111,33 @@ class AgentController:
                 cur_inline_count = 0
             if cur_inline_count < 4:
                 _nested_set(raw, "images.inline_count", 4)
+                changed = True
+            if (_nested_get(raw, "quality.qa_mode") or "").strip().lower() in {"", "quick"}:
+                _nested_set(raw, "quality.qa_mode", "full")
+                changed = True
+            if int(_nested_get(raw, "news_pack.min_ready_thumb_bg") or "0") <= 0:
+                _nested_set(raw, "news_pack.min_ready_thumb_bg", 20)
+                changed = True
+            if int(_nested_get(raw, "news_pack.min_ready_inline_bg") or "0") <= 0:
+                _nested_set(raw, "news_pack.min_ready_inline_bg", 60)
+                changed = True
+            if int(_nested_get(raw, "news_pack.target_ready_thumb_bg") or "0") <= 0:
+                _nested_set(raw, "news_pack.target_ready_thumb_bg", 40)
+                changed = True
+            if int(_nested_get(raw, "news_pack.target_ready_inline_bg") or "0") <= 0:
+                _nested_set(raw, "news_pack.target_ready_inline_bg", 120)
+                changed = True
+            if int(_nested_get(raw, "news_pack.bootstrap_min_interval_minutes") or "0") <= 0:
+                _nested_set(raw, "news_pack.bootstrap_min_interval_minutes", 10)
+                changed = True
+            if int(_nested_get(raw, "news_pack.bootstrap_max_interval_minutes") or "0") <= 0:
+                _nested_set(raw, "news_pack.bootstrap_max_interval_minutes", 20)
+                changed = True
+            if int(_nested_get(raw, "news_pack.emergency_fill_max_items") or "0") <= 0:
+                _nested_set(raw, "news_pack.emergency_fill_max_items", 3)
+                changed = True
+            if str(_nested_get(raw, "news_pack.allow_gemini_on_pollinations_rate_limit") or "").strip().lower() in {"", "none"}:
+                _nested_set(raw, "news_pack.allow_gemini_on_pollinations_rate_limit", False)
                 changed = True
             if not (_nested_get(raw, "monthly_scheduler.timezone") or "").strip():
                 _nested_set(raw, "monthly_scheduler.timezone", "America/New_York")

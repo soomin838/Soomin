@@ -17,6 +17,11 @@ class NewsPackState:
     generated_total: int = 0
     generated_thumb_bg: int = 0
     generated_inline_bg: int = 0
+    mode: str = "normal"  # normal | bootstrap | paused
+    last_bootstrap_at: str = ""
+    bootstrap_generated_today: int = 0
+    last_rate_limit_at: str = ""
+    last_success_provider: str = ""
     gemini_fallback_used_today: int = 0
     next_run_at_utc: str = ""
     last_run_at_utc: str = ""
@@ -67,6 +72,11 @@ class NewsPackStateStore:
         state.generated_total = 0
         state.generated_thumb_bg = 0
         state.generated_inline_bg = 0
+        state.mode = "normal"
+        state.last_bootstrap_at = ""
+        state.bootstrap_generated_today = 0
+        state.last_rate_limit_at = ""
+        state.last_success_provider = ""
         state.gemini_fallback_used_today = 0
         state.consecutive_failures = 0
         state.last_error = ""
@@ -86,4 +96,3 @@ class NewsPackStateStore:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
         return dt.astimezone(UTC)
-
