@@ -295,7 +295,16 @@ class AgentWorkflow:
             tick_status = str((tick or {}).get("status", "unknown") or "unknown")
             tick_kind = str((tick or {}).get("kind", "") or "")
             tick_provider = str((tick or {}).get("provider", "") or "")
-            notes.append(f"emergency_fill_{idx}={tick_status}:{tick_kind}:{tick_provider}")
+            tick_reason = str((tick or {}).get("reason", "") or "").strip().lower()
+            tick_failure_kind = str((tick or {}).get("failure_kind", "") or "").strip().lower()
+            notes.append(
+                f"emergency_fill_{idx}={tick_status}:{tick_kind}:{tick_provider}"
+                + (f":{tick_failure_kind or tick_reason}" if (tick_failure_kind or tick_reason) else "")
+            )
+            # If service rate limited (anon 429), stop immediate fill loop and wait for next window.
+            if tick_failure_kind == "service_rate_limited" or "rate_limit" in tick_reason:
+                notes.append("emergency_fill_stopped=service_rate_limited")
+                break
             picked = self.news_pack_picker.pick_for_post(
                 tags=tags,
                 thumb_count=1,

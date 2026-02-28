@@ -188,7 +188,11 @@ class NewsPackSeeder:
                     "next_run_at_utc": state.next_run_at_utc,
                 }
             )
-            return self._result("failed", state, extra={"kind": kind, "reason": state.last_error})
+            return self._result(
+                "failed",
+                state,
+                extra={"kind": kind, "reason": state.last_error, "failure_kind": str(failure_kind or "")},
+            )
 
         try:
             local_path, width, height, sha1, byte_size, quality_flags = self._store_local_asset(result=result, kind=kind)
@@ -213,7 +217,11 @@ class NewsPackSeeder:
                     "next_run_at_utc": state.next_run_at_utc,
                 }
             )
-            return self._result("failed", state, extra={"kind": kind, "reason": state.last_error})
+            return self._result(
+                "failed",
+                state,
+                extra={"kind": kind, "reason": state.last_error, "failure_kind": "temporary_server_error"},
+            )
 
         state.consecutive_failures = 0
         state.last_error = ""
@@ -310,12 +318,28 @@ class NewsPackSeeder:
         order = ordered
         pollinations_service_limited = False
         attempts: list[dict[str, Any]] = []
+        provider_try_order = list(order)
 
-        for provider_name in order:
+        def _next_provider(idx: int) -> str:
+            if idx + 1 < len(order):
+                return str(order[idx + 1] or "").strip().lower()
+            return ""
+
+        for idx, provider_name in enumerate(order):
             if provider_name == "pollinations_auth":
                 key = str(getattr(self.settings, "pollinations_api_key", "") or "").strip()
                 if not key:
-                    attempts.append({"provider": provider_name, "status": "skip", "reason": "missing_api_key"})
+                    attempts.append(
+                        {
+                            "provider": provider_name,
+                            "status": "skip",
+                            "reason": "missing_api_key",
+                            "provider_try_order": provider_try_order,
+                            "provider_failed": provider_name,
+                            "fail_reason": "missing_api_key",
+                            "next_provider": _next_provider(idx),
+                        }
+                    )
                     continue
                 provider = PollinationsProvider(
                     auth=True,
@@ -329,9 +353,7 @@ class NewsPackSeeder:
                     timeout_sec=int(getattr(self.settings, "pollinations_timeout_sec", 35) or 35),
                 )
             elif provider_name == "gemini":
-                if pollinations_service_limited and not bool(
-                    getattr(self.settings, "allow_gemini_on_pollinations_rate_limit", False)
-                ):
+                if pollinations_service_limited:
                     attempts.append(
                         {
                             "provider": provider_name,
@@ -357,73 +379,155 @@ class NewsPackSeeder:
 
             try:
                 result = provider.generate_image(prompt=prompt, width=width, height=height, seed=seed)
-                attempts.append({"provider": provider_name, "status": "ok", "reason": ""})
+                attempts.append(
+                    {
+                        "provider": provider_name,
+                        "status": "ok",
+                        "reason": "",
+                        "provider_try_order": provider_try_order,
+                        "next_provider": "",
+                    }
+                )
                 return result, "", "", attempts
             except RateLimitError as exc:
                 reason = self._classify_rate_limit(provider_name=provider_name, error_text=str(exc))
-                attempts.append({"provider": provider_name, "status": "fail", "reason": reason})
+                next_provider = _next_provider(idx)
+                attempts.append(
+                    {
+                        "provider": provider_name,
+                        "status": "fail",
+                        "reason": reason,
+                        "provider_try_order": provider_try_order,
+                        "provider_failed": provider_name,
+                        "fail_reason": reason,
+                        "next_provider": next_provider,
+                    }
+                )
+                # CASE A: auth 429 must fall through to anon.
                 if provider_name == "pollinations_auth":
                     continue
+                # CASE B: anon 429 means service rate limit; stop pollinations and do not run Gemini.
                 if provider_name == "pollinations_anon":
                     pollinations_service_limited = True
                     break
                 return None, "service_rate_limited", str(exc)[:220], attempts
             except BadResponseError as exc:
                 reason = self._classify_bad_response(provider_name=provider_name, error_text=str(exc))
-                attempts.append({"provider": provider_name, "status": "fail", "reason": reason})
-                if provider_name == "pollinations_auth" and reason in {"auth_failed", "auth_quota_exhausted"}:
+                next_provider = _next_provider(idx)
+                attempts.append(
+                    {
+                        "provider": provider_name,
+                        "status": "fail",
+                        "reason": reason,
+                        "provider_try_order": provider_try_order,
+                        "provider_failed": provider_name,
+                        "fail_reason": reason,
+                        "next_provider": next_provider,
+                    }
+                )
+                # CASE A: auth failure 401/403/429/530/5xx/non-image => fall through to anon.
+                if provider_name == "pollinations_auth":
                     continue
-                if provider_name == "pollinations_anon" and reason == "service_rate_limited":
+                # CASE B: anon 429 must stop and must not continue to Gemini.
+                if provider_name == "pollinations_anon" and reason == "429":
                     pollinations_service_limited = True
                     break
                 continue
             except TemporaryProviderError as exc:
                 reason = self._classify_temporary(provider_name=provider_name, error_text=str(exc))
-                attempts.append({"provider": provider_name, "status": "fail", "reason": reason})
-                if provider_name == "pollinations_auth":
-                    continue
+                next_provider = _next_provider(idx)
+                attempts.append(
+                    {
+                        "provider": provider_name,
+                        "status": "fail",
+                        "reason": reason,
+                        "provider_try_order": provider_try_order,
+                        "provider_failed": provider_name,
+                        "fail_reason": reason,
+                        "next_provider": next_provider,
+                    }
+                )
+                # CASE A/B: timeout or 530/5xx should flow to the next provider.
                 continue
             except Exception as exc:
-                attempts.append({"provider": provider_name, "status": "fail", "reason": "temporary_server_error"})
+                reason = "temporary_server_error"
+                attempts.append(
+                    {
+                        "provider": provider_name,
+                        "status": "fail",
+                        "reason": reason,
+                        "provider_try_order": provider_try_order,
+                        "provider_failed": provider_name,
+                        "fail_reason": reason,
+                        "next_provider": _next_provider(idx),
+                        "error": str(exc)[:160],
+                    }
+                )
                 continue
 
         if pollinations_service_limited:
             return None, "service_rate_limited", "pollinations_rate_limited", attempts
         last_reason = ""
+        last_provider = ""
         for row in reversed(attempts):
             if str(row.get("status", "")) == "fail":
                 last_reason = str(row.get("reason", "") or "")
+                last_provider = str(row.get("provider", "") or "")
                 break
         if not last_reason:
             last_reason = "temporary_server_error"
-        return None, last_reason, last_reason, attempts
+        failure_kind = self._reason_to_failure_kind(provider_name=last_provider, reason=last_reason)
+        return None, failure_kind, last_reason, attempts
 
     def _classify_rate_limit(self, *, provider_name: str, error_text: str) -> str:
-        if provider_name == "pollinations_auth":
-            return "auth_quota_exhausted"
-        if provider_name == "pollinations_anon":
-            return "service_rate_limited"
-        return "service_rate_limited"
+        _ = error_text
+        if provider_name.startswith("pollinations"):
+            return "429"
+        return "429"
 
     def _classify_bad_response(self, *, provider_name: str, error_text: str) -> str:
         text = str(error_text or "").strip().lower()
-        if provider_name == "pollinations_auth" and ("http_401" in text or "http_403" in text):
-            return "auth_failed"
-        if provider_name.startswith("pollinations") and "http_429" in text:
-            return "service_rate_limited" if provider_name == "pollinations_anon" else "auth_quota_exhausted"
+        if "http_401" in text:
+            return "401"
+        if "http_403" in text:
+            return "403"
+        if "http_429" in text:
+            return "429"
+        if "http_530" in text:
+            return "530"
+        if "http_5" in text:
+            return "5xx"
         if "non_image_response" in text or "image_too_small" in text:
             return "invalid_image_payload"
-        if "http_5" in text:
-            return "temporary_server_error"
         return "temporary_server_error"
 
     def _classify_temporary(self, *, provider_name: str, error_text: str) -> str:
+        _ = provider_name
         text = str(error_text or "").strip().lower()
         if "timeout" in text:
             return "timeout"
+        if "http_530" in text:
+            return "530"
         if "http_5" in text:
-            return "temporary_server_error"
-        if provider_name == "pollinations_auth":
+            return "5xx"
+        return "temporary_server_error"
+
+    def _reason_to_failure_kind(self, *, provider_name: str, reason: str) -> str:
+        p = str(provider_name or "").strip().lower()
+        r = str(reason or "").strip().lower()
+        if r == "429":
+            if p == "pollinations_anon":
+                return "service_rate_limited"
+            if p == "pollinations_auth":
+                return "auth_quota_exhausted"
+            return "service_rate_limited"
+        if r in {"401", "403"}:
+            return "auth_failed"
+        if r == "invalid_image_payload":
+            return "invalid_image_payload"
+        if r in {"timeout"}:
+            return "timeout"
+        if r in {"530", "5xx", "temporary_server_error"}:
             return "temporary_server_error"
         return "temporary_server_error"
 

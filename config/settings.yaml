@@ -348,7 +348,7 @@ news_pack:
   pollinations_api_key: ''
   pollinations_timeout_sec: 35
   gemini_fallback_enabled: true
-  gemini_fallback_daily_cap: 1
+  gemini_fallback_daily_cap: 3
   allow_gemini_on_pollinations_rate_limit: false
   r2_upload_enabled: true
   r2_prefix: news_pack
