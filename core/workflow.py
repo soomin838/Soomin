@@ -19,11 +19,15 @@ from zoneinfo import ZoneInfo
 
 from .brain import DraftPost, GeminiBrain
 from .actionability_gate import ActionabilityGate, ActionabilityGateResult
+from .news_actionability_gate import NewsActionabilityGate, NewsActionabilityGateResult
 from .budget import BudgetGuard
 from .asset_store import KeywordAssetStore, PostsIndexStore
 from .image_library import pick_images
 from .index_sync import BloggerIndexSync
 from .logstore import LogStore, RunRecord
+from .news_pool import NewsPoolStore
+from .news_rss import fetch_feed
+from .news_score import classify_category, contains_allow_keywords, has_blocked_keywords, score_news_item
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
 from .patterns import PatternEngine
@@ -33,7 +37,7 @@ from .quality import ContentQAGate
 from .reference_docs import ReferenceCorpus
 from .scheduler import MonthlyScheduler
 from .scout import SourceScout, TopicCandidate
-from .settings import AppSettings
+from .settings import AppSettings, is_news_mode
 from .preflight import validate_secrets
 from .text_segmenter import section_bundle_for_llm
 from .topic_growth import TopicGrower
@@ -92,6 +96,7 @@ class AgentWorkflow:
             qa_runtime_path=root / "storage" / "logs" / "qa_runtime.jsonl",
         )
         self.actionability_gate = ActionabilityGate()
+        self.news_actionability_gate = NewsActionabilityGate()
         self.ollama_manager = OllamaManager(
             root=root,
             settings=settings.local_llm,
@@ -170,6 +175,10 @@ class AgentWorkflow:
         self._workflow_perf_phase_count = 0
         self._workflow_perf_slow_phases: list[dict[str, Any]] = []
         self._manual_upload_probe_done = False
+        self._news_pool_db_path = self.root / "storage" / "logs" / "news_pool.sqlite3"
+        self._news_pool_state_path = self.root / "storage" / "logs" / "news_pool_state.json"
+        self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
+        self._news_domain = "tech_news_explainer"
         self._start_posts_index_bootstrap()
 
     def set_progress_hook(self, hook) -> None:
@@ -1006,6 +1015,14 @@ class AgentWorkflow:
         cfg = getattr(self.settings, "actionability_gate", None)
         if cfg is None or (not bool(getattr(cfg, "enabled", True))):
             return ActionabilityGateResult(ok=True, score=100, reasons=[], details={"enabled": False})
+        if is_news_mode(self.settings):
+            news_result = self.news_actionability_gate.evaluate(title=title, html=html)
+            return ActionabilityGateResult(
+                ok=bool(news_result.ok),
+                score=int(news_result.score),
+                reasons=list(news_result.reasons or []),
+                details=dict(news_result.details or {}),
+            )
         return self.actionability_gate.evaluate(
             title=title,
             html=html,
@@ -1427,6 +1444,617 @@ class AgentWorkflow:
             return f"sync_with_blogger=error:{str(report.get('error', '') or '')[:120]}"
         return f"sync_with_blogger={status or 'unknown'}"
 
+    def _load_news_pool_state(self) -> dict[str, Any]:
+        try:
+            if not self._news_pool_state_path.exists():
+                return {}
+            payload = json.loads(self._news_pool_state_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            return {}
+        return {}
+
+    def _save_news_pool_state(self, payload: dict[str, Any]) -> None:
+        try:
+            self._news_pool_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._news_pool_state_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
+
+    def _refresh_news_pool_if_needed(self, force: bool = False) -> str:
+        feeds = [str(x or "").strip() for x in (getattr(self.settings.sources, "news_pool_feeds", []) or []) if str(x or "").strip()]
+        if not feeds:
+            return "news_pool_refresh_skipped:no_feeds"
+        state = self._load_news_pool_state()
+        now_utc = datetime.now(timezone.utc)
+        last_refresh = self._parse_iso_utc(str(state.get("last_refresh_utc", "") or ""))
+        interval_min = max(15, int(getattr(self.settings.sources, "news_pool_refresh_interval_minutes", 120) or 120))
+        if (not force) and last_refresh is not None:
+            elapsed_min = (now_utc - last_refresh).total_seconds() / 60.0
+            if elapsed_min < interval_min:
+                return f"news_pool_refresh_skipped:interval<{interval_min}m"
+
+        allow = [str(x or "").strip().lower() for x in (getattr(self.settings.sources, "news_pool_keywords_allow", []) or []) if str(x or "").strip()]
+        block = [str(x or "").strip().lower() for x in (getattr(self.settings.sources, "news_pool_keywords_block", []) or []) if str(x or "").strip()]
+        source_weights = {
+            str(k or "").strip().lower(): float(v)
+            for k, v in (getattr(self.settings.sources, "news_pool_source_weights", {}) or {}).items()
+            if str(k or "").strip()
+        }
+        rows: list[dict[str, Any]] = []
+        fetched_items = 0
+        for feed in feeds[:20]:
+            items = fetch_feed(feed, timeout=20)
+            fetched_items += len(items or [])
+            for item in items or []:
+                title = re.sub(r"\s+", " ", str((item or {}).get("title", "") or "")).strip()
+                url = re.sub(r"\s+", " ", str((item or {}).get("url", "") or "")).strip()
+                snippet = re.sub(r"\s+", " ", str((item or {}).get("snippet", "") or "")).strip()[:380]
+                if not title or not url:
+                    continue
+                merged = f"{title}\n{snippet}"
+                if has_blocked_keywords(merged, block):
+                    continue
+                if not contains_allow_keywords(merged, allow):
+                    continue
+                source = str((item or {}).get("source", "") or (urlparse(url).netloc or "")).strip().lower()
+                published_dt = (item or {}).get("published_at")
+                if not isinstance(published_dt, datetime):
+                    published_dt = self._parse_iso_utc(str((item or {}).get("published_at", "") or ""))
+                score, category = score_news_item(
+                    title=title,
+                    snippet=snippet,
+                    source=source,
+                    published_at=published_dt if isinstance(published_dt, datetime) else None,
+                    source_weights=source_weights,
+                )
+                if score <= 0:
+                    continue
+                rows.append(
+                    {
+                        "url": url,
+                        "title": title[:220],
+                        "source": source,
+                        "published_at": (
+                            published_dt.astimezone(timezone.utc).isoformat()
+                            if isinstance(published_dt, datetime)
+                            else ""
+                        ),
+                        "snippet": snippet,
+                        "category": category,
+                        "score": int(score),
+                    }
+                )
+
+        upserted = self.news_pool_store.upsert_items(rows)
+        purge_report = self.news_pool_store.purge(
+            news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
+            keep_used_days=max(7, int(getattr(self.settings.sources, "news_pool_keep_used_days", 30) or 30)),
+            max_items=max(100, int(getattr(self.settings.sources, "news_pool_max_items", 800) or 800)),
+        )
+        queued = self.news_pool_store.queued_count(days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)))
+        state.update(
+            {
+                "last_refresh_utc": now_utc.isoformat(),
+                "last_refresh_ok": True,
+                "feeds_count": int(len(feeds)),
+                "fetched_items": int(fetched_items),
+                "upserted": int(upserted),
+                "queued_count": int(queued),
+                "purged": dict(purge_report or {}),
+            }
+        )
+        self._save_news_pool_state(state)
+        return (
+            f"news_pool_refresh_ok:feeds={len(feeds)};"
+            f"fetched={fetched_items};upserted={upserted};queued={queued}"
+        )
+
+    def _claim_news_item(self, force_refresh_once: bool = True) -> dict[str, Any] | None:
+        item = self.news_pool_store.claim_one(
+            news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
+            top_k=max(10, int(getattr(self.settings.sources, "news_pool_pick_top_k", 60) or 60)),
+            source_weights=dict(getattr(self.settings.sources, "news_pool_source_weights", {}) or {}),
+        )
+        if item is not None:
+            return item
+        if force_refresh_once:
+            self._refresh_news_pool_if_needed(force=True)
+            return self.news_pool_store.claim_one(
+                news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
+                top_k=max(10, int(getattr(self.settings.sources, "news_pool_pick_top_k", 60) or 60)),
+                source_weights=dict(getattr(self.settings.sources, "news_pool_source_weights", {}) or {}),
+            )
+        return None
+
+    def _build_news_long_tail_keywords(self, title: str, category: str) -> list[str]:
+        base = re.sub(r"\s+", " ", str(title or "").strip())
+        cat = re.sub(r"\s+", " ", str(category or "platform").strip().lower())
+        seeds = [
+            f"what changed in {base}",
+            f"who is affected by {base}",
+            f"should you update now for {base}",
+            f"what to do now after {base}",
+            f"what to watch next for {base}",
+            f"{cat} update impact for users",
+        ]
+        out: list[str] = []
+        seen: set[str] = set()
+        for row in seeds:
+            t = re.sub(r"\s+", " ", row).strip()
+            if not t:
+                continue
+            key = t.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(t[:120])
+            if len(out) >= 8:
+                break
+        return out
+
+    def _news_item_to_candidate(self, item: dict[str, Any]) -> TopicCandidate:
+        title = re.sub(r"\s+", " ", str((item or {}).get("title", "") or "")).strip()
+        snippet = re.sub(r"\s+", " ", str((item or {}).get("snippet", "") or "")).strip()
+        source = re.sub(r"\s+", " ", str((item or {}).get("source", "") or "")).strip().lower()
+        url = re.sub(r"\s+", " ", str((item or {}).get("url", "") or "")).strip()
+        category = re.sub(r"\s+", " ", str((item or {}).get("category", "") or "platform")).strip().lower()
+        if not category:
+            category = classify_category(f"{title} {snippet}")
+        long_tail = self._build_news_long_tail_keywords(title, category)
+        return TopicCandidate(
+            source=source or "news_pool",
+            title=title,
+            body=snippet,
+            score=max(70, int((item or {}).get("score", 70) or 70)),
+            url=url,
+            main_entity=self.scout._extract_main_entity(title),  # noqa: SLF001
+            long_tail_keywords=long_tail[:8],
+            meta={
+                "news_pool_id": int((item or {}).get("id", 0) or 0),
+                "news_category": category or "platform",
+                "published_at": str((item or {}).get("published_at", "") or ""),
+            },
+        )
+
+    def _build_news_post_local_fallback(
+        self,
+        selected: TopicCandidate,
+        category: str,
+        authority_links: list[str],
+    ) -> DraftPost:
+        title = self._enforce_seo_title(
+            title=str(getattr(selected, "title", "") or ""),
+            candidate=selected,
+            global_keywords=list(getattr(selected, "long_tail_keywords", []) or []),
+            preferred_keyword=str(getattr(selected, "title", "") or ""),
+        )
+        source_url = re.sub(r"\s+", " ", str(getattr(selected, "url", "") or "")).strip()
+        snippet = re.sub(r"\s+", " ", str(getattr(selected, "body", "") or "")).strip()
+        cat = re.sub(r"\s+", " ", str(category or "platform")).strip().lower()
+        safe_authorities = [
+            re.sub(r"\s+", " ", str(x or "").strip())
+            for x in (authority_links or [])
+            if str(x or "").strip()
+        ][:2]
+        source_items: list[str] = []
+        if source_url:
+            source_items.append(f'<li><a href="{escape(source_url)}" rel="nofollow noopener" target="_blank">Original source</a></li>')
+        for link in safe_authorities:
+            source_items.append(f'<li><a href="{escape(link)}" rel="nofollow noopener" target="_blank">{escape(link)}</a></li>')
+        what_to_do = (
+            "<ul>"
+            "<li>Check the official update notes and your current app or OS version.</li>"
+            "<li>Apply the recommended setting change on one device first before full rollout.</li>"
+            "<li>Monitor the issue for 24 hours and keep a rollback path ready if behavior worsens.</li>"
+            "</ul>"
+        )
+        html = (
+            "<h2>Quick Take</h2>"
+            f"<p>{escape(snippet or title)}</p>"
+            "<h2>What Happened</h2>"
+            f"<p>According to reports, this {escape(cat)} update affects users who rely on daily workflows.</p>"
+            "<h2>Why It Matters (for normal users)</h2>"
+            "<p>If this change impacts login, sync, notifications, or background tasks, normal usage can degrade quickly.</p>"
+            "<h2>What To Do Now</h2>"
+            f"{what_to_do}"
+            "<h2>Key Details</h2>"
+            "<ul>"
+            "<li>Scope: software behavior and update impact only.</li>"
+            "<li>Risk level: low to medium depending on current rollout status.</li>"
+            "<li>Best practice: test first, then expand changes gradually.</li>"
+            "</ul>"
+            "<h2>What To Watch Next</h2>"
+            "<p>Watch official release notes, support advisories, and confirmed user impact updates.</p>"
+            "<h2>Sources</h2>"
+            f"<ul>{''.join(source_items) if source_items else '<li>No external source available yet.</li>'}</ul>"
+        )
+        return DraftPost(
+            title=title,
+            alt_titles=[],
+            html=html,
+            summary=snippet[:260] if snippet else title,
+            score=max(70, int(getattr(selected, "score", 70) or 70)),
+            source_url=source_url,
+            extracted_urls=[source_url, *safe_authorities][:8],
+        )
+
+    def _run_once_news_mode(
+        self,
+        *,
+        manual_trigger: bool,
+        queue_advisory: str,
+        sync_note: str,
+        preflight_index_note: str,
+        blog_snapshot: dict[str, Any],
+        today_gemini_before: int,
+    ) -> WorkflowResult:
+        self._progress("news_pool", "뉴스 풀 갱신/클레임", 18)
+        working_draft_id = ""
+        claimed_item: dict[str, Any] | None = None
+        claimed_id = 0
+        claim_finalized = False
+        degraded_note = self._append_note(preflight_index_note or "", sync_note)
+        if queue_advisory:
+            degraded_note = self._append_note(degraded_note, queue_advisory)
+        try:
+            refresh_note = self._profile_call(
+                "news_pool_refresh_if_needed",
+                lambda: self._refresh_news_pool_if_needed(force=False),
+                slow_ms=2600,
+            )
+            degraded_note = self._append_note(degraded_note, refresh_note)
+            queued_now = self.news_pool_store.queued_count(
+                days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7))
+            )
+            min_items = max(20, int(getattr(self.settings.sources, "news_pool_min_items", 80) or 80))
+            if queued_now < min_items:
+                force_note = self._profile_call(
+                    "news_pool_refresh_force",
+                    lambda: self._refresh_news_pool_if_needed(force=True),
+                    slow_ms=2600,
+                )
+                degraded_note = self._append_note(
+                    degraded_note,
+                    self._append_note(force_note, f"news_pool_low={queued_now}/{min_items}"),
+                )
+            claimed_item = self._profile_call(
+                "news_pool_claim",
+                lambda: self._claim_news_item(force_refresh_once=True),
+                slow_ms=1800,
+            )
+            if not claimed_item:
+                hold_reason = "news_pool_empty"
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title="",
+                        source_url="",
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+
+            claimed_id = int((claimed_item or {}).get("id", 0) or 0)
+            selected = self._news_item_to_candidate(claimed_item)
+            category = str((selected.meta or {}).get("news_category", "platform") or "platform").strip().lower() or "platform"
+            global_keywords = list(getattr(selected, "long_tail_keywords", []) or [])[:8]
+            reason = f"news_pool_claimed={claimed_id};category={category}"
+            labels = self._build_public_labels(
+                title=selected.title,
+                candidate=selected,
+                global_keywords=global_keywords,
+                max_labels=6,
+            )
+            working_draft_id, collect_note = self._sync_stage_draft_checkpoint(
+                current_draft_post_id=working_draft_id,
+                stage="collect_done",
+                title=selected.title,
+                html_body=f"<h2>News Topic Claimed</h2><p>{escape(selected.title)}</p>",
+                labels=labels,
+                reason=reason,
+            )
+            degraded_note = self._append_note(degraded_note, collect_note)
+
+            self._progress("draft", "뉴스 본문 초안 생성", 36)
+            api_ready = bool(
+                (self.settings.gemini.api_key or "").strip()
+                and (self.settings.gemini.api_key or "").strip() != "GEMINI_API_KEY"
+            )
+            draft: DraftPost | None = None
+            reference_guidance = self.references.build_guidance()
+            if api_ready and self._gemini_budget_remaining() > 0:
+                try:
+                    draft = self.brain.generate_news_post(
+                        selected,
+                        self.settings.authority_links,
+                        reference_guidance,
+                        category=category,
+                        plan={"primary_keyword": selected.title, "news_category": category},
+                    )
+                    if self.brain.call_count:
+                        self.logs.increment_today_gemini_count(self.brain.call_count)
+                        self.brain.reset_run_counter()
+                except Exception as exc:
+                    if self.brain.call_count:
+                        self.logs.increment_today_gemini_count(self.brain.call_count)
+                        self.brain.reset_run_counter()
+                    degraded_note = self._append_note(degraded_note, f"news_gemini_failed={str(exc)[:120]}")
+            if draft is None:
+                draft = self._build_news_post_local_fallback(selected, category, self.settings.authority_links)
+                degraded_note = self._append_note(degraded_note, "news_local_fallback_draft")
+
+            draft.title = self._enforce_seo_title(
+                title=draft.title,
+                candidate=selected,
+                global_keywords=global_keywords,
+                preferred_keyword=selected.title,
+            )
+            self._ensure_min_long_tail_keywords(
+                candidate=selected,
+                title=draft.title,
+                global_keywords=global_keywords,
+            )
+            global_keywords = list(getattr(selected, "long_tail_keywords", []) or [])[:8]
+            current_domain = self._news_domain
+            base_html = self._sanitize_publish_html(draft.html, domain=current_domain)
+            base_html = self._canonicalize_html_payload(base_html)
+            base_html += self._build_internal_links_block(
+                current_title=draft.title,
+                current_keywords=global_keywords,
+                current_device_type="news",
+                current_cluster_id=category,
+            )
+            final_html = self._sanitize_publish_html(base_html, domain=current_domain)
+            final_html = self._canonicalize_html_payload(final_html)
+
+            self._progress("qa", "품질 게이트 점검", 56)
+            qa_result = self._qa_evaluate(
+                final_html,
+                title=draft.title,
+                domain=current_domain,
+                keyword=selected.title,
+                context="news_initial",
+            )
+            if self.settings.quality.enabled and self.settings.quality.strict_mode:
+                min_quality = int(getattr(self.settings.quality, "min_quality_score", 85) or 85)
+                if qa_result.score < min_quality:
+                    improved = self.qa.satisfy_requirements(final_html, qa_result)
+                    if improved != final_html:
+                        final_html = self._canonicalize_html_payload(improved)
+                        qa_result = self._qa_evaluate(
+                            final_html,
+                            title=draft.title,
+                            domain=current_domain,
+                            keyword=selected.title,
+                            context="news_strict_complete",
+                        )
+                if qa_result.score < min_quality:
+                    hold_reason = f"qa_below_threshold:{qa_result.score}/{min_quality}"
+                    self.logs.append_run(
+                        RunRecord(
+                            status="hold",
+                            score=qa_result.score,
+                            title=draft.title,
+                            source_url=draft.source_url,
+                            published_url="",
+                            note=self._append_note(hold_reason, degraded_note),
+                        )
+                    )
+                    self._workflow_perf_finish_run("hold", hold_reason)
+                    return WorkflowResult("hold", hold_reason)
+
+            actionability = self._evaluate_actionability_gate(draft.title, final_html)
+            if not actionability.ok:
+                hold_reason = "actionability_gate_failed:" + ",".join(actionability.reasons[:4])
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=int(actionability.score),
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+
+            self._progress("visual", "뉴스 이미지/썸네일 구성", 72)
+            target_images = max(5, int(getattr(self.settings.visual, "target_images_per_post", 5) or 5))
+            images = self._profile_call(
+                "image_library_pick_news",
+                lambda: pick_images(
+                    title=f"{category} {draft.title}",
+                    min_count=target_images,
+                    root=self.root,
+                ),
+                slow_ms=2000,
+            )
+            images = self.visual.ensure_unique_assets(images)
+            if len(images) < target_images:
+                hold_reason = f"image_library_shortage({len(images)}/{target_images})"
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+            hook_text = self.visual.pick_thumbnail_hook(category=category, title=draft.title)
+            self.visual.apply_news_thumbnail_overlay(images[0].path, hook_text)
+
+            dry_run = bool(getattr(self.settings.budget, "dry_run", False))
+            preflight_thumb_src = ""
+            if dry_run:
+                gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
+            else:
+                images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
+                    draft=draft,
+                    candidate=selected,
+                    images=images,
+                    prompt_plan={"source": "news_library"},
+                    max_attempts=3,
+                    manual_trigger=manual_trigger,
+                )
+                creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
+                gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
+                    final_html,
+                    images,
+                    creds_for_gate,
+                    preflight_thumbnail_src=preflight_thumb_src,
+                )
+
+            go_live_errors, go_live_warnings = self._go_live_gate_checklist(
+                title=draft.title,
+                final_html=final_html,
+                gate_html=gate_preview_html,
+                images=images,
+                candidate=selected,
+            )
+            if go_live_errors:
+                hold_reason = "go_live_gate_failed:" + ",".join(go_live_errors[:4])
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+            if go_live_warnings:
+                degraded_note = self._append_note(degraded_note, "go_live_warnings=" + ",".join(go_live_warnings[:3]))
+
+            labels = self._build_public_labels(
+                title=draft.title,
+                candidate=selected,
+                global_keywords=global_keywords,
+                max_labels=6,
+            )
+            meta_description = self._build_meta_description(draft.title, draft.summary, final_html)
+            working_draft_id, image_note = self._sync_stage_draft_checkpoint(
+                current_draft_post_id=working_draft_id,
+                stage="images_done",
+                title=draft.title,
+                html_body=final_html,
+                labels=labels,
+                reason=f"news_pool_id={claimed_id};images={len(images)}",
+            )
+            degraded_note = self._append_note(degraded_note, image_note)
+
+            if dry_run:
+                if claimed_id:
+                    self.news_pool_store.rollback_claim(claimed_id)
+                    claim_finalized = True
+                dry_path = self.root / "storage" / "logs" / f"dry_run_news_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.html"
+                dry_path.parent.mkdir(parents=True, exist_ok=True)
+                dry_path.write_text(gate_preview_html, encoding="utf-8")
+                self.logs.append_run(
+                    RunRecord(
+                        status="success",
+                        score=int(qa_result.score),
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="dry-run://not-published",
+                        note=self._append_note(
+                            f"Dry-run news success;news_pool_id={claimed_id};category={category};images={len(images)};dry_html={dry_path.name}",
+                            degraded_note,
+                        ),
+                    )
+                )
+                self._remember_title_fingerprint(draft.title)
+                self._workflow_perf_finish_run("success", "dry-run://not-published")
+                return WorkflowResult("success", "dry-run://not-published")
+
+            self._progress("schedule", "예약 시간 계산", 84)
+            publish_at = self._compute_publish_at()
+            if publish_at is None:
+                publish_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+                degraded_note = self._append_note(degraded_note, "schedule_fallback_used")
+
+            self._progress("publish", "Blogger 예약 발행 처리", 92)
+            published = self.publisher.publish_post(
+                draft.title,
+                final_html,
+                images,
+                labels,
+                publish_at=publish_at,
+                existing_draft_post_id=(working_draft_id or None),
+                meta_description=meta_description,
+                preflight_thumbnail_src=preflight_thumb_src,
+            )
+            if claimed_id:
+                self.news_pool_store.mark_used(claimed_id, str(getattr(published, "url", "") or ""))
+                claim_finalized = True
+
+            self.logs.add_scheduled_post(
+                publish_at=publish_at.isoformat(),
+                post_id=published.post_id,
+                title=draft.title,
+                source_url=draft.source_url,
+                published_url=published.url,
+            )
+            self.logs.append_run(
+                RunRecord(
+                    status="success",
+                    score=int(max(70, qa_result.score)),
+                    title=draft.title,
+                    source_url=draft.source_url,
+                    published_url=published.url,
+                    note=self._append_note(
+                        (
+                            f"Published news successfully;news_pool_id={claimed_id};category={category};"
+                            f"images={len(images)};qa={qa_result.score};"
+                            f"total_gemini_calls={max(0, int(self.logs.get_today_gemini_count()) - int(today_gemini_before))}"
+                        ),
+                        degraded_note,
+                    ),
+                )
+            )
+            self._remember_title_fingerprint(draft.title)
+            self._cleanup_local_image_files(images)
+            self._mark_active_slot("consumed", "publish_success", post_id=str(getattr(published, "post_id", "") or ""))
+            msg = f"{published.url} (scheduled: {publish_at.isoformat()})"
+            self._workflow_perf_finish_run("success", msg)
+            return WorkflowResult("success", msg)
+        except Exception as exc:
+            hold_reason = str(exc)[:240] or "news_mode_error"
+            self.logs.append_run(
+                RunRecord(
+                    status="hold",
+                    score=0,
+                    title=str((claimed_item or {}).get("title", "") or ""),
+                    source_url=str((claimed_item or {}).get("url", "") or ""),
+                    published_url="",
+                    note=self._append_note(f"news_mode_hold:{hold_reason}", degraded_note),
+                )
+            )
+            self._mark_active_slot("hold", hold_reason)
+            self._workflow_perf_finish_run("hold", hold_reason)
+            return WorkflowResult("hold", hold_reason)
+        finally:
+            if claimed_id and (not claim_finalized):
+                try:
+                    self.news_pool_store.rollback_claim(claimed_id)
+                except Exception:
+                    pass
+
     def run_once(self, manual_trigger: bool = False) -> WorkflowResult:
         self._workflow_perf_start_run(manual_trigger=bool(manual_trigger))
         self._pending_keyword_claims = []
@@ -1538,6 +2166,15 @@ class AgentWorkflow:
             self.topic_grower.maybe_grow(existing_titles)
         except Exception:
             pass
+        if is_news_mode(self.settings):
+            return self._run_once_news_mode(
+                manual_trigger=bool(manual_trigger),
+                queue_advisory=queue_advisory,
+                sync_note=sync_note,
+                preflight_index_note=preflight_index_note,
+                blog_snapshot=blog_snapshot,
+                today_gemini_before=today_gemini_before,
+            )
 
         self._progress("collect", "콘텐츠 소스 수집 중", 18)
         working_draft_id = ""
@@ -3188,6 +3825,19 @@ class AgentWorkflow:
         if candidate is None:
             return False
         mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
+        if mode == "tech_news_only":
+            text = (
+                f"{str(getattr(candidate, 'title', '') or '')}\n"
+                f"{str(getattr(candidate, 'body', '') or '')}"
+            ).lower()
+            banned = [
+                str(x or "").strip().lower()
+                for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
+                if str(x or "").strip()
+            ]
+            if any(tok in text for tok in banned):
+                return False
+            return True
         if mode != "tech_troubleshoot_only":
             return True
         text = (
@@ -3233,6 +3883,8 @@ class AgentWorkflow:
 
     def _infer_domain_from_title(self, title: str) -> str:
         mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
+        if mode == "tech_news_only":
+            return self._news_domain
         if mode == "tech_troubleshoot_only":
             return "tech_troubleshoot"
         lower = str(title or "").lower()
@@ -3368,6 +4020,20 @@ class AgentWorkflow:
 
     def _infer_cluster_id_from_keyword(self, keyword: str) -> str:
         text = re.sub(r"\s+", " ", str(keyword or "").strip().lower())
+        if is_news_mode(self.settings):
+            if any(k in text for k in ("security", "vulnerability", "cve", "patch", "breach", "malware", "ransomware")):
+                return "security"
+            if any(k in text for k in ("privacy", "policy", "regulation", "ban", "tracking", "consent")):
+                return "policy"
+            if any(k in text for k in ("ai", "model", "openai", "anthropic", "gemini", "copilot", "claude")):
+                return "ai"
+            if any(k in text for k in ("iphone", "ios", "android", "galaxy", "pixel", "mobile")):
+                return "mobile"
+            if any(k in text for k in ("chip", "gpu", "semiconductor", "nvidia", "intel", "amd")):
+                return "chips"
+            if any(k in text for k in ("privacy",)):
+                return "privacy"
+            return "platform"
         if any(k in text for k in ("bluetooth", "wifi", "network", "internet")):
             return "connectivity"
         if any(k in text for k in ("audio", "sound", "mic", "speaker")):
@@ -3642,9 +4308,18 @@ class AgentWorkflow:
                 push(" ".join(words))
         for tok in self._extract_title_label_tokens(title, limit=10):
             push(tok)
+        if candidate is not None and is_news_mode(self.settings):
+            category = re.sub(
+                r"\s+",
+                " ",
+                str((getattr(candidate, "meta", {}) or {}).get("news_category", "") or ""),
+            ).strip().lower()
+            push(category)
+            push("tech-news")
+            push("news-explainer")
 
         if not labels:
-            labels = ["tech-fix", "troubleshooting"]
+            labels = ["tech-news", "news-explainer"] if is_news_mode(self.settings) else ["tech-fix", "troubleshooting"]
         return labels[: max(1, int(max_labels))]
 
     def _set_image_pipeline_state(self, status: str, passed: int, target: int, message: str) -> None:
@@ -4483,6 +5158,36 @@ class AgentWorkflow:
         for phrase in banned_phrases:
             raw = re.sub(re.escape(phrase), "", raw, flags=re.IGNORECASE)
         mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
+        if mode == "tech_news_only":
+            raw = re.sub(r"\s+", " ", raw).strip(" -:")
+            category_hint = ""
+            if isinstance(candidate, TopicCandidate):
+                category_hint = re.sub(
+                    r"\s+",
+                    " ",
+                    str((getattr(candidate, "meta", {}) or {}).get("news_category", "") or ""),
+                ).strip().lower()
+            keyword_hint = re.sub(r"\s+", " ", str(pref or base_candidate_title or raw)).strip()
+            templates = [
+                f"{keyword_hint}: what changed for users",
+                f"{keyword_hint}: what it means and what to do now",
+                f"{keyword_hint}: who is affected and what to watch next",
+            ]
+            if category_hint in {"security", "policy", "privacy", "ai", "platform", "mobile", "chips"}:
+                templates.insert(0, f"{keyword_hint} {category_hint} update: what changes for users")
+            candidate_title = templates[0] if len(raw) < 30 else raw
+            candidate_title = re.sub(
+                r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
+                "",
+                candidate_title,
+                flags=re.IGNORECASE,
+            )
+            candidate_title = re.sub(r"\s+", " ", candidate_title).strip(" -:")
+            if len(candidate_title) > 95:
+                candidate_title = candidate_title[:95].rstrip(" ,.;:")
+            if len(candidate_title) < 42:
+                candidate_title = templates[min(1, len(templates) - 1)][:95]
+            return candidate_title
         banned_topics = [
             str(x or "").strip().lower()
             for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
@@ -4867,23 +5572,48 @@ class AgentWorkflow:
             if not self.publisher._is_allowed_image_url(clean_src, allow_data_uri=False):  # noqa: SLF001
                 errors.append(f"invalid_image_host:{host}")
 
-        # Troubleshooting title quality check.
+        # Title quality check.
         title_lower = str(title or "").lower()
-        req_tokens = [
-            str(x or "").strip().lower()
-            for x in (getattr(self.settings.content_mode, "required_title_tokens_any", []) or [])
-            if str(x or "").strip()
-        ] or ["not working", "fix", "error", "after update"]
-        if not any(tok in title_lower for tok in req_tokens):
-            errors.append("title_missing_troubleshoot_token")
-        banned_topic = [
-            str(x or "").strip().lower()
-            for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
-            if str(x or "").strip()
-        ]
-        banned_hit = next((tok for tok in banned_topic if tok in title_lower), "")
-        if banned_hit:
-            errors.append(f"title_banned_topic:{banned_hit}")
+        news_mode = is_news_mode(self.settings)
+        if not news_mode:
+            req_tokens = [
+                str(x or "").strip().lower()
+                for x in (getattr(self.settings.content_mode, "required_title_tokens_any", []) or [])
+                if str(x or "").strip()
+            ] or ["not working", "fix", "error", "after update"]
+            if not any(tok in title_lower for tok in req_tokens):
+                errors.append("title_missing_troubleshoot_token")
+        else:
+            if re.search(
+                r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
+                title_lower,
+                flags=re.IGNORECASE,
+            ):
+                errors.append("title_clickbait_forbidden")
+            if re.search(
+                r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
+                merged,
+                flags=re.IGNORECASE,
+            ):
+                errors.append("body_clickbait_forbidden")
+            if re.search(r"\bleak\b", merged, flags=re.IGNORECASE):
+                if not re.search(
+                    r"(according to[^<\n]{0,140}\bleak\b|\bleak\b[^<\n]{0,140}according to)",
+                    merged,
+                    flags=re.IGNORECASE,
+                ):
+                    errors.append("unattributed_leak_claim")
+            if re.search(r"\b(article screenshot|logo misuse|watermark)\b", merged, flags=re.IGNORECASE):
+                errors.append("legal_image_policy_violation")
+        if not news_mode:
+            banned_topic = [
+                str(x or "").strip().lower()
+                for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
+                if str(x or "").strip()
+            ]
+            banned_hit = next((tok for tok in banned_topic if tok in title_lower), "")
+            if banned_hit:
+                errors.append(f"title_banned_topic:{banned_hit}")
 
         # Operator checklist visibility for robots mobile duplicate policy.
         mobile_block = str(
@@ -5108,6 +5838,29 @@ class AgentWorkflow:
 
         for kw in current:
             _push(kw)
+
+        if is_news_mode(self.settings):
+            subject_news = re.sub(
+                r"\s+",
+                " ",
+                str(title or getattr(candidate, "title", "") or "tech update").strip(),
+            )
+            for kw in (global_keywords or [])[:6]:
+                token = re.sub(r"\s+", " ", str(kw or "")).strip()
+                if not token:
+                    continue
+                _push(f"what changed in {token}")
+                _push(f"who is affected by {token}")
+                _push(f"should you update now for {token}")
+                _push(f"what to watch next for {token}")
+            if len(out) < 5:
+                _push(f"what changed in {subject_news}")
+                _push(f"who is affected by {subject_news}")
+                _push(f"should you update now for {subject_news}")
+                _push(f"what to do now for {subject_news}")
+                _push(f"what to watch next for {subject_news}")
+            candidate.long_tail_keywords = out[:8]
+            return
 
         entity = re.sub(r"\s+", " ", str(getattr(candidate, "main_entity", "") or "")).strip()
         base_title = re.sub(r"\s+", " ", str(title or getattr(candidate, "title", "") or "")).strip()
@@ -6268,6 +7021,7 @@ class AgentWorkflow:
         if body_link_count + related_link_count <= 0:
             return ""
 
+        news_mode = is_news_mode(self.settings)
         device = str(current_device_type or self._infer_device_type(current_title)).strip().lower() or "windows"
         cluster = str(current_cluster_id or self._infer_cluster_id_from_keyword(current_title)).strip().lower() or "general"
         current_kw = self._parse_focus_keywords(current_keywords or current_title)
@@ -6291,6 +7045,11 @@ class AgentWorkflow:
             row_device = str((row or {}).get("device_type", "") or "").strip().lower()
             row_cluster = str((row or {}).get("cluster_id", "") or "").strip().lower()
             row_kw = self._parse_focus_keywords(str((row or {}).get("focus_keywords", "") or ""))
+            if news_mode:
+                if row_cluster == cluster:
+                    ov_news = self._keyword_overlap(current_kw, row_kw)
+                    secondary.append((max(ov_news, 0.25), row))
+                continue
             if row_device == device and row_cluster == cluster:
                 primary.append(row)
                 continue
@@ -6337,9 +7096,13 @@ class AgentWorkflow:
             lis = []
             for row in related_links:
                 anchor = self._clean_anchor_text(str((row or {}).get("title", "") or "Related post"))
+                anchor = re.sub(r"\bfix guide\b", "", anchor, flags=re.IGNORECASE).strip() or "Related post"
                 url = str((row or {}).get("url", "") or "").strip()
                 lis.append(f'<li><a href="{url}" rel="noopener">{escape(anchor)}</a></li>')
-            block_parts.append("<h2>More Fix Guides You Might Like</h2><ul>" + "".join(lis) + "</ul>")
+            if news_mode:
+                block_parts.append("<h2>Related Coverage</h2><ul>" + "".join(lis) + "</ul>")
+            else:
+                block_parts.append("<h2>More Fix Guides You Might Like</h2><ul>" + "".join(lis) + "</ul>")
         return "".join(block_parts)
 
     def _clean_anchor_text(self, title: str) -> str:

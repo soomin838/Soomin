@@ -377,6 +377,89 @@ class GeminiBrain:
             extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
         )
 
+    def generate_news_post(
+        self,
+        candidate: TopicCandidate,
+        authority_links: list[str],
+        reference_guidance: str,
+        category: str,
+        plan: dict | None = None,
+    ) -> DraftPost:
+        plan_payload = dict(plan or {})
+        category_norm = re.sub(r"\s+", " ", str(category or "platform").strip().lower()) or "platform"
+        primary_topic = re.sub(
+            r"\s+",
+            " ",
+            str(plan_payload.get("primary_keyword", "") or candidate.title or "").strip(),
+        )[:160]
+        source_link = str(getattr(candidate, "url", "") or "").strip()
+        safe_authorities = [
+            re.sub(r"\s+", " ", str(x or "").strip())
+            for x in (authority_links or [])
+            if str(x or "").strip()
+        ][:8]
+        prompt = (
+            "Write a US tech news explainer article in valid HTML body fragment only.\n"
+            "Language policy: US English only. Never output Korean.\n"
+            "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
+            "Tone: factual, concise, ad-safe, and attribution-first.\n"
+            "No defamation. No unverified allegations.\n"
+            "Use attribution phrasing for uncertain claims: reported, may, could, according to.\n"
+            "Required exact H2 section order:\n"
+            "Quick Take\n"
+            "What Happened\n"
+            "Why It Matters (for normal users)\n"
+            "What To Do Now\n"
+            "Key Details\n"
+            "What To Watch Next\n"
+            "Sources\n"
+            "What To Do Now must include 3-7 bullet steps.\n"
+            "Sources must include the original source URL and 1-2 authority links when available.\n"
+            "No screenshots, no logo references, no copyright-sensitive image instructions.\n"
+            "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n"
+            "focus_keywords must be a JSON array.\n"
+            f"News category: {category_norm}\n"
+            f"Primary topic phrase: {primary_topic}\n"
+            f"Original source URL: {source_link}\n"
+            f"Authority links allow-list: {safe_authorities}\n"
+            f"Reference guidance: {reference_guidance}\n"
+            f"Plan JSON: {json.dumps(plan_payload, ensure_ascii=False) if plan_payload else '{}'}\n"
+            f"Source title: {candidate.title}\n"
+            f"Source body: {candidate.body[:4000]}\n"
+        )
+        payload = self._extract_json(
+            self._generate_text(
+                prompt,
+                system_instruction=(
+                    "You are a senior US tech news editor writing practical explainers for mainstream readers. "
+                    "Be precise, actionable, and legally careful."
+                ),
+            )
+        )
+        html = self._remove_ai_markers(
+            str(payload.get("content_html", payload.get("html", ""))),
+            domain="tech_news_explainer",
+        )
+        html = self._enforce_html_minimum(html)
+        _focus_keywords = payload.get("focus_keywords", [])
+        if not isinstance(_focus_keywords, list):
+            _focus_keywords = []
+        urls = payload.get("extracted_urls", [])
+        if not isinstance(urls, list):
+            urls = []
+        out_title = str(payload.get("title_draft", payload.get("title", candidate.title))).strip() or candidate.title
+        if primary_topic and primary_topic.lower() not in out_title.lower():
+            out_title = f"{out_title}: {primary_topic}".strip(" :")
+        return DraftPost(
+            title=out_title[:110],
+            alt_titles=[],
+            summary=str(payload.get("summary", "")).strip()[:500],
+            html=html,
+            score=100,
+            source_url=source_link,
+            extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
+        )
+
     def rewrite_to_actionable(self, title: str, html: str, plan: dict | None = None) -> str:
         plan_payload = plan if isinstance(plan, dict) else {}
         prompt = (

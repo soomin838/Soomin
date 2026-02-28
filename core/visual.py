@@ -835,14 +835,32 @@ class VisualPipeline:
         role: str = "section",
     ) -> str:
         keywords = self._extract_local_visual_keywords(paragraph, title, max_keywords=6)
-        keyword_block = ", ".join(keywords) if keywords else "device, troubleshooting, fix, reliability"
-        context_hint = self._context_snippet(paragraph)[:260]
-        base = (
-            "Create one realistic photo-style image based on this article context. "
-            f"Keywords: {keyword_block}. "
-            "Keep it natural and specific to the context. "
-            "No text, no letters, no logo, no watermark."
+        merged = f"{title} {paragraph}".lower()
+        news_like = bool(
+            re.search(
+                r"\b(security|policy|privacy|ai|model|chips|platform|update|regulation|breach|cve)\b",
+                merged,
+            )
         )
+        if news_like:
+            keyword_block = ", ".join(keywords) if keywords else "tech news, editorial, abstract, infographic, modern, minimal"
+        else:
+            keyword_block = ", ".join(keywords) if keywords else "device, troubleshooting, fix, reliability"
+        context_hint = self._context_snippet(paragraph)[:260]
+        if news_like:
+            base = (
+                "Create one text-free editorial tech-news background image. "
+                f"Keywords: {keyword_block}. "
+                "Abstract modern tech shapes, high contrast, no logos, no screenshots. "
+                "No text, no letters, no logo, no watermark."
+            )
+        else:
+            base = (
+                "Create one realistic photo-style image based on this article context. "
+                f"Keywords: {keyword_block}. "
+                "Keep it natural and specific to the context. "
+                "No text, no letters, no logo, no watermark."
+            )
         if context_hint:
             base += f" Context hint: {context_hint}."
         return re.sub(r"\s+", " ", base).strip()[:900]
@@ -909,13 +927,19 @@ class VisualPipeline:
         keyword: str,
         role: str = "content",
     ) -> ImageAsset | None:
-        prompt_text = self._enforce_software_troubleshoot_prompt(
-            self._enforce_no_text_rule(re.sub(r"\s+", " ", str(prompt or "")).strip())
-        )
+        prompt_text = self._enforce_no_text_rule(re.sub(r"\s+", " ", str(prompt or "")).strip())
+        if self._looks_like_news_prompt(prompt_text):
+            prompt_text = self._enforce_news_visual_prompt(prompt_text)
+        else:
+            prompt_text = self._enforce_software_troubleshoot_prompt(prompt_text)
         if not prompt_text:
-            prompt_text = self._enforce_software_troubleshoot_prompt(
-                self._enforce_no_text_rule(self._fallback_prompt(paragraph, keyword, variation_index=index, role=role))
+            fallback_prompt = self._enforce_no_text_rule(
+                self._fallback_prompt(paragraph, keyword, variation_index=index, role=role)
             )
+            if self._looks_like_news_prompt(fallback_prompt):
+                prompt_text = self._enforce_news_visual_prompt(fallback_prompt)
+            else:
+                prompt_text = self._enforce_software_troubleshoot_prompt(fallback_prompt)
 
         if not self.gemini_api_key:
             self._log_visual_event(
@@ -1153,6 +1177,29 @@ class VisualPipeline:
             text = f"{text}. software troubleshooting checklist flow diagram"
         text += " no physical hazards, no damaged hardware"
         return re.sub(r"\s+", " ", text).strip()[:900]
+
+    def _looks_like_news_prompt(self, prompt: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(news|editorial|security|policy|privacy|platform|chips|ai update|what changed)\b",
+                str(prompt or "").lower(),
+            )
+        )
+
+    def _enforce_news_visual_prompt(self, prompt: str) -> str:
+        text = re.sub(r"\s+", " ", str(prompt or "")).strip()
+        text = re.sub(
+            r"\b(software troubleshooting|troubleshooting|fix flow|fix checklist|fix guide)\b",
+            "tech news editorial background",
+            text,
+            flags=re.IGNORECASE,
+        )
+        addons = (
+            " tech news editorial thumbnail background, minimal abstract tech shapes, "
+            "no logos, no screenshots, no trademark icons, no text"
+        )
+        text = f"{text}{addons}".strip()
+        return re.sub(r"\s+", " ", text)[:900]
 
     def _validate_generated_asset(
         self,
@@ -1611,6 +1658,15 @@ class VisualPipeline:
 
     def _build_alt_text(self, subject: str, context: str) -> str:
         s = re.sub(r"\s+", " ", str(subject or "").strip()) or "the workflow"
+        merged = f"{subject} {context}".lower()
+        if re.search(r"\b(news|security|policy|privacy|ai|platform|chips|update)\b", merged):
+            news_templates = [
+                "Editorial illustration supporting this tech news section.",
+                "Abstract visual background for a technology news explainer.",
+                "Minimal tech-news graphic used to support the article context.",
+                "Editorial-style illustration for a software update news story.",
+            ]
+            return random.choice(news_templates)[:180]
         templates = [
             "Minimal diagram explaining the main troubleshooting steps.",
             "Practical workflow diagram aligned with this section.",
@@ -2114,6 +2170,83 @@ class VisualPipeline:
             y = y0 + int(panel_h * 0.20)
             draw.text((x, y), text_value, font=title_font, fill=(255, 255, 255, 255))
             canvas.convert("RGB").save(path, quality=92)
+        except Exception:
+            return
+
+    def pick_thumbnail_hook(self, category: str, title: str) -> str:
+        cat = re.sub(r"\s+", " ", str(category or "").strip().lower()) or "platform"
+        bank = {
+            "security": ["SECURITY ALERT", "PATCH NOW", "DATA RISK"],
+            "policy": ["NEW POLICY", "BIG CHANGE", "WHAT IT MEANS"],
+            "privacy": ["NEW POLICY", "BIG CHANGE", "WHAT IT MEANS"],
+            "ai": ["AI UPDATE", "MODEL SHIFT", "NEW TOOLS"],
+            "mobile": ["MAJOR UPDATE", "WHAT CHANGED", "NEW FEATURE"],
+            "platform": ["MAJOR UPDATE", "WHAT CHANGED", "NEW FEATURE"],
+            "chips": ["CHIP RACE", "NEW GPU", "PRICE SHIFT"],
+        }
+        hooks = list(bank.get(cat, bank["platform"]))
+        clean_title = re.sub(r"\s+", " ", str(title or "").strip().upper())
+        for bad in ("SCAM", "DISASTER", "EXPOSED", "CRIMINAL"):
+            clean_title = clean_title.replace(bad, "")
+        brand_names = ("APPLE", "GOOGLE", "MICROSOFT", "OPENAI", "NVIDIA", "SAMSUNG")
+        for bn in brand_names:
+            clean_title = clean_title.replace(bn, "")
+        if clean_title:
+            toks = [t for t in re.findall(r"[A-Z]{3,}", clean_title) if t not in {"UPDATE", "NEWS", "TECH"}]
+            if toks:
+                candidate = " ".join(toks[:2]).strip()
+                if 4 <= len(candidate) <= 24:
+                    hooks.insert(0, candidate)
+        return hooks[0]
+
+    def apply_news_thumbnail_overlay(self, path: Path, hook_text: str) -> None:
+        if not bool(getattr(self.visual_settings, "thumbnail_text_overlay_enabled", True)):
+            return
+        if not path or not Path(path).exists():
+            return
+        text = re.sub(r"[^A-Za-z0-9\s]", " ", str(hook_text or "").upper())
+        text = re.sub(r"\s+", " ", text).strip()
+        max_words = max(1, int(getattr(self.visual_settings, "thumbnail_text_max_words", 3) or 3))
+        text = " ".join(text.split()[:max_words]).strip()
+        if not text:
+            return
+        try:
+            image = Image.open(path).convert("RGBA")
+            w, h = image.size
+            # Bottom gradient panel for high contrast text.
+            panel = Image.new("RGBA", image.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(panel)
+            panel_h = int(h * 0.33)
+            y0 = h - panel_h
+            for row in range(panel_h):
+                alpha = int(20 + (220 * (row / max(1, panel_h - 1))))
+                draw.rectangle([(0, y0 + row), (w, y0 + row + 1)], fill=(14, 18, 30, alpha))
+            image = Image.alpha_composite(image, panel)
+            draw = ImageDraw.Draw(image)
+
+            font_candidates = [
+                "C:/Windows/Fonts/segoeuib.ttf",
+                "C:/Windows/Fonts/arialbd.ttf",
+                "C:/Windows/Fonts/verdanab.ttf",
+            ]
+            font = None
+            target_size = max(42, int(w * 0.072))
+            for fp in font_candidates:
+                try:
+                    font = ImageFont.truetype(fp, target_size)
+                    break
+                except Exception:
+                    continue
+            if font is None:
+                font = ImageFont.load_default()
+
+            x = int(w * 0.05)
+            y = int(h * 0.74)
+            # Soft stroke for readability.
+            for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
+                draw.text((x + ox, y + oy), text, font=font, fill=(0, 0, 0, 235))
+            draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+            image.convert("RGB").save(path, quality=92)
         except Exception:
             return
 

@@ -31,7 +31,7 @@ class MonthlySchedulerSettings:
 
 @dataclass
 class SourceSettings:
-    mode: str = "mixed"
+    mode: str = "news_pool"
     seeds_path: str = "storage/seeds/seeds.json"
     stackexchange_site: str = "superuser"
     stackexchange_tagged: str = "windows-11;macos;iphone;android;audio;drivers;networking"
@@ -48,6 +48,23 @@ class SourceSettings:
     github_min_reactions: int = 2
     github_token: str = ""
     max_candidates: int = 20
+    news_pool_days: int = 7
+    news_pool_min_items: int = 80
+    news_pool_max_items: int = 800
+    news_pool_refresh_interval_minutes: int = 120
+    news_pool_feeds: list[str] = field(
+        default_factory=lambda: [
+            "https://techcrunch.com/feed/",
+            "https://www.theverge.com/rss/index.xml",
+            "https://www.wired.com/feed/rss",
+            "https://venturebeat.com/feed/",
+        ]
+    )
+    news_pool_keywords_allow: list[str] = field(default_factory=list)
+    news_pool_keywords_block: list[str] = field(default_factory=list)
+    news_pool_source_weights: dict[str, float] = field(default_factory=dict)
+    news_pool_pick_top_k: int = 60
+    news_pool_keep_used_days: int = 30
 
 
 @dataclass
@@ -94,6 +111,9 @@ class VisualSettings:
     fallback_banner: str = "assets/fallback/banner.png"
     fallback_inline: str = "assets/fallback/inline.png"
     prompt_suffix: str = "no text, no letters, no numbers, no logos, no watermark"
+    thumbnail_text_overlay_enabled: bool = True
+    thumbnail_text_style: str = "yt_clean"
+    thumbnail_text_max_words: int = 3
 
 
 @dataclass
@@ -164,13 +184,13 @@ class QualitySettings:
     humanity_weight_percent: int = 20
     humanity_min_soft_score: int = 70
     humanity_hard_fail_block: bool = True
-    min_word_count: int = 1400
-    max_word_count: int = 1900
-    min_h2: int = 6
-    min_h3: int = 2
-    min_list_items: int = 6
-    min_external_links: int = 2
-    min_authority_links: int = 2
+    min_word_count: int = 900
+    max_word_count: int = 1400
+    min_h2: int = 7
+    min_h3: int = 0
+    min_list_items: int = 3
+    min_external_links: int = 1
+    min_authority_links: int = 1
     min_external_links_tech_troubleshoot: int = 1
     min_authority_links_tech_troubleshoot: int = 1
     banned_markers: list[str] = field(
@@ -346,27 +366,44 @@ class ContentPolicySettings:
 
 @dataclass
 class ContentModeSettings:
-    mode: str = "tech_troubleshoot_only"
+    mode: str = "tech_news_only"
     allowed_devices: list[str] = field(default_factory=lambda: ["windows", "mac", "iphone", "galaxy"])
     banned_topic_keywords: list[str] = field(
         default_factory=lambda: [
-            "anthropic",
-            "openai",
-            "new ai",
-            "this week",
-            "trending",
-            "everyone is talking",
-            "workflow experiment",
+            "shocking",
+            "disaster",
+            "scam",
+            "fraud",
+            "criminal",
+            "exposed",
+            "destroyed",
+            "caught",
         ]
     )
     required_title_tokens_any: list[str] = field(
         default_factory=lambda: [
-            "not working",
-            "fix",
-            "error",
-            "after update",
+            "what changed",
+            "what it means",
+            "who is affected",
+            "what to do now",
         ]
     )
+
+
+def is_news_mode(settings: "AppSettings | None") -> bool:
+    try:
+        mode = str(getattr(getattr(settings, "content_mode", None), "mode", "") or "").strip().lower()
+    except Exception:
+        return False
+    return mode == "tech_news_only"
+
+
+def is_troubleshoot_mode(settings: "AppSettings | None") -> bool:
+    try:
+        mode = str(getattr(getattr(settings, "content_mode", None), "mode", "") or "").strip().lower()
+    except Exception:
+        return True
+    return mode != "tech_news_only"
 
 
 @dataclass

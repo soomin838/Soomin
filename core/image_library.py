@@ -28,6 +28,23 @@ CATEGORY_MAP = {
     "sound": "audio",
     "speaker": "audio",
     "microphone": "audio",
+    # News clusters
+    "security": "security",
+    "privacy": "policy",
+    "policy": "policy",
+    "ai": "ai",
+    "openai": "ai",
+    "google": "platform",
+    "apple": "mobile",
+    "microsoft": "platform",
+    "nvidia": "chips",
+    "chip": "chips",
+    "gpu": "chips",
+    "platform": "platform",
+    "iphone update": "mobile",
+    "ios update": "mobile",
+    "android update": "mobile",
+    "galaxy update": "mobile",
 }
 
 
@@ -37,6 +54,9 @@ def detect_category(title: str) -> str:
         if key in lower:
             return cat
     return "generic"
+
+
+_NEWS_CATEGORIES = {"security", "policy", "ai", "platform", "mobile", "chips"}
 
 
 def _usage_state_path(root: Path) -> Path:
@@ -166,7 +186,11 @@ def pick_images(title: str, min_count: int = 2, root: Path | None = None) -> lis
         assets.append(
             ImageAsset(
                 path=use_path,
-                alt=f"Troubleshooting process diagram for {str(title or '').strip()}.",
+                alt=(
+                    "Editorial illustration supporting this tech news section."
+                    if category in _NEWS_CATEGORIES
+                    else f"Troubleshooting process diagram for {str(title or '').strip()}."
+                ),
                 anchor_text="",
                 source_kind="library",
                 source_url=str(

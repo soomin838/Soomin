@@ -88,12 +88,13 @@ quality:
   humanity_weight_percent: 20
   humanity_min_soft_score: 70
   humanity_hard_fail_block: true
-  min_word_count: 1400
-  min_h2: 6
-  min_h3: 2
-  min_list_items: 6
-  min_external_links: 2
-  min_authority_links: 2
+  min_word_count: 900
+  max_word_count: 1400
+  min_h2: 7
+  min_h3: 0
+  min_list_items: 3
+  min_external_links: 1
+  min_authority_links: 1
   min_external_links_tech_troubleshoot: 1
   min_authority_links_tech_troubleshoot: 1
   banned_markers:
@@ -246,7 +247,7 @@ integrations:
   search_console_site_url: ""
 
 sources:
-  mode: "mixed"
+  mode: "news_pool"
   seeds_path: "storage/seeds/seeds.json"
   stackexchange_site: "superuser"
   stackexchange_tagged: "windows-11;macos;iphone;android;audio;drivers;networking"
@@ -263,6 +264,28 @@ sources:
   github_min_reactions: 2
   github_token: ""
   max_candidates: 20
+  news_pool_days: 7
+  news_pool_min_items: 80
+  news_pool_max_items: 800
+  news_pool_refresh_interval_minutes: 120
+  news_pool_feeds:
+    - "https://techcrunch.com/feed/"
+    - "https://www.theverge.com/rss/index.xml"
+    - "https://www.wired.com/feed/rss"
+    - "https://venturebeat.com/feed/"
+  news_pool_keywords_allow: []
+  news_pool_keywords_block:
+    - "deal"
+    - "coupon"
+    - "sponsored"
+    - "affiliate"
+  news_pool_source_weights:
+    "techcrunch.com": 1.0
+    "theverge.com": 1.0
+    "wired.com": 1.0
+    "venturebeat.com": 0.95
+  news_pool_pick_top_k: 60
+  news_pool_keep_used_days: 30
 
 gemini:
   api_key: "GEMINI_API_KEY"
@@ -295,6 +318,9 @@ visual:
   pollinations_timeout_sec: 0
   prompt_suffix: "no text, no letters, no numbers, no logos, no watermark"
   thumbnail_ocr_verify: false
+  thumbnail_text_overlay_enabled: true
+  thumbnail_text_style: "yt_clean"
+  thumbnail_text_max_words: 3
   screenshot_priority_keywords: []
 
 blogger:
@@ -327,21 +353,22 @@ llm:
   enable_image_generation: false
 
 content_mode:
-  mode: "tech_troubleshoot_only"
+  mode: "tech_news_only"
   allowed_devices: ["windows", "mac", "iphone", "galaxy"]
   banned_topic_keywords:
-    - "anthropic"
-    - "openai"
-    - "new ai"
-    - "this week"
-    - "trending"
-    - "everyone is talking"
-    - "workflow experiment"
+    - "shocking"
+    - "disaster"
+    - "scam"
+    - "fraud"
+    - "criminal"
+    - "exposed"
+    - "destroyed"
+    - "caught"
   required_title_tokens_any:
-    - "not working"
-    - "fix"
-    - "error"
-    - "after update"
+    - "what changed"
+    - "what it means"
+    - "who is affected"
+    - "what to do now"
 
 local_llm:
   enabled: true

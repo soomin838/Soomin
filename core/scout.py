@@ -22,6 +22,7 @@ class TopicCandidate:
     url: str
     main_entity: str = ""
     long_tail_keywords: list[str] = field(default_factory=list)
+    meta: dict[str, object] = field(default_factory=dict)
 
 
 class SourceScout:
