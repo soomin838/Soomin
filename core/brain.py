@@ -8,6 +8,8 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
+from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -37,6 +39,12 @@ class GeminiBrain:
         self._models_cache: tuple[datetime, list[str]] | None = None
         self._model_quota_blocked_until: dict[str, datetime] = {}
         self._last_request_at: datetime | None = None
+        self._news_module_rotation_path = (
+            Path(__file__).resolve().parent.parent / "storage" / "state" / "news_module_rotation.json"
+        )
+        self._news_module_log_path = (
+            Path(__file__).resolve().parent.parent / "storage" / "logs" / "news_module_rotation.jsonl"
+        )
 
     def choose_best(
         self,
@@ -385,6 +393,22 @@ class GeminiBrain:
         category: str,
         plan: dict | None = None,
     ) -> DraftPost:
+        def _render_news_html(payload_obj: dict) -> str:
+            body_html = str(payload_obj.get("content_html", payload_obj.get("html", "")) or "")
+            body_html = self._remove_ai_markers(body_html, domain="tech_news_explainer")
+            body_html = re.sub(
+                r"<h[23][^>]*>\s*faq\s*</h[23]>.*?(?=<h2\b|<h3\b|$)",
+                "",
+                body_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            body_html = self._enforce_html_minimum(body_html)
+            return self._normalize_news_sources_section(
+                html=body_html,
+                source_url=source_link,
+                authority_links=safe_authorities,
+            )
+
         module_pool = [
             "impact_by_user_type",
             "timeline_snapshot",
@@ -399,8 +423,7 @@ class GeminiBrain:
             "one_concrete_example",
             "what_to_watch_signal_list",
         ]
-        random.shuffle(module_pool)
-        selected_modules = module_pool[: random.randint(6, 8)]
+        selected_modules, _rotation_fallback, _recent_modules = self._select_news_modules(module_pool)
         plan_payload = dict(plan or {})
         category_norm = re.sub(r"\s+", " ", str(category or "platform").strip().lower()) or "platform"
         primary_topic = re.sub(
@@ -414,6 +437,15 @@ class GeminiBrain:
             for x in (authority_links or [])
             if str(x or "").strip()
         ][:8]
+        module_slots = {}
+        for module_name in selected_modules:
+            module_slots[module_name] = random.choice(
+                [
+                    "What Happened",
+                    "Key Details",
+                    "What To Watch Next",
+                ]
+            )
         prompt = (
             "Write a US tech news explainer article in valid HTML body fragment only.\n"
             "Language policy: US English only. Never output Korean.\n"
@@ -421,6 +453,9 @@ class GeminiBrain:
             "Tone: factual, concise, ad-safe, and attribution-first.\n"
             "No defamation. No unverified allegations.\n"
             "Use attribution phrasing for uncertain claims: reported, may, could, according to.\n"
+            "Do not write like a template. Vary transitions and avoid repeated phrases like 'In conclusion'.\n"
+            "Avoid uniform paragraph lengths; mix 1-line punches with longer analysis.\n"
+            "Do not write as a troubleshooting fix guide.\n"
             "Do NOT include FAQ section.\n"
             "Required exact H2 section order:\n"
             "Quick Take\n"
@@ -430,10 +465,19 @@ class GeminiBrain:
             "Key Details\n"
             "What To Watch Next\n"
             "Sources\n"
+            "Under Quick Take, include:\n"
+            "- LEDE: 2-3 short sentences\n"
+            "- NUT GRAF: exactly 1 paragraph explaining why now and why it matters\n"
+            "- Key Facts box as <ul> with exactly 5 short bullets covering Who/What/When/Scope/Risk.\n"
+            "  If unknown, write 'Not confirmed'.\n"
             "What To Do Now must include 3-7 bullet steps.\n"
             "The article must include at least 2 question sentences and one explicit comparison/example block.\n"
+            "Target depth: roughly 900-1400 words for editorial completeness.\n"
             f"Use 6-8 diversity modules from this pool: {selected_modules}\n"
-            "Sources must include the original source URL and 1-2 authority links when available.\n"
+            f"Module placement map (vary rhythm): {module_slots}\n"
+            "In Sources, show publisher-labeled links (not raw URL text).\n"
+            "Sources must include the original source URL exactly once and 1-2 authority links when available.\n"
+            "Never include google.com/search, googleusercontent, or googleapis links.\n"
             "No screenshots, no logo references, no copyright-sensitive image instructions.\n"
             "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n"
             "focus_keywords must be a JSON array.\n"
@@ -455,17 +499,26 @@ class GeminiBrain:
                 ),
             )
         )
-        html = self._remove_ai_markers(
-            str(payload.get("content_html", payload.get("html", ""))),
-            domain="tech_news_explainer",
-        )
-        html = re.sub(
-            r"<h[23][^>]*>\s*faq\s*</h[23]>.*?(?=<h2\b|<h3\b|$)",
-            "",
-            html,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        html = self._enforce_html_minimum(html)
+        html = _render_news_html(payload)
+        if self._news_requires_key_facts_retry(html):
+            retry_prompt = (
+                prompt
+                + "\n\nREWRITE REQUIRED: previous output missed Quick Take Key Facts format. "
+                "Regenerate full HTML with LEDE + NUT GRAF + exactly 5 Key Facts bullets."
+            )
+            retry_payload = self._extract_json(
+                self._generate_text(
+                    retry_prompt,
+                    system_instruction=(
+                        "You are a senior US tech news editor writing practical explainers for mainstream readers. "
+                        "Be precise, actionable, and legally careful."
+                    ),
+                )
+            )
+            retry_html = _render_news_html(retry_payload)
+            if retry_html:
+                html = retry_html
+                payload = retry_payload
         _focus_keywords = payload.get("focus_keywords", [])
         if not isinstance(_focus_keywords, list):
             _focus_keywords = []
@@ -475,6 +528,7 @@ class GeminiBrain:
         out_title = str(payload.get("title_draft", payload.get("title", candidate.title))).strip() or candidate.title
         if primary_topic and primary_topic.lower() not in out_title.lower():
             out_title = f"{out_title}: {primary_topic}".strip(" :")
+        self._save_news_module_rotation(selected_modules)
         return DraftPost(
             title=out_title[:110],
             alt_titles=[],
@@ -484,6 +538,178 @@ class GeminiBrain:
             source_url=source_link,
             extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
         )
+
+    def _load_news_module_rotation(self) -> list[str]:
+        try:
+            if not self._news_module_rotation_path.exists():
+                return []
+            payload = json.loads(self._news_module_rotation_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return []
+            recent = payload.get("recent", [])
+            if not isinstance(recent, list):
+                return []
+            out: list[str] = []
+            seen: set[str] = set()
+            for item in recent:
+                key = re.sub(r"\s+", " ", str(item or "")).strip().lower()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                out.append(key)
+            return out[:10]
+        except Exception:
+            return []
+
+    def _save_news_module_rotation(self, selected_modules: list[str]) -> None:
+        recent = self._load_news_module_rotation()
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in [*(selected_modules or []), *recent]:
+            key = re.sub(r"\s+", " ", str(item or "")).strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(key)
+        payload = {
+            "recent": merged[:10],
+            "updated_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self._news_module_rotation_path.parent.mkdir(parents=True, exist_ok=True)
+            self._news_module_rotation_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
+
+    def _select_news_modules(self, module_pool: list[str]) -> tuple[list[str], bool, list[str]]:
+        base = [str(x or "").strip().lower() for x in (module_pool or []) if str(x or "").strip()]
+        if not base:
+            return [], False, []
+        recent = self._load_news_module_rotation()
+        avoid = set(recent[:6])
+        available = [x for x in base if x not in avoid]
+        fallback_used = False
+        if len(available) < 6:
+            available = list(base)
+            fallback_used = True
+        random.shuffle(available)
+        count = random.randint(6, min(8, len(base)))
+        selected = available[:count]
+        self._log_news_module_rotation(
+            {
+                "event": "module_select",
+                "fallback_used": bool(fallback_used),
+                "recent_avoid_window": recent[:6],
+                "selected_modules": selected,
+            }
+        )
+        return selected, fallback_used, recent
+
+    def _log_news_module_rotation(self, payload: dict[str, Any]) -> None:
+        row = {"ts_utc": datetime.now(timezone.utc).isoformat()}
+        row.update(dict(payload or {}))
+        try:
+            self._news_module_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._news_module_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _source_label_from_url(self, url: str) -> str:
+        host = (urlparse(str(url or "")).netloc or "").lower().strip()
+        if not host:
+            return "Source"
+        if "security.googleblog.com" in host:
+            return "Google Security Blog"
+        if "aws.amazon.com" in host:
+            return "AWS Security Blog"
+        if "cisa.gov" in host:
+            return "CISA Advisory"
+        if "msrc.microsoft.com" in host:
+            return "Microsoft Security Response Center"
+        if "microsoft.com" in host and "security" in host:
+            return "Microsoft Security Blog"
+        if "support.apple.com" in host:
+            return "Apple Support"
+        if "cloudflare.com" in host:
+            return "Cloudflare Blog"
+        if "nist.gov" in host:
+            return "NIST Cybersecurity Framework"
+        parts = [p for p in host.split(".") if p and p not in {"www", "com", "org", "net", "gov", "co"}]
+        if not parts:
+            return "Source"
+        return " ".join(x.capitalize() for x in parts[:3]) + " Report"
+
+    def _normalize_news_sources_section(self, *, html: str, source_url: str, authority_links: list[str]) -> str:
+        src = str(html or "")
+        block = re.search(
+            r"(<h2[^>]*>\s*Sources\s*</h2>)(.*?)(?=<h2\b|$)",
+            src,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        current_section = block.group(2) if block else ""
+        urls = [
+            re.sub(r"\s+", " ", str(u or "")).strip()
+            for u in re.findall(r'href=["\']([^"\']+)["\']', current_section, flags=re.IGNORECASE)
+            if str(u or "").strip()
+        ]
+        if source_url:
+            urls.insert(0, re.sub(r"\s+", " ", str(source_url)).strip())
+        for link in authority_links[:2]:
+            urls.append(re.sub(r"\s+", " ", str(link or "")).strip())
+        clean_urls: list[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            low = url.lower()
+            if not url:
+                continue
+            if "google.com" in low or "googleusercontent.com" in low or "googleapis.com" in low:
+                continue
+            if low in seen:
+                continue
+            seen.add(low)
+            clean_urls.append(url)
+        final_urls: list[str] = []
+        if source_url:
+            final_urls.append(re.sub(r"\s+", " ", str(source_url)).strip())
+        for u in clean_urls:
+            if u.lower() not in {x.lower() for x in final_urls}:
+                final_urls.append(u)
+        items: list[str] = []
+        for idx, url in enumerate(final_urls[:3]):
+            label = "Original report" if idx == 0 and source_url else self._source_label_from_url(url)
+            items.append(f'<li><a href="{escape(url)}">{escape(label)}</a></li>')
+        if not items:
+            items.append("<li>No authoritative source available.</li>")
+        sources_html = "<h2>Sources</h2><ul>" + "".join(items) + "</ul>"
+        if block:
+            return src[: block.start()] + sources_html + src[block.end() :]
+        return src + "\n" + sources_html
+
+    def _news_requires_key_facts_retry(self, html: str) -> bool:
+        section = re.search(
+            r"<h2[^>]*>\s*Quick\s*Take\s*</h2>(.*?)(?=<h2\b|$)",
+            str(html or ""),
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not section:
+            return True
+        body = str(section.group(1) or "")
+        p_count = len(re.findall(r"<p\b[^>]*>.*?</p>", body, flags=re.IGNORECASE | re.DOTALL))
+        if p_count < 3:
+            return True
+        ul_match = re.search(r"<ul\b[^>]*>(.*?)</ul>", body, flags=re.IGNORECASE | re.DOTALL)
+        if not ul_match:
+            return True
+        lis = re.findall(r"<li\b[^>]*>(.*?)</li>", str(ul_match.group(1) or ""), flags=re.IGNORECASE | re.DOTALL)
+        if len(lis) < 5:
+            return True
+        joined = " ".join(re.sub(r"<[^>]+>", " ", x) for x in lis).lower()
+        required = ("who", "what", "when", "scope", "risk")
+        return not all(tok in joined for tok in required)
 
     def rewrite_to_actionable(self, title: str, html: str, plan: dict | None = None) -> str:
         plan_payload = plan if isinstance(plan, dict) else {}

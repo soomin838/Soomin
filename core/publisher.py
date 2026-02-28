@@ -2190,6 +2190,20 @@ class Publisher:
         pos = m.end()
         return src[:pos] + "\n" + block + "\n" + src[pos:], True
 
+    def _insert_before_heading(self, html: str, block: str, heading_pattern: str) -> tuple[str, bool]:
+        src = str(html or "")
+        if not heading_pattern:
+            return src, False
+        m = re.search(
+            rf"<h[23]\b[^>]*>.*?{heading_pattern}.*?</h[23]>",
+            src,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not m:
+            return src, False
+        pos = m.start()
+        return src[:pos] + "\n" + block + "\n" + src[pos:], True
+
     def _insert_after_paragraph_slot(self, html: str, block: str, order: int, total: int) -> str:
         src = str(html or "")
         closers = list(re.finditer(r"</p>", src, flags=re.IGNORECASE))
@@ -2206,12 +2220,6 @@ class Publisher:
         html = str(html_body or "")
         if not entries:
             return html
-        intro_text = self._first_paragraph_text(html)
-        banner_src, banner_alt = entries[0]
-        safe_banner_alt = self._regen_alt_if_too_similar(str(banner_alt or ""), intro_text)
-        banner_block = self._image_block(str(banner_src or ""), safe_banner_alt)
-        html = self._insert_banner_after_quick_take_or_first_paragraph(html, banner_block)
-
         is_news_layout = bool(
             re.search(
                 r"<h[23]\b[^>]*>\s*(What\s+Happened|Why\s+It\s+Matters|What\s+To\s+Do\s+Now|Key\s+Details|What\s+To\s+Watch\s+Next)\s*</h[23]>",
@@ -2219,27 +2227,41 @@ class Publisher:
                 flags=re.IGNORECASE | re.DOTALL,
             )
         )
+        intro_text = self._first_paragraph_text(html)
+        banner_src, banner_alt = entries[0]
+        if is_news_layout:
+            safe_banner_alt = "Editorial illustration supporting this tech news section."
+        else:
+            safe_banner_alt = self._regen_alt_if_too_similar(str(banner_alt or ""), intro_text)
+        banner_block = self._image_block(str(banner_src or ""), safe_banner_alt)
+        html = self._insert_banner_after_quick_take_or_first_paragraph(html, banner_block)
         if is_news_layout:
             inline_patterns = [
-                r"\bWhat\s+Happened\b",
-                r"\bWhy\s+It\s+Matters\b",
-                r"\bWhat\s+To\s+Do\s+Now\b",
-                r"\b(Key\s+Details|What\s+To\s+Watch\s+Next)\b",
+                ("after", r"\bWhat\s+Happened\b"),
+                ("before", r"\bWhat\s+To\s+Do\s+Now\b"),
+                ("after", r"\bKey\s+Details\b"),
+                ("after", r"\bWhat\s+To\s+Watch\s+Next\b"),
             ]
         else:
             inline_patterns = [
-                r"\bFix\s*1\b",
-                r"\bFix\s*2\b",
-                r"\b(Advanced(?:\s+Fix)?|More\s+fix(?:es)?)\b",
-                r"\bChecklist\b",
+                ("after", r"\bFix\s*1\b"),
+                ("after", r"\bFix\s*2\b"),
+                ("after", r"\b(Advanced(?:\s+Fix)?|More\s+fix(?:es)?)\b"),
+                ("after", r"\bChecklist\b"),
             ]
         inline_total = max(0, min(int(self.max_inline_images), len(entries) - 1))
         for idx in range(inline_total):
             src, alt = entries[idx + 1]
-            safe_alt = self._regen_alt_if_too_similar(str(alt or ""), intro_text)
+            if is_news_layout:
+                safe_alt = "Editorial illustration supporting this tech news section."
+            else:
+                safe_alt = self._regen_alt_if_too_similar(str(alt or ""), intro_text)
             block = self._image_block(str(src or ""), safe_alt)
-            pattern = inline_patterns[idx] if idx < len(inline_patterns) else ""
-            html, inserted = self._insert_after_heading(html, block, pattern)
+            mode, pattern = inline_patterns[idx] if idx < len(inline_patterns) else ("after", "")
+            if mode == "before":
+                html, inserted = self._insert_before_heading(html, block, pattern)
+            else:
+                html, inserted = self._insert_after_heading(html, block, pattern)
             if not inserted:
                 html = self._insert_after_paragraph_slot(html, block, idx, inline_total)
         return html
@@ -2502,13 +2524,21 @@ class Publisher:
             return out
         if re.search(r"<article\b[^>]*class=\"[^\"]*rz-post", out, flags=re.IGNORECASE):
             return out
+        news_layout = bool(
+            re.search(
+                r"\b(What\s+Happened|Why\s+It\s+Matters|What\s+To\s+Do\s+Now|Key\s+Details|What\s+To\s+Watch\s+Next)\b",
+                out,
+                flags=re.IGNORECASE,
+            )
+        )
         # Body HTML must start from H2 in Blogger (title is H1 outside body).
         out = re.sub(r"<h1\b", "<h2", out, flags=re.IGNORECASE)
         out = re.sub(r"</h1>", "</h2>", out, flags=re.IGNORECASE)
         # Normalize related heading to a stable SEO-friendly section title.
+        related_heading = "Related Coverage" if news_layout else "More Fix Guides You Might Like"
         out = re.sub(
             r"<h3[^>]*>\s*Related Reading\s*</h3>",
-            "<h2>More Fix Guides You Might Like</h2>",
+            f"<h2>{related_heading}</h2>",
             out,
             flags=re.IGNORECASE,
         )
@@ -2566,7 +2596,13 @@ class Publisher:
                 section_id = f"{base_id}-{suffix}"
                 suffix += 1
             used_ids.add(section_id)
-            is_related = bool(re.search(r"more fix guides you might like|more experiments you might like|related posts", title_txt, flags=re.IGNORECASE))
+            is_related = bool(
+                re.search(
+                    r"more fix guides you might like|more experiments you might like|related posts|related coverage",
+                    title_txt,
+                    flags=re.IGNORECASE,
+                )
+            )
             section_class = "rz-related" if is_related else "rz-section"
             marker = section_id.upper().replace("-", "_")
             article_parts.append(f"<!-- RZ-SECTION:{marker}-START -->")

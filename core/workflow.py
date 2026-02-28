@@ -137,6 +137,8 @@ class AgentWorkflow:
         self._cluster_rotation_state_path = self.root / "storage" / "state" / "cluster_rotation_state.json"
         self._feature_rotation_state_path = self.root / "storage" / "state" / "feature_rotation_state.json"
         self._title_fingerprint_path = self.root / "storage" / "logs" / "title_fingerprints.jsonl"
+        self._news_title_shape_path = self.root / "storage" / "logs" / "news_title_shapes.jsonl"
+        self._news_guard_logged: set[str] = set()
         self.keyword_assets = KeywordAssetStore(
             db_path=self.root / str(getattr(self.settings.keywords, "db_path", "storage/keywords.sqlite")),
         )
@@ -2459,11 +2461,37 @@ class AgentWorkflow:
             for x in (authority_links or [])
             if str(x or "").strip()
         ][:2]
+        def _publisher_label(url: str) -> str:
+            host = (urlparse(str(url or "")).netloc or "").lower()
+            if "security.googleblog.com" in host:
+                return "Google Security Blog"
+            if "aws.amazon.com" in host:
+                return "AWS Security Blog"
+            if "cisa.gov" in host:
+                return "CISA Advisory"
+            if "msrc.microsoft.com" in host:
+                return "Microsoft Security Response Center"
+            if "support.apple.com" in host:
+                return "Apple Support"
+            if "cloudflare.com" in host:
+                return "Cloudflare Blog"
+            if "nist.gov" in host:
+                return "NIST Cybersecurity Framework"
+            label_parts = [p for p in host.split(".") if p and p not in {"www", "com", "org", "net", "gov"}]
+            if not label_parts:
+                return "Source"
+            return " ".join(x.capitalize() for x in label_parts[:2]) + " Report"
         source_items: list[str] = []
         if source_url:
-            source_items.append(f'<li><a href="{escape(source_url)}" rel="nofollow noopener" target="_blank">Original source</a></li>')
+            source_items.append(
+                f'<li><a href="{escape(source_url)}" rel="nofollow noopener" target="_blank">Original report</a></li>'
+            )
         for link in safe_authorities:
-            source_items.append(f'<li><a href="{escape(link)}" rel="nofollow noopener" target="_blank">{escape(link)}</a></li>')
+            if any(bad in link.lower() for bad in ("google.com", "googleusercontent.com", "googleapis.com")):
+                continue
+            source_items.append(
+                f'<li><a href="{escape(link)}" rel="nofollow noopener" target="_blank">{escape(_publisher_label(link))}</a></li>'
+            )
         question_pool = [
             "What changes first for regular users this week?",
             "Should teams update immediately or watch rollout signals first?",
@@ -2479,6 +2507,15 @@ class AgentWorkflow:
                 "Comparison: broad policy push gives consistency, while pilot-first gives safer validation data.",
             ]
         )
+        key_facts = (
+            "<ul>"
+            f"<li>Who: End users and IT teams tracking {escape(cat)} rollout updates.</li>"
+            f"<li>What: A reported {escape(cat)} policy or platform change affecting routine workflows.</li>"
+            "<li>When: Timing varies by region; exact global completion is Not confirmed.</li>"
+            "<li>Scope: Software behavior and platform policy impact, not hardware damage.</li>"
+            "<li>Risk: Low to medium for normal users, depending on update timing and configuration.</li>"
+            "</ul>"
+        )
         what_to_do = (
             "<ul>"
             "<li>Check the official update notes and your current app or OS version.</li>"
@@ -2489,6 +2526,9 @@ class AgentWorkflow:
         html = (
             "<h2>Quick Take</h2>"
             f"<p>{escape(snippet or title)}</p>"
+            "<p>This update matters now because rollout speed is outpacing clear user-facing guidance in many teams.</p>"
+            "<p>For mainstream users, the key question is practical impact today, not speculation about long-term strategy.</p>"
+            f"{key_facts}"
             "<h2>What Happened</h2>"
             f"<p>According to reports, this {escape(cat)} update affects users who rely on daily workflows.</p>"
             f"<p>{escape(question_lines[0])}</p>"
@@ -3429,7 +3469,12 @@ class AgentWorkflow:
         reason = ""
         for select_try in range(1, 2):
             try:
-                if free_local_mode:
+                if is_news_mode(self.settings):
+                    self._log_news_mode_guard("choose_best", "news_mode_blocked")
+                    selected = max(candidates, key=lambda x: int(getattr(x, "score", 0)))
+                    score = max(70, min(100, int(getattr(selected, "score", 70) or 70)))
+                    reason = self._append_note(reason, "news_mode_selector_guard_fallback")
+                elif free_local_mode:
                     selected, score, reason = self.brain.choose_best_free(
                         candidates,
                         recent_urls,
@@ -5089,6 +5134,24 @@ class AgentWorkflow:
             return left
         return f"{left};{right}"
 
+    def _log_news_mode_guard(self, blocked_fn: str, reason: str = "") -> None:
+        if not is_news_mode(self.settings):
+            return
+        key = f"{blocked_fn}:{reason}".strip(":")
+        if key in self._news_guard_logged:
+            return
+        self._news_guard_logged.add(key)
+        payload = {
+            "blocked_fn": str(blocked_fn or ""),
+            "reason": str(reason or ""),
+            "mode": "tech_news_only",
+        }
+        self._append_workflow_perf("news_mode_guard_skip", payload)
+        try:
+            self.qa.write("runtime", "news_mode_guard_skip", payload)
+        except Exception:
+            return
+
     def _current_rotated_device_type(self) -> str:
         default_order = ["windows", "mac", "iphone", "galaxy"]
         order = [str(x or "").strip().lower() for x in (getattr(self.settings.topics, "rotation_order", default_order) or default_order) if str(x or "").strip()]
@@ -6282,6 +6345,8 @@ class AgentWorkflow:
                 "everyone is talking",
                 "ultimate guide",
                 "fixes that actually work",
+                "fix guide",
+                "troubleshooting",
             ]
             banned_tokens += [
                 str(x or "").strip().lower()
@@ -6290,11 +6355,25 @@ class AgentWorkflow:
             ]
 
             recent_titles = self._get_recent_blogger_titles(limit=120, refresh_api=False)
+            recent_first4 = {
+                self._title_first_words_key(t, n=4)
+                for t in recent_titles[:20]
+                if str(t or "").strip()
+            }
+            shape_rows = self._read_news_title_shape_rows(limit=200)
+            shape_recent_counts = Counter(
+                str((row or {}).get("shape_id", "") or "").strip().lower()
+                for row in shape_rows[-60:]
+                if str((row or {}).get("shape_id", "") or "").strip()
+            )
             api_ready = bool(
                 (self.settings.gemini.api_key or "").strip()
                 and (self.settings.gemini.api_key or "").strip() != "GEMINI_API_KEY"
             )
             allow_gemini = api_ready and (self._gemini_budget_remaining() > 0)
+            rejected_due_to_similarity = 0
+            rejected_due_to_shape = 0
+            total_candidates = 0
 
             def score_news_title(t: str) -> int:
                 tt = re.sub(r"\s+", " ", str(t or "")).strip()
@@ -6305,6 +6384,8 @@ class AgentWorkflow:
                     return -9000
                 if "google.com" in low:
                     return -9000
+                if "fix guide" in low or "troubleshooting" in low:
+                    return -8500
                 if re.search(
                     r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
                     low,
@@ -6330,6 +6411,31 @@ class AgentWorkflow:
                     s -= 200
                 return s
 
+            def filter_news_candidates(rows: list[str]) -> list[str]:
+                nonlocal rejected_due_to_similarity, rejected_due_to_shape
+                out: list[str] = []
+                seen: set[str] = set()
+                for cand in rows:
+                    t = re.sub(r"\s+", " ", str(cand or "")).strip(" -:")
+                    if not t:
+                        continue
+                    low = t.lower()
+                    if low in seen:
+                        continue
+                    seen.add(low)
+                    first4 = self._title_first_words_key(t, n=4)
+                    if first4 and first4 in recent_first4:
+                        rejected_due_to_similarity += 1
+                        continue
+                    shape_id = self._news_title_shape_id(t).lower()
+                    if shape_id and int(shape_recent_counts.get(shape_id, 0)) >= 3:
+                        rejected_due_to_shape += 1
+                        continue
+                    if "fix guide" in low or "troubleshooting" in low:
+                        continue
+                    out.append(t[:100])
+                return out
+
             best = raw
             if allow_gemini:
                 try:
@@ -6348,8 +6454,10 @@ class AgentWorkflow:
                     if self.brain.call_count:
                         self.logs.increment_today_gemini_count(self.brain.call_count)
                         self.brain.reset_run_counter()
-                    if variants:
-                        best = max(variants, key=score_news_title)
+                    total_candidates += len(list(variants or []))
+                    filtered_variants = filter_news_candidates(list(variants or []))
+                    if filtered_variants:
+                        best = max(filtered_variants, key=score_news_title)
                 except Exception:
                     if self.brain.call_count:
                         self.logs.increment_today_gemini_count(self.brain.call_count)
@@ -6395,12 +6503,23 @@ class AgentWorkflow:
                 "{topic} policy shift: {angle}",
                 "{topic} analysis: {angle}",
                 "{topic}: quick breakdown of {angle}",
+                "{topic} timeline: {angle}",
+                "{topic}: what users should monitor next",
+                "New update on {topic}: {angle}",
+                "{topic} rollout notes: {angle}",
+                "{topic}: who is affected and what changes now",
             ]
             category_word = category_hint if category_hint else "platform"
 
-            if (not best) or len(best) < 36 or self._is_recent_title_duplicate(best):
+            if (
+                (not best)
+                or len(best) < 36
+                or self._is_recent_title_duplicate(best)
+                or (self._title_first_words_key(best, n=4) in recent_first4)
+                or (shape_recent_counts.get(self._news_title_shape_id(best).lower(), 0) >= 3)
+            ):
                 candidates_local = []
-                for _ in range(18):
+                for _ in range(30):
                     verb = random.choice(verbs)
                     verb_cap = verb[:1].upper() + verb[1:]
                     angle = random.choice(angles)
@@ -6414,7 +6533,12 @@ class AgentWorkflow:
                     )
                     title_local = re.sub(r"\s+", " ", title_local).strip(" -:")[:100]
                     candidates_local.append(title_local)
-                best = max(candidates_local, key=score_news_title)
+                total_candidates += len(candidates_local)
+                filtered_local = filter_news_candidates(candidates_local)
+                if filtered_local:
+                    best = max(filtered_local, key=score_news_title)
+                elif candidates_local:
+                    best = max(candidates_local, key=score_news_title)
 
             best = re.sub(
                 r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
@@ -6422,9 +6546,24 @@ class AgentWorkflow:
                 best,
                 flags=re.IGNORECASE,
             )
+            best = re.sub(r"\b(fix guide|troubleshooting)\b", "", best, flags=re.IGNORECASE)
             best = re.sub(r"\s+", " ", best).strip(" -:")
             if len(best) > 95:
                 best = best[:95].rstrip(" ,.;:-")
+            if not best:
+                best = raw or topic_phrase
+
+            chosen_shape_id = self._remember_news_title_shape(best)
+            self._append_workflow_perf(
+                "news_title_selection",
+                {
+                    "selected_title": best,
+                    "candidate_count": int(total_candidates),
+                    "rejected_due_to_similarity": int(rejected_due_to_similarity),
+                    "rejected_due_to_shape": int(rejected_due_to_shape),
+                    "chosen_title_shape_id": chosen_shape_id,
+                },
+            )
 
             return best
         banned_topics = [
@@ -6548,6 +6687,68 @@ class AgentWorkflow:
             if str(x or "").strip()
         }
         return norm in recent_norm
+
+    def _title_first_words_key(self, title: str, n: int = 4) -> str:
+        words = re.findall(r"[a-z0-9]+", str(title or "").lower())
+        if not words:
+            return ""
+        return " ".join(words[: max(1, int(n))])
+
+    def _news_title_shape_id(self, title: str) -> str:
+        src = re.sub(r"\s+", " ", str(title or "").strip())
+        if not src:
+            return ""
+        shape = re.sub(r"[A-Z][a-z]+", "Aa", src)
+        shape = re.sub(r"[a-z]+", "w", shape)
+        shape = re.sub(r"[0-9]+", "#", shape)
+        shape = re.sub(r"[^Aaw#?]+", "-", shape)
+        shape = re.sub(r"-{2,}", "-", shape).strip("-").lower()
+        if not shape:
+            return ""
+        return hashlib.sha1(shape.encode("utf-8")).hexdigest()[:12]
+
+    def _read_news_title_shape_rows(self, limit: int = 240) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        try:
+            if not self._news_title_shape_path.exists():
+                return []
+            for line in self._news_title_shape_path.read_text(encoding="utf-8").splitlines():
+                item = str(line or "").strip()
+                if not item:
+                    continue
+                try:
+                    payload = json.loads(item)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    rows.append(payload)
+        except Exception:
+            return []
+        return rows[-max(1, int(limit)) :]
+
+    def _remember_news_title_shape(self, title: str) -> str:
+        shape_id = self._news_title_shape_id(title)
+        if not shape_id:
+            return ""
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "shape_id": shape_id,
+            "title": str(title or "")[:160],
+        }
+        try:
+            self._news_title_shape_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._news_title_shape_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return shape_id
+        try:
+            rows = self._read_news_title_shape_rows(limit=300)
+            with self._news_title_shape_path.open("w", encoding="utf-8") as fh:
+                for item in rows:
+                    fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        return shape_id
 
     def _is_banned_title_template(self, title: str) -> bool:
         lower = re.sub(r"\s+", " ", str(title or "").strip().lower())
@@ -8673,7 +8874,7 @@ class AgentWorkflow:
             if added >= target_add:
                 break
 
-        if allow_api_retry and added < target_add:
+        if allow_api_retry and added < target_add and (not is_news_mode(self.settings)):
             try:
                 extra = self.brain.extract_global_keywords(
                     candidates,
@@ -8700,6 +8901,8 @@ class AgentWorkflow:
                 added += 1
                 if added >= target_add:
                     break
+        elif allow_api_retry and added < target_add and is_news_mode(self.settings):
+            self._log_news_mode_guard("extract_global_keywords", "news_mode_blocked")
 
         if len(active) > max_pool:
             active = active[-max_pool:]
@@ -8708,6 +8911,9 @@ class AgentWorkflow:
 
     def _acquire_run_keywords(self, candidates) -> tuple[list[str], str]:
         note = ""
+        if is_news_mode(self.settings):
+            self._log_news_mode_guard("_acquire_run_keywords", "news_mode_blocked")
+            return [], "news_mode_keyword_acquire_skipped"
         device_type = self._current_rotated_device_type()
         target_size, min_size, refill_batch, avoid_days, per_run_pick = self._topic_pool_cfg()
         # One post is generated per run; reserve exactly one primary keyword per run.
