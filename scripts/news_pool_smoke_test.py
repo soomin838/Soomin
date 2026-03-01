@@ -19,7 +19,7 @@ def main() -> int:
     if not claimed:
         print("claim=none")
         return 1
-    cid = int((claimed or {}).get("id", 0) or 0)
+    cid = str((claimed or {}).get("event_id", "") or (claimed or {}).get("id", "") or "").strip()
     print(f"claimed_id={cid} title={(claimed or {}).get('title', '')}")
     rolled = wf.news_pool_store.rollback_claim(cid)
     print(f"rollback={rolled}")
