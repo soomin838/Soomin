@@ -2712,6 +2712,7 @@ class AgentWorkflow:
             final_html = self._sanitize_publish_html(base_html, domain=current_domain)
             final_html = self._canonicalize_html_payload(final_html)
             final_html, removed_news_links = self._strip_forbidden_news_links(final_html)
+            final_html = self._strip_news_troubleshoot_dna(final_html)
             if removed_news_links > 0:
                 degraded_note = self._append_note(degraded_note, f"news_google_link_removed={removed_news_links}")
                 self._append_workflow_perf(
@@ -7766,6 +7767,20 @@ class AgentWorkflow:
             removed += int(hit or 0)
         out = re.sub(r"\n{3,}", "\n\n", out)
         return out, int(removed)
+
+    def _strip_news_troubleshoot_dna(self, html: str) -> str:
+        out = str(html or "")
+        if not out:
+            return out
+        replacements = {
+            r"\bfix guide\b": "news analysis",
+            r"\btroubleshooting\b": "analysis",
+            r"\bnot working\b": "service disruption",
+        }
+        for pat, repl in replacements.items():
+            out = re.sub(pat, repl, out, flags=re.IGNORECASE)
+        out = re.sub(r"\s{2,}", " ", out)
+        return out
 
     def _collapse_repeated_paragraph_line(self, html: str, line: str) -> str:
         sentence = re.escape(line.strip())
