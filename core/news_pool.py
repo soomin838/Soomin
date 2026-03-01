@@ -703,6 +703,30 @@ class NewsPoolStore:
             )
         return bool(changed)
 
+    def mark_discarded(self, claim_id: Any, reason: str = "") -> bool:
+        _ = str(reason or "").strip()
+        with self._connect() as conn:
+            event_id = self._resolve_event_id(conn, claim_id)
+            if not event_id:
+                return False
+            changed = conn.execute(
+                """
+                UPDATE news_events
+                SET status='discarded', claimed_at=''
+                WHERE event_id=?
+                """,
+                (event_id,),
+            ).rowcount
+            conn.execute(
+                """
+                UPDATE news_items
+                SET status='discarded', claimed_at=''
+                WHERE event_id=? AND status IN ('queued', 'claimed')
+                """,
+                (event_id,),
+            )
+        return bool(changed)
+
     def purge(
         self,
         *,

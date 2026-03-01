@@ -177,6 +177,31 @@ class BudgetSettings:
 
 
 @dataclass
+class WorkflowSettings:
+    retry_enabled: bool = True
+    retry_max_attempts_per_event: int = 4
+    retry_debounce_seconds: list[int] = field(default_factory=lambda: [0, 30, 120, 600])
+    retry_reset_on_success: bool = True
+
+
+@dataclass
+class WatchdogSettings:
+    enabled: bool = True
+    max_same_hard_failure_streak: int = 3
+    max_event_wallclock_minutes: int = 20
+    max_event_total_attempts: int = 6
+    max_global_holds_per_hour: int = 12
+    max_pollinations_530_streak: int = 6
+    max_pollinations_429_streak: int = 4
+    backoff_on_provider_failure_minutes: dict[str, list[int]] = field(
+        default_factory=lambda: {
+            "http_530": [30, 60, 90],
+            "http_429": [90, 120, 180],
+        }
+    )
+
+
+@dataclass
 class PublishR2Settings:
     endpoint_url: str = ""
     bucket: str = ""
@@ -551,6 +576,8 @@ class AppSettings:
     visual: VisualSettings = field(default_factory=VisualSettings)
     news_pack: NewsPackSettings = field(default_factory=NewsPackSettings)
     budget: BudgetSettings = field(default_factory=BudgetSettings)
+    workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
+    watchdog: WatchdogSettings = field(default_factory=WatchdogSettings)
     publish: PublishSettings = field(default_factory=PublishSettings)
     quality: QualitySettings = field(default_factory=QualitySettings)
     actionability_gate: ActionabilityGateSettings = field(default_factory=ActionabilityGateSettings)
@@ -602,6 +629,8 @@ def load_settings(path: Path) -> AppSettings:
     llm_raw = dict(raw.get("llm", {}) or {})
     local_llm_raw = dict(raw.get("local_llm", {}) or {})
     news_pack_raw = dict(raw.get("news_pack", {}) or {})
+    workflow_raw = dict(raw.get("workflow", {}) or {})
+    watchdog_raw = dict(raw.get("watchdog", {}) or {})
     images_raw = dict(raw.get("images", {}) or {})
     internal_links_raw = dict(raw.get("internal_links", {}) or {})
     keywords_raw = dict(raw.get("keywords", {}) or {})
@@ -812,6 +841,8 @@ def load_settings(path: Path) -> AppSettings:
         visual=_construct_dc(VisualSettings, raw.get("visual", {})),
         news_pack=_construct_dc(NewsPackSettings, news_pack_raw),
         budget=_construct_dc(BudgetSettings, raw.get("budget", {})),
+        workflow=_construct_dc(WorkflowSettings, workflow_raw),
+        watchdog=_construct_dc(WatchdogSettings, watchdog_raw),
         publish=publish_obj,
         quality=_construct_dc(QualitySettings, quality_raw),
         actionability_gate=_construct_dc(ActionabilityGateSettings, actionability_raw),

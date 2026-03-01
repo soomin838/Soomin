@@ -188,6 +188,9 @@ class AgentWorkflow:
         self._news_pool_refresh_log_path = self.root / "storage" / "logs" / "news_pool_refresh.jsonl"
         self._news_pool_refresh_tick_log_path = self.root / "storage" / "logs" / "news_pool_refresh_tick.jsonl"
         self._news_rotation_state_path = self.root / "storage" / "state" / "news_rotation_state.json"
+        self._news_retry_state_path = self.root / "storage" / "state" / "news_retry_state.json"
+        self._global_pause_state_path = self.root / "storage" / "state" / "global_pause.json"
+        self._watchdog_log_path = self.root / "storage" / "logs" / "watchdog.jsonl"
         self._last_news_pool_refresh_stats: dict[str, Any] = {}
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
         self.news_pack_manifest = NewsPackManifest(
@@ -233,6 +236,9 @@ class AgentWorkflow:
     def news_pack_seed_tick_if_needed(self, force: bool = False, min_interval_sec: int = 100) -> dict[str, Any]:
         if not bool(getattr(self.settings.news_pack, "enabled", True)):
             return {"status": "disabled"}
+        paused, pause_reason = self._is_global_pause_active(scope="image_seeding")
+        if paused:
+            return {"status": "paused", "reason": str(pause_reason or "watchdog_pause")}
         now_mono = time.monotonic()
         if (not force) and self._news_pack_last_tick_mono > 0:
             if (now_mono - self._news_pack_last_tick_mono) < max(30, int(min_interval_sec)):
@@ -304,6 +310,9 @@ class AgentWorkflow:
                 f"emergency_fill_{idx}={tick_status}:{tick_kind}:{tick_provider}"
                 + (f":{tick_failure_kind or tick_reason}" if (tick_failure_kind or tick_reason) else "")
             )
+            if tick_status == "paused":
+                notes.append("emergency_fill_stopped=watchdog_pause")
+                break
             # If service rate limited (anon 429), stop immediate fill loop and wait for next window.
             if tick_failure_kind == "service_rate_limited" or "rate_limit" in tick_reason:
                 notes.append("emergency_fill_stopped=service_rate_limited")
@@ -683,6 +692,529 @@ class AgentWorkflow:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception:
             return
+
+    def _load_news_retry_state(self) -> dict[str, dict[str, Any]]:
+        try:
+            if not self._news_retry_state_path.exists():
+                return {}
+            payload = json.loads(self._news_retry_state_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return {}
+            out: dict[str, dict[str, Any]] = {}
+            for key, value in payload.items():
+                if not isinstance(value, dict):
+                    continue
+                event_id = str(key or "").strip()
+                if not event_id:
+                    continue
+                out[event_id] = dict(value)
+            return self._prune_news_retry_state(out, keep_days=14)
+        except Exception:
+            return {}
+
+    def _save_news_retry_state(self, payload: dict[str, dict[str, Any]]) -> None:
+        safe = self._prune_news_retry_state(dict(payload or {}), keep_days=14)
+        try:
+            self._news_retry_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._news_retry_state_path.write_text(
+                json.dumps(safe, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
+
+    def _prune_news_retry_state(
+        self,
+        payload: dict[str, dict[str, Any]],
+        *,
+        keep_days: int = 14,
+    ) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(keep_days)))
+        for key, raw in (payload or {}).items():
+            event_id = str(key or "").strip()
+            if not event_id or (not isinstance(raw, dict)):
+                continue
+            base = dict(raw)
+            dt = self._parse_iso_utc(str(base.get("last_attempt_utc", "") or "")) or self._parse_iso_utc(
+                str(base.get("first_seen_utc", "") or "")
+            )
+            if dt is not None and dt < cutoff:
+                continue
+            out[event_id] = base
+        return out
+
+    def _event_retry_state_default(self) -> dict[str, Any]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        return {
+            "attempts": 0,
+            "total_attempts": 0,
+            "hard_failure_streak": {},
+            "first_seen_utc": now_iso,
+            "last_attempt_utc": "",
+            "last_hold_reason": "",
+            "last_score": 0,
+            "provider_530_streak": 0,
+            "provider_429_streak": 0,
+        }
+
+    def _get_event_retry_state(self, event_id: str, *, create: bool = True) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
+        event_key = str(event_id or "").strip()
+        state = self._load_news_retry_state()
+        if not event_key:
+            return state, None
+        row = dict(state.get(event_key, {}) or {})
+        if (not row) and create:
+            row = self._event_retry_state_default()
+        if not row:
+            return state, None
+        if not str(row.get("first_seen_utc", "") or "").strip():
+            row["first_seen_utc"] = datetime.now(timezone.utc).isoformat()
+        row.setdefault("hard_failure_streak", {})
+        row.setdefault("provider_530_streak", 0)
+        row.setdefault("provider_429_streak", 0)
+        row.setdefault("attempts", 0)
+        row.setdefault("total_attempts", int(row.get("attempts", 0) or 0))
+        state[event_key] = row
+        return state, row
+
+    def _reset_event_retry_state(self, event_id: str) -> None:
+        event_key = str(event_id or "").strip()
+        if not event_key:
+            return
+        state = self._load_news_retry_state()
+        if event_key in state:
+            state.pop(event_key, None)
+            self._save_news_retry_state(state)
+
+    def _retry_debounce_seconds(self, attempt_no: int) -> int:
+        rows = [int(x) for x in (getattr(self.settings.workflow, "retry_debounce_seconds", []) or []) if str(x).strip()]
+        if not rows:
+            rows = [0, 30, 120, 600]
+        idx = max(0, int(attempt_no) - 1)
+        if idx >= len(rows):
+            idx = len(rows) - 1
+        return max(0, int(rows[idx] or 0))
+
+    def _workflow_retry_max_attempts(self) -> int:
+        try:
+            return max(0, int(getattr(self.settings.workflow, "retry_max_attempts_per_event", 4)))
+        except Exception:
+            return 4
+
+    def _watchdog_backoff_minutes(self, *, key: str, streak: int) -> int:
+        backoff_map = dict(getattr(self.settings.watchdog, "backoff_on_provider_failure_minutes", {}) or {})
+        rows = [int(x) for x in (backoff_map.get(key, []) or []) if str(x).strip()]
+        if not rows:
+            rows = [60, 120, 180]
+        idx = max(0, min(len(rows) - 1, int(streak) - 1))
+        return max(1, int(rows[idx]))
+
+    def _sleep_debounce(self, seconds: int) -> None:
+        sec = max(0, int(seconds))
+        if sec <= 0:
+            return
+        try:
+            time.sleep(float(sec))
+        except Exception:
+            return
+
+    def _load_global_pause(self) -> dict[str, Any]:
+        try:
+            if not self._global_pause_state_path.exists():
+                return {}
+            payload = json.loads(self._global_pause_state_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return dict(payload)
+        except Exception:
+            return {}
+        return {}
+
+    def _save_global_pause(self, payload: dict[str, Any]) -> None:
+        try:
+            self._global_pause_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._global_pause_state_path.write_text(
+                json.dumps(dict(payload or {}), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
+
+    def _set_global_pause(self, *, scope: str, reason: str, minutes: int, event_id: str = "") -> None:
+        scope_key = str(scope or "").strip().lower() or "publish"
+        now = datetime.now(timezone.utc)
+        until = now + timedelta(minutes=max(1, int(minutes or 1)))
+        payload = self._load_global_pause()
+        block = dict(payload.get(scope_key, {}) or {})
+        block.update(
+            {
+                "pause_until_utc": until.isoformat(),
+                "reason": str(reason or "").strip(),
+                "event_id": str(event_id or "").strip(),
+                "updated_at_utc": now.isoformat(),
+                "minutes": int(max(1, int(minutes or 1))),
+            }
+        )
+        payload[scope_key] = block
+        self._save_global_pause(payload)
+
+    def _is_global_pause_active(self, *, scope: str) -> tuple[bool, str]:
+        scope_key = str(scope or "").strip().lower() or "publish"
+        payload = self._load_global_pause()
+        block = dict(payload.get(scope_key, {}) or {})
+        pause_until = self._parse_iso_utc(str(block.get("pause_until_utc", "") or ""))
+        if pause_until is None:
+            return False, ""
+        if datetime.now(timezone.utc) >= pause_until:
+            return False, ""
+        reason = str(block.get("reason", "") or "").strip()
+        return True, reason
+
+    def _count_holds_last_hour(self) -> int:
+        rows = self.logs.get_recent_runs(days=1, limit=600, statuses=["hold"])
+        now = datetime.now(timezone.utc)
+        count = 0
+        for row in rows:
+            dt = self._parse_iso_utc(str((row or {}).get("created_at", "") or ""))
+            if dt is None:
+                continue
+            if (now - dt).total_seconds() <= 3600:
+                count += 1
+        return int(count)
+
+    def _log_watchdog(
+        self,
+        *,
+        event_id: str,
+        reason: str,
+        state: dict[str, Any],
+        qa_result: Any | None = None,
+    ) -> None:
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "event_id": str(event_id or "").strip(),
+            "reason": str(reason or "").strip(),
+            "attempts": int(state.get("attempts", 0) or 0),
+            "total_attempts": int(state.get("total_attempts", state.get("attempts", 0)) or 0),
+            "last_score": int(state.get("last_score", 0) or 0),
+            "last_hold_reason": str(state.get("last_hold_reason", "") or ""),
+            "hard_failures": list(getattr(qa_result, "hard_failures", []) or [])[:8],
+            "provider_530_streak": int(state.get("provider_530_streak", 0) or 0),
+            "provider_429_streak": int(state.get("provider_429_streak", 0) or 0),
+        }
+        try:
+            self._watchdog_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._watchdog_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _watchdog_check(
+        self,
+        event_id: str,
+        state: dict[str, Any],
+        qa_result: Any | None,
+        provider_error: str | None,
+    ) -> tuple[bool, str]:
+        if not bool(getattr(self.settings.watchdog, "enabled", True)):
+            return False, ""
+        wd = self.settings.watchdog
+        hard_streak_map = dict(state.get("hard_failure_streak", {}) or {})
+        max_same = max(1, int(getattr(wd, "max_same_hard_failure_streak", 3) or 3))
+        for key, value in hard_streak_map.items():
+            if int(value or 0) >= max_same:
+                return True, f"discard:same_hard_failure_streak:{str(key or '').strip()}"
+
+        first_seen = self._parse_iso_utc(str(state.get("first_seen_utc", "") or ""))
+        if first_seen is not None:
+            elapsed_min = (datetime.now(timezone.utc) - first_seen).total_seconds() / 60.0
+            if elapsed_min > float(max(1, int(getattr(wd, "max_event_wallclock_minutes", 20) or 20))):
+                return True, "discard:event_wallclock_exceeded"
+
+        total_attempts = int(state.get("total_attempts", state.get("attempts", 0)) or 0)
+        if total_attempts >= max(1, int(getattr(wd, "max_event_total_attempts", 6) or 6)):
+            return True, "discard:event_total_attempts_exceeded"
+
+        holds_per_hour = self._count_holds_last_hour()
+        if holds_per_hour > max(1, int(getattr(wd, "max_global_holds_per_hour", 12) or 12)):
+            return True, "pause:global_holds_per_hour_exceeded"
+
+        provider_text = str(provider_error or "").strip().lower()
+        p530 = int(state.get("provider_530_streak", 0) or 0)
+        p429 = int(state.get("provider_429_streak", 0) or 0)
+        if "530" in provider_text:
+            p530 += 1
+        if "429" in provider_text or "service_rate_limited" in provider_text:
+            p429 += 1
+        if p530 >= max(1, int(getattr(wd, "max_pollinations_530_streak", 6) or 6)):
+            return True, "pause:provider_530_streak_exceeded"
+        if p429 >= max(1, int(getattr(wd, "max_pollinations_429_streak", 4) or 4)):
+            return True, "pause:provider_429_streak_exceeded"
+
+        return False, ""
+
+    def _qa_hold_note(
+        self,
+        *,
+        phase: str,
+        hold_reason: str,
+        qa_result: Any,
+        min_quality: int,
+        attempts: int,
+        no_progress_streak: int,
+        image_count: int = 0,
+    ) -> str:
+        hard = list(getattr(qa_result, "hard_failures", []) or [])[:5]
+        return (
+            f"{hold_reason};"
+            f"phase={str(phase or '').strip()};"
+            f"last_score={int(getattr(qa_result, 'score', 0) or 0)};"
+            f"min_quality={int(min_quality)};"
+            f"hard_failures={','.join(hard) if hard else 'none'};"
+            f"attempts={int(attempts)};"
+            f"no_progress_streak={int(no_progress_streak)};"
+            f"image_counts={int(image_count)}"
+        )
+
+    def _classify_provider_error_token(self, text: str) -> str:
+        low = str(text or "").strip().lower()
+        if "530" in low:
+            return "http_530"
+        if "429" in low or "service_rate_limited" in low:
+            return "http_429"
+        return ""
+
+    def _provider_error_from_notes(self, notes: list[str] | None) -> str:
+        for row in (notes or []):
+            token = self._classify_provider_error_token(str(row or ""))
+            if token:
+                return token
+        return ""
+
+    def _record_provider_failure_watchdog(self, event_id: str, provider_error: str) -> tuple[bool, str]:
+        event_key = str(event_id or "").strip()
+        token = self._classify_provider_error_token(provider_error)
+        if not event_key or not token:
+            return False, ""
+        state_all, row = self._get_event_retry_state(event_key, create=True)
+        if row is None:
+            return False, ""
+        if token == "http_530":
+            row["provider_530_streak"] = int(row.get("provider_530_streak", 0) or 0) + 1
+        elif token == "http_429":
+            row["provider_429_streak"] = int(row.get("provider_429_streak", 0) or 0) + 1
+        row["last_attempt_utc"] = datetime.now(timezone.utc).isoformat()
+        state_all[event_key] = row
+        self._save_news_retry_state(state_all)
+
+        trip, reason = self._watchdog_check(
+            event_id=event_key,
+            state=row,
+            qa_result=None,
+            provider_error=provider_error,
+        )
+        if not trip:
+            return False, ""
+        row["last_hold_reason"] = str(reason or "")
+        state_all[event_key] = row
+        self._save_news_retry_state(state_all)
+        self._log_watchdog(event_id=event_key, reason=reason, state=row, qa_result=None)
+        if str(reason or "").startswith("pause:provider_530"):
+            self._set_global_pause(
+                scope="image_seeding",
+                reason=reason,
+                minutes=self._watchdog_backoff_minutes(
+                    key="http_530",
+                    streak=int(row.get("provider_530_streak", 1) or 1),
+                ),
+                event_id=event_key,
+            )
+        elif str(reason or "").startswith("pause:provider_429"):
+            self._set_global_pause(
+                scope="image_seeding",
+                reason=reason,
+                minutes=self._watchdog_backoff_minutes(
+                    key="http_429",
+                    streak=int(row.get("provider_429_streak", 1) or 1),
+                ),
+                event_id=event_key,
+            )
+        return True, str(reason or "")
+
+    def _auto_fix_hard_failures(self, html: str, qa_result: Any, *, phase: str = "pre_images") -> tuple[str, list[str]]:
+        out = str(html or "")
+        applied: list[str] = []
+        hard = [str(x or "").strip().lower() for x in (getattr(qa_result, "hard_failures", []) or []) if str(x or "").strip()]
+        if not hard:
+            return out, applied
+
+        if "faq_detected" in hard:
+            out, removed_h2 = re.subn(
+                r"<h2[^>]*>\s*(faq|frequently asked questions)\s*</h2>.*?(?=<h2\b|$)",
+                "",
+                out,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            out, removed_h3 = re.subn(
+                r"<h3[^>]*>\s*(faq|frequently asked questions)\s*</h3>.*?(?=<h[23]\b|$)",
+                "",
+                out,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if (removed_h2 + removed_h3) > 0:
+                applied.append("faq_removed")
+
+        if any(x in hard for x in ("forbidden_phrase_or_format_detected", "prompt_leak_detected")):
+            cleaned = self.qa._strip_banned_markers(out)  # noqa: SLF001
+            if cleaned != out:
+                out = cleaned
+                applied.append("prompt_leak_markers_removed")
+            out, removed_meta = re.subn(
+                r"\[\[META\]\].*?\[\[/META\]\]",
+                "",
+                out,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if removed_meta > 0:
+                applied.append("meta_block_removed")
+
+        if any(x in hard for x in ("forbidden_phrase_or_format_detected", "prompt_leak_detected", "faq_detected")):
+            out, removed_links = self._strip_forbidden_news_links(out)
+            if removed_links > 0:
+                applied.append("forbidden_links_removed")
+            out = self._strip_news_troubleshoot_dna(out)
+
+        if "non_english_content_detected" in hard:
+            cleaned = re.sub(r"[\uac00-\ud7a3\u3131-\u318e]", " ", out)
+            if cleaned != out:
+                out = cleaned
+                applied.append("non_english_removed")
+            out = self.qa._strip_non_english_lines(out)  # noqa: SLF001
+
+        if "image_integrity_failed" in hard and str(phase or "").strip().lower() == "post_images":
+            applied.append("image_integrity_repair_requested")
+
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        out = self._canonicalize_html_payload(self._sanitize_publish_html(out, domain=self._news_domain))
+        return out, applied
+
+    def _news_handle_qa_failure_with_retry(
+        self,
+        event_id: str,
+        qa_result: Any,
+        html: str,
+        phase: str,
+        *,
+        min_quality: int,
+        provider_error: str = "",
+    ) -> tuple[str, str]:
+        event_key = str(event_id or "").strip()
+        phase_key = str(phase or "pre_images").strip().lower()
+        state_all, row = self._get_event_retry_state(event_key, create=True)
+        if row is None:
+            return "hold", str(html or "")
+
+        row["attempts"] = int(row.get("attempts", 0) or 0) + 1
+        row["total_attempts"] = int(row.get("total_attempts", 0) or 0) + 1
+        row["last_attempt_utc"] = datetime.now(timezone.utc).isoformat()
+        row["last_hold_reason"] = (
+            "qa_hard_failure:" + ",".join(list(getattr(qa_result, "hard_failures", []) or [])[:5]
+            ) if getattr(qa_result, "has_hard_failure", False)
+            else f"qa_below_threshold:{int(getattr(qa_result, 'score', 0) or 0)}/{int(min_quality)}"
+        )
+        row["last_score"] = int(getattr(qa_result, "score", 0) or 0)
+        hard_now = [str(x or "").strip().lower() for x in (getattr(qa_result, "hard_failures", []) or []) if str(x or "").strip()]
+        hard_streak = dict(row.get("hard_failure_streak", {}) or {})
+        for key in list(hard_streak.keys()):
+            if key not in hard_now:
+                hard_streak[key] = 0
+        for key in hard_now:
+            hard_streak[key] = int(hard_streak.get(key, 0) or 0) + 1
+        row["hard_failure_streak"] = hard_streak
+
+        provider_token = self._classify_provider_error_token(provider_error)
+        if provider_token == "http_530":
+            row["provider_530_streak"] = int(row.get("provider_530_streak", 0) or 0) + 1
+        elif provider_token == "http_429":
+            row["provider_429_streak"] = int(row.get("provider_429_streak", 0) or 0) + 1
+        elif provider_error:
+            # Preserve streak counters for unknown provider errors.
+            row["provider_530_streak"] = int(row.get("provider_530_streak", 0) or 0)
+            row["provider_429_streak"] = int(row.get("provider_429_streak", 0) or 0)
+
+        state_all[event_key] = row
+        self._save_news_retry_state(state_all)
+
+        trip, trip_reason = self._watchdog_check(
+            event_id=event_key,
+            state=row,
+            qa_result=qa_result,
+            provider_error=provider_error,
+        )
+        if trip:
+            self._log_watchdog(event_id=event_key, reason=trip_reason, state=row, qa_result=qa_result)
+            if trip_reason.startswith("discard:"):
+                row["last_hold_reason"] = str(trip_reason or "")
+                state_all[event_key] = row
+                self._save_news_retry_state(state_all)
+                self.news_pool_store.mark_discarded(event_key, reason=trip_reason)
+                return "discard", str(html or "")
+            if trip_reason.startswith("pause:"):
+                row["last_hold_reason"] = str(trip_reason or "")
+                state_all[event_key] = row
+                self._save_news_retry_state(state_all)
+                pause_min = 45
+                pause_scope = "publish"
+                if "provider_530" in trip_reason:
+                    pause_scope = "image_seeding"
+                    pause_min = self._watchdog_backoff_minutes(
+                        key="http_530",
+                        streak=int(row.get("provider_530_streak", 1) or 1),
+                    )
+                elif "provider_429" in trip_reason:
+                    pause_scope = "image_seeding"
+                    pause_min = self._watchdog_backoff_minutes(
+                        key="http_429",
+                        streak=int(row.get("provider_429_streak", 1) or 1),
+                    )
+                else:
+                    pause_min = random.randint(30, 60)
+                self._set_global_pause(
+                    scope=pause_scope,
+                    reason=trip_reason,
+                    minutes=pause_min,
+                    event_id=event_key,
+                )
+                return "retry_later", str(html or "")
+
+        retry_enabled = bool(getattr(self.settings.workflow, "retry_enabled", True))
+        retry_max = self._workflow_retry_max_attempts()
+        if (not retry_enabled) or int(row.get("attempts", 0) or 0) > retry_max:
+            row["last_hold_reason"] = (
+                f"qa_retry_exceeded:{int(row.get('attempts', 0) or 0)}/{int(retry_max)}"
+                if int(row.get("attempts", 0) or 0) > retry_max
+                else str(row.get("last_hold_reason", "") or "")
+            )
+            state_all[event_key] = row
+            self._save_news_retry_state(state_all)
+            return "hold", str(html or "")
+
+        fixed_html, applied = self._auto_fix_hard_failures(str(html or ""), qa_result, phase=phase_key)
+        self._log_news_qa_runtime(
+            "news_qa_autofix",
+            {
+                "phase": phase_key,
+                "event_id": event_key,
+                "attempt": int(row.get("attempts", 0) or 0),
+                "applied": list(applied or []),
+                "hard_failures": list(getattr(qa_result, "hard_failures", []) or [])[:8],
+                "score": int(getattr(qa_result, "score", 0) or 0),
+            },
+        )
+        debounce = self._retry_debounce_seconds(int(row.get("attempts", 0) or 0))
+        if debounce > 0:
+            self._sleep_debounce(debounce)
+        return "retry_now", fixed_html
 
     def _is_forbidden_news_url(self, url: str) -> bool:
         low = str(url or "").strip().lower()
@@ -2220,14 +2752,29 @@ class AgentWorkflow:
             for x in (rotation_state.get("last_domains_used", []) or [])
             if str(x or "").strip()
         ][:6]
-        item = self.news_pool_store.claim_one(
-            news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
-            top_k=max(10, int(getattr(self.settings.sources, "news_pool_pick_top_k", 60) or 60)),
-            source_weights=dict(getattr(self.settings.sources, "news_pool_source_weights", {}) or {}),
-            avoid_category=avoid_category,
-            recent_domains=recent_domains,
-        )
-        if item is not None:
+        max_total_attempts = max(1, int(getattr(self.settings.watchdog, "max_event_total_attempts", 6) or 6))
+        for _ in range(6):
+            item = self.news_pool_store.claim_one(
+                news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
+                top_k=max(10, int(getattr(self.settings.sources, "news_pool_pick_top_k", 60) or 60)),
+                source_weights=dict(getattr(self.settings.sources, "news_pool_source_weights", {}) or {}),
+                avoid_category=avoid_category,
+                recent_domains=recent_domains,
+            )
+            if item is None:
+                break
+            event_id = str((item or {}).get("event_id", "") or (item or {}).get("id", "") or "").strip()
+            _, retry_row = self._get_event_retry_state(event_id, create=False)
+            total_attempts = int((retry_row or {}).get("total_attempts", (retry_row or {}).get("attempts", 0)) or 0)
+            if total_attempts >= max_total_attempts:
+                self.news_pool_store.mark_discarded(event_id, reason="watchdog_claim_skip_total_attempts")
+                self._log_watchdog(
+                    event_id=event_id,
+                    reason="discard:event_total_attempts_exceeded",
+                    state=dict(retry_row or {}),
+                    qa_result=None,
+                )
+                continue
             return item
         if force_refresh_once:
             self._refresh_news_pool_if_needed(force=True, source="claim_refill")
@@ -2347,10 +2894,15 @@ class AgentWorkflow:
             "storage/logs/publisher_upload.jsonl",
             "storage/logs/thumbnail_gate.jsonl",
             "storage/logs/news_pool_refresh.jsonl",
+            "storage/logs/watchdog.jsonl",
         ):
             self._rotate_log_if_large(self.root / rel, max_bytes=50 * 1024 * 1024, keep=10)
         try:
             self.news_pack_manifest.prune_duplicates()
+        except Exception:
+            pass
+        try:
+            self._save_news_retry_state(self._load_news_retry_state())
         except Exception:
             pass
 
@@ -2603,6 +3155,21 @@ class AgentWorkflow:
                 slow_ms=2600,
             )
             degraded_note = self._append_note(degraded_note, refresh_note)
+            pause_publish, pause_reason = self._is_global_pause_active(scope="publish")
+            if pause_publish:
+                hold_reason = f"watchdog_pause:{str(pause_reason or 'publish_paused')[:180]}"
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title="",
+                        source_url="",
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
             queued_now = self.news_pool_store.queued_count(
                 days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7))
             )
@@ -2874,33 +3441,74 @@ class AgentWorkflow:
                     },
                 )
                 if qa_result.score < min_quality or qa_result.has_hard_failure:
-                    qa_metrics = self._news_html_metrics(final_html)
-                    failed_keys = self._qa_failed_keys(qa_result)[:5]
-                    hard_keys = list(getattr(qa_result, "hard_failures", []) or [])[:5]
-                    detail_note = (
-                        f"qa_passes_used={pass_no};"
-                        f"last_score={int(qa_result.score)};"
-                        f"last_failed_keys={','.join(failed_keys) if failed_keys else 'none'};"
-                        f"last_hard_failures={','.join(hard_keys) if hard_keys else 'none'};"
-                        f"last_no_progress_streak={int(no_progress)};"
-                        f"last_word_count={int(qa_metrics.get('word_count', 0))};"
-                        f"h2_count={int(qa_metrics.get('h2_count', 0))};"
-                        f"external_links={int(qa_metrics.get('external_links', 0))};"
-                        f"authority_links={int(qa_metrics.get('authority_links', 0))}"
-                    )
-                    hold_reason = f"qa_below_threshold:{qa_result.score}/{min_quality}"
-                    self.logs.append_run(
-                        RunRecord(
-                            status="hold",
-                            score=qa_result.score,
-                            title=draft.title,
-                            source_url=draft.source_url,
-                            published_url="",
-                            note=self._append_note(self._append_note(hold_reason, detail_note), degraded_note),
+                    while qa_result.score < min_quality or qa_result.has_hard_failure:
+                        retry_action, retry_html = self._news_handle_qa_failure_with_retry(
+                            claimed_event_id,
+                            qa_result,
+                            final_html,
+                            "pre_images",
+                            min_quality=min_quality,
                         )
-                    )
-                    self._workflow_perf_finish_run("hold", hold_reason)
-                    return WorkflowResult("hold", hold_reason)
+                        _, retry_row = self._get_event_retry_state(claimed_event_id, create=False)
+                        attempts_now = int((retry_row or {}).get("attempts", 0) or 0)
+                        last_retry_reason = str((retry_row or {}).get("last_hold_reason", "") or "").strip()
+                        if retry_action == "retry_now":
+                            final_html = str(retry_html or final_html)
+                            repaired_html, _retry_steps = self._apply_news_qa_repair_chain(
+                                html=final_html,
+                                qa_result=qa_result,
+                                domain=current_domain,
+                                source_url=str(getattr(selected, "url", "") or ""),
+                            )
+                            final_html = repaired_html
+                            qa_result = self._qa_evaluate(
+                                final_html,
+                                title=draft.title,
+                                domain=current_domain,
+                                keyword=selected.title,
+                                context=f"news_retry_pre_{attempts_now}",
+                                phase="pre_images",
+                            )
+                            if qa_result.score >= min_quality and (not qa_result.has_hard_failure):
+                                break
+                            continue
+
+                        if str(last_retry_reason).startswith("discard:"):
+                            hold_reason = "watchdog_discard:" + str(last_retry_reason).split("discard:", 1)[-1]
+                            claim_finalized = True
+                        elif str(last_retry_reason).startswith("pause:"):
+                            hold_reason = "watchdog_pause:" + str(last_retry_reason).split("pause:", 1)[-1]
+                        elif attempts_now > self._workflow_retry_max_attempts():
+                            hold_reason = (
+                                f"qa_retry_exceeded:{attempts_now}/"
+                                f"{self._workflow_retry_max_attempts()}"
+                            )
+                        elif qa_result.has_hard_failure:
+                            hold_reason = "qa_hard_failure:" + ",".join(list(getattr(qa_result, "hard_failures", []) or [])[:5])
+                        else:
+                            hold_reason = f"qa_below_threshold:{qa_result.score}/{min_quality}"
+
+                        hold_note = self._qa_hold_note(
+                            phase="pre_images",
+                            hold_reason=hold_reason,
+                            qa_result=qa_result,
+                            min_quality=min_quality,
+                            attempts=attempts_now,
+                            no_progress_streak=int(no_progress),
+                            image_count=0,
+                        )
+                        self.logs.append_run(
+                            RunRecord(
+                                status="hold",
+                                score=qa_result.score,
+                                title=draft.title,
+                                source_url=draft.source_url,
+                                published_url="",
+                                note=self._append_note(hold_note, degraded_note),
+                            )
+                        )
+                        self._workflow_perf_finish_run("hold", hold_reason)
+                        return WorkflowResult("hold", hold_reason)
 
             actionability = self._evaluate_actionability_gate(draft.title, final_html)
             if not actionability.ok:
@@ -2934,6 +3542,23 @@ class AgentWorkflow:
             )
             for note in emergency_notes:
                 degraded_note = self._append_note(degraded_note, note)
+            provider_error_hint = self._provider_error_from_notes(emergency_notes)
+            if provider_error_hint:
+                wd_trip, wd_reason = self._record_provider_failure_watchdog(claimed_event_id, provider_error_hint)
+                if wd_trip and str(wd_reason or "").startswith("pause:"):
+                    hold_reason = "watchdog_pause:" + str(wd_reason).split("pause:", 1)[-1]
+                    self.logs.append_run(
+                        RunRecord(
+                            status="hold",
+                            score=0,
+                            title=draft.title,
+                            source_url=draft.source_url,
+                            published_url="",
+                            note=self._append_note(hold_reason, degraded_note),
+                        )
+                    )
+                    self._workflow_perf_finish_run("hold", hold_reason)
+                    return WorkflowResult("hold", hold_reason)
             thumb_row = dict(getattr(picked_pack, "thumb_bg", {}) or {})
             inline_rows = list(getattr(picked_pack, "inline_bg", []) or [])
             if (not thumb_row) or len(inline_rows) < required_inline:
@@ -3033,8 +3658,109 @@ class AgentWorkflow:
                 include_image_integrity=bool(images),
                 phase="post_images",
             )
-            if post_image_qa.has_hard_failure:
-                hold_reason = "post_image_qa_hard_fail:" + ",".join(list(post_image_qa.hard_failures or [])[:3])
+            min_quality = max(91, int(getattr(self.settings.quality, "min_quality_score", 85) or 85))
+            while post_image_qa.has_hard_failure or (
+                self.settings.quality.enabled and self.settings.quality.strict_mode and post_image_qa.score < min_quality
+            ):
+                provider_error = ""
+                hard_post = [str(x or "").strip().lower() for x in (post_image_qa.hard_failures or []) if str(x or "").strip()]
+                if "image_integrity_failed" in hard_post:
+                    images = self._force_image_floor(draft, images, target_images)
+                    if len(images) < target_images:
+                        repacked, refill_notes = self._news_pack_pick_with_emergency_fill(
+                            tags=news_tags,
+                            required_inline=required_inline,
+                            target_images=target_images,
+                        )
+                        for note in refill_notes:
+                            degraded_note = self._append_note(degraded_note, note)
+                        provider_error = ";".join(refill_notes or [])
+                        refill_thumb = dict(getattr(repacked, "thumb_bg", {}) or {})
+                        refill_inline = list(getattr(repacked, "inline_bg", []) or [])
+                        refill_assets: list[ImageAsset] = []
+                        if refill_thumb:
+                            thumb_asset = self._render_news_thumb_overlay(
+                                thumb_row=refill_thumb,
+                                category=category,
+                                title=draft.title,
+                            )
+                            if thumb_asset is not None:
+                                refill_assets.append(thumb_asset)
+                        inline_cap = max(0, target_images - len(refill_assets))
+                        for idx, row in enumerate(refill_inline[:inline_cap], start=1):
+                            asset = self._news_pack_record_to_asset(dict(row or {}), idx)
+                            if asset is None:
+                                continue
+                            refill_assets.append(asset)
+                        merged_assets = self.visual.ensure_unique_assets([*images, *refill_assets])
+                        images = merged_assets[:target_images] if merged_assets else images
+                    if len(images) < min_images_required:
+                        provider_error = provider_error or "image_understock_min_required"
+                    else:
+                        try:
+                            creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
+                            gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
+                                final_html,
+                                images,
+                                creds_for_gate,
+                                preflight_thumbnail_src=preflight_thumb_src,
+                            )
+                        except Exception as exc:
+                            provider_error = provider_error or str(exc)[:220]
+
+                retry_action, retry_html = self._news_handle_qa_failure_with_retry(
+                    claimed_event_id,
+                    post_image_qa,
+                    gate_preview_html,
+                    "post_images",
+                    min_quality=min_quality,
+                    provider_error=provider_error,
+                )
+                _, retry_row = self._get_event_retry_state(claimed_event_id, create=False)
+                attempts_now = int((retry_row or {}).get("attempts", 0) or 0)
+                last_retry_reason = str((retry_row or {}).get("last_hold_reason", "") or "").strip()
+                if retry_action == "retry_now":
+                    gate_preview_html = str(retry_html or gate_preview_html)
+                    post_image_qa = self._qa_evaluate(
+                        gate_preview_html,
+                        title=draft.title,
+                        domain=current_domain,
+                        keyword=selected.title,
+                        context=f"news_retry_post_{attempts_now}",
+                        include_image_integrity=bool(images),
+                        phase="post_images",
+                    )
+                    if (not post_image_qa.has_hard_failure) and (
+                        (not (self.settings.quality.enabled and self.settings.quality.strict_mode))
+                        or post_image_qa.score >= min_quality
+                    ):
+                        break
+                    continue
+
+                if str(last_retry_reason).startswith("discard:"):
+                    hold_reason = "watchdog_discard:" + str(last_retry_reason).split("discard:", 1)[-1]
+                    claim_finalized = True
+                elif str(last_retry_reason).startswith("pause:"):
+                    hold_reason = "watchdog_pause:" + str(last_retry_reason).split("pause:", 1)[-1]
+                elif attempts_now > self._workflow_retry_max_attempts():
+                    hold_reason = (
+                        f"qa_retry_exceeded:{attempts_now}/"
+                        f"{self._workflow_retry_max_attempts()}"
+                    )
+                elif post_image_qa.has_hard_failure:
+                    hold_reason = "qa_hard_failure:" + ",".join(list(post_image_qa.hard_failures or [])[:5])
+                else:
+                    hold_reason = f"qa_below_threshold:{post_image_qa.score}/{min_quality}"
+
+                hold_note = self._qa_hold_note(
+                    phase="post_images",
+                    hold_reason=hold_reason,
+                    qa_result=post_image_qa,
+                    min_quality=min_quality,
+                    attempts=attempts_now,
+                    no_progress_streak=0,
+                    image_count=len(images),
+                )
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -3042,27 +3768,11 @@ class AgentWorkflow:
                         title=draft.title,
                         source_url=draft.source_url,
                         published_url="",
-                        note=self._append_note(hold_reason, degraded_note),
+                        note=self._append_note(hold_note, degraded_note),
                     )
                 )
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
-            if self.settings.quality.enabled and self.settings.quality.strict_mode:
-                min_quality = max(91, int(getattr(self.settings.quality, "min_quality_score", 85) or 85))
-                if post_image_qa.score < min_quality:
-                    hold_reason = f"post_image_qa_below_threshold:{post_image_qa.score}/{min_quality}"
-                    self.logs.append_run(
-                        RunRecord(
-                            status="hold",
-                            score=post_image_qa.score,
-                            title=draft.title,
-                            source_url=draft.source_url,
-                            published_url="",
-                            note=self._append_note(hold_reason, degraded_note),
-                        )
-                    )
-                    self._workflow_perf_finish_run("hold", hold_reason)
-                    return WorkflowResult("hold", hold_reason)
 
             go_live_errors, go_live_warnings = self._go_live_gate_checklist(
                 title=draft.title,
@@ -3149,6 +3859,8 @@ class AgentWorkflow:
             if claimed_event_id:
                 self.news_pool_store.mark_used(claimed_event_id, str(getattr(published, "url", "") or ""))
                 claim_finalized = True
+                if bool(getattr(self.settings.workflow, "retry_reset_on_success", True)):
+                    self._reset_event_retry_state(claimed_event_id)
             self._update_news_rotation_state_on_publish(claimed_item or {}, category)
             self._mark_news_pack_used(images, str(getattr(published, "post_id", "") or ""))
 
@@ -3207,6 +3919,8 @@ class AgentWorkflow:
     def run_once(self, manual_trigger: bool = False) -> WorkflowResult:
         self._workflow_perf_start_run(manual_trigger=bool(manual_trigger))
         self._maintenance_tick()
+        # Warm-load + prune retry/watchdog state on every run.
+        self._save_news_retry_state(self._load_news_retry_state())
         self._pending_keyword_claims = []
         self._active_slot_id = ""
         self._set_image_pipeline_state(
@@ -5622,6 +6336,23 @@ class AgentWorkflow:
             )
             self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
+
+        draft_title = re.sub(r"\s+", " ", str(getattr(draft, "title", "") or "").strip())
+        if not draft_title:
+            draft_title = title or "Recovered Draft"
+        draft_html = str(getattr(draft, "html", "") or "").strip()
+        if not draft_html:
+            draft_html = self._build_resume_fallback_html(
+                title=draft_title,
+                body_seed=plain or str(getattr(candidate, "body", "") or ""),
+                source_url=source_url,
+                reason="resume_collect_empty_draft_html",
+            )
+        draft.title = draft_title
+        draft.html = draft_html
+        if not str(getattr(draft, "summary", "") or "").strip():
+            draft.summary = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", draft_html)).strip()[:260]
+
         labels = self._normalize_resume_labels(row.get("labels", []))
         if not labels:
             labels = self._build_public_labels(
@@ -5761,8 +6492,16 @@ class AgentWorkflow:
     def _resume_draft_done(self, row: dict, manual_trigger: bool, queue_advisory: str = "") -> WorkflowResult:
         title = self._strip_wip_title_prefix(str(row.get("title", "") or "").strip())
         base_html = self._strip_wip_checkpoint_banner(str(row.get("content", "") or ""))
-        if not title or not base_html:
-            return WorkflowResult("hold", "resume draft payload is empty")
+        if not title:
+            title = "Recovered Draft"
+        if not base_html:
+            raw_seed = re.sub(r"\s+", " ", str(row.get("content", "") or "")).strip()
+            base_html = self._build_resume_fallback_html(
+                title=title,
+                body_seed=raw_seed,
+                source_url="",
+                reason="resume draft payload is empty",
+            )
 
         summary_text = self._normalize_excerpt(base_html)[:700]
         draft = DraftPost(
@@ -6106,6 +6845,54 @@ class AgentWorkflow:
         if not out:
             out = ["tech-fix", "troubleshooting"]
         return out[:10]
+
+    def _build_resume_fallback_html(
+        self,
+        *,
+        title: str,
+        body_seed: str,
+        source_url: str,
+        reason: str = "",
+    ) -> str:
+        seed = re.sub(r"\s+", " ", str(body_seed or "")).strip()
+        if len(seed) < 80:
+            seed = (
+                f"{str(title or 'Recovered topic').strip()} recovered from checkpoint state. "
+                "Previous draft payload was empty, so this body was reconstructed automatically."
+            )
+        safe_reason = re.sub(r"\s+", " ", str(reason or "")).strip()
+        source_block = "<li>No source URL available in recovery payload.</li>"
+        if str(source_url or "").strip():
+            source_block = f'<li><a href="{escape(str(source_url).strip())}" rel="noopener">Recovered Source</a></li>'
+        if is_news_mode(self.settings):
+            return (
+                "<h2>Quick Take</h2>"
+                f"<p>{escape(seed[:260])}</p>"
+                f"<p>This paragraph was auto-recovered to keep unattended publishing alive ({escape(safe_reason or 'payload_recovery')}).</p>"
+                "<h2>What Happened</h2>"
+                f"<p>{escape(seed[:420])}</p>"
+                "<h2>What To Do Now</h2>"
+                "<ul>"
+                "<li>Re-run generation once to replace this temporary recovery copy.</li>"
+                "<li>Validate source attribution and image merge before scheduling.</li>"
+                "<li>Proceed with staged publish only after QA confirms quality threshold.</li>"
+                "</ul>"
+                "<h2>Sources</h2>"
+                f"<ul>{source_block}</ul>"
+            )
+        return (
+            "<h2>Quick Answer</h2>"
+            f"<p>{escape(seed[:260])}</p>"
+            f"<p>Recovery note: {escape(safe_reason or 'payload_recovery')}</p>"
+            "<h2>Step-by-Step</h2>"
+            "<ol>"
+            "<li>Open settings and verify current version/state.</li>"
+            "<li>Apply one reversible change and test expected behavior.</li>"
+            "<li>If unchanged, collect logs and rollback before next attempt.</li>"
+            "</ol>"
+            "<h2>Sources</h2>"
+            f"<ul>{source_block}</ul>"
+        )
 
     def _extract_first_href(self, html: str) -> str:
         m = re.search(r'<a[^>]+href="([^"]+)"', html or "", flags=re.IGNORECASE)

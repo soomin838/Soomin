@@ -1132,6 +1132,76 @@ class AgentController:
             if str(_nested_get(raw, "generation.gemini_only_on_fail") or "").strip().lower() in {"", "none"}:
                 _nested_set(raw, "generation.gemini_only_on_fail", True)
                 changed = True
+            if str(_nested_get(raw, "workflow.retry_enabled") or "").strip().lower() in {"", "none"}:
+                _nested_set(raw, "workflow.retry_enabled", True)
+                changed = True
+            try:
+                wf_retry_max = int(_nested_get(raw, "workflow.retry_max_attempts_per_event") or "0")
+            except Exception:
+                wf_retry_max = 0
+            if wf_retry_max <= 0:
+                _nested_set(raw, "workflow.retry_max_attempts_per_event", 4)
+                changed = True
+            debounce_raw = _nested_get(raw, "workflow.retry_debounce_seconds")
+            if not isinstance(debounce_raw, list) or len(debounce_raw) < 4:
+                _nested_set(raw, "workflow.retry_debounce_seconds", [0, 30, 120, 600])
+                changed = True
+            if str(_nested_get(raw, "workflow.retry_reset_on_success") or "").strip().lower() in {"", "none"}:
+                _nested_set(raw, "workflow.retry_reset_on_success", True)
+                changed = True
+            if str(_nested_get(raw, "watchdog.enabled") or "").strip().lower() in {"", "none"}:
+                _nested_set(raw, "watchdog.enabled", True)
+                changed = True
+            try:
+                wd_hard_streak = int(_nested_get(raw, "watchdog.max_same_hard_failure_streak") or "0")
+            except Exception:
+                wd_hard_streak = 0
+            if wd_hard_streak <= 0:
+                _nested_set(raw, "watchdog.max_same_hard_failure_streak", 3)
+                changed = True
+            try:
+                wd_wallclock = int(_nested_get(raw, "watchdog.max_event_wallclock_minutes") or "0")
+            except Exception:
+                wd_wallclock = 0
+            if wd_wallclock <= 0:
+                _nested_set(raw, "watchdog.max_event_wallclock_minutes", 20)
+                changed = True
+            try:
+                wd_total_attempts = int(_nested_get(raw, "watchdog.max_event_total_attempts") or "0")
+            except Exception:
+                wd_total_attempts = 0
+            if wd_total_attempts <= 0:
+                _nested_set(raw, "watchdog.max_event_total_attempts", 6)
+                changed = True
+            try:
+                wd_holds = int(_nested_get(raw, "watchdog.max_global_holds_per_hour") or "0")
+            except Exception:
+                wd_holds = 0
+            if wd_holds <= 0:
+                _nested_set(raw, "watchdog.max_global_holds_per_hour", 12)
+                changed = True
+            try:
+                wd_530 = int(_nested_get(raw, "watchdog.max_pollinations_530_streak") or "0")
+            except Exception:
+                wd_530 = 0
+            if wd_530 <= 0:
+                _nested_set(raw, "watchdog.max_pollinations_530_streak", 6)
+                changed = True
+            try:
+                wd_429 = int(_nested_get(raw, "watchdog.max_pollinations_429_streak") or "0")
+            except Exception:
+                wd_429 = 0
+            if wd_429 <= 0:
+                _nested_set(raw, "watchdog.max_pollinations_429_streak", 4)
+                changed = True
+            wd_530_backoff = _nested_get(raw, "watchdog.backoff_on_provider_failure_minutes.http_530")
+            if not isinstance(wd_530_backoff, list) or len(wd_530_backoff) < 3:
+                _nested_set(raw, "watchdog.backoff_on_provider_failure_minutes.http_530", [30, 60, 90])
+                changed = True
+            wd_429_backoff = _nested_get(raw, "watchdog.backoff_on_provider_failure_minutes.http_429")
+            if not isinstance(wd_429_backoff, list) or len(wd_429_backoff) < 3:
+                _nested_set(raw, "watchdog.backoff_on_provider_failure_minutes.http_429", [90, 120, 180])
+                changed = True
             if str(_nested_get(raw, "news_pack.enabled") or "").strip().lower() in {"", "none"}:
                 _nested_set(raw, "news_pack.enabled", True)
                 changed = True
