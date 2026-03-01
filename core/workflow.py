@@ -291,7 +291,8 @@ class AgentWorkflow:
         if thumb_row and len(inline_rows) >= required_inline:
             return picked, []
         notes: list[str] = []
-        max_fill = max(1, int(getattr(self.settings.news_pack, "emergency_fill_max_items", 3) or 3))
+        # News mode hard bound: immediate understock recovery is capped at 3 attempts.
+        max_fill = 3
         for idx in range(1, max_fill + 1):
             tick = self.news_pack_seed_tick_if_needed(force=True, min_interval_sec=0)
             tick_status = str((tick or {}).get("status", "unknown") or "unknown")
@@ -2422,6 +2423,11 @@ class AgentWorkflow:
         source = re.sub(r"\s+", " ", str((item or {}).get("source", "") or "")).strip().lower()
         url = re.sub(r"\s+", " ", str((item or {}).get("url", "") or "")).strip()
         category = re.sub(r"\s+", " ", str((item or {}).get("category", "") or "platform")).strip().lower()
+        event_id = re.sub(
+            r"\s+",
+            " ",
+            str((item or {}).get("event_id", "") or (item or {}).get("id", "") or ""),
+        ).strip()
         if not category:
             category = classify_category(f"{title} {snippet}")
         long_tail = self._build_news_long_tail_keywords(title, category)
@@ -2434,7 +2440,8 @@ class AgentWorkflow:
             main_entity=self.scout._extract_main_entity(title),  # noqa: SLF001
             long_tail_keywords=long_tail[:8],
             meta={
-                "news_pool_id": int((item or {}).get("id", 0) or 0),
+                "news_pool_id": event_id,
+                "news_event_id": event_id,
                 "news_category": category or "platform",
                 "published_at": str((item or {}).get("published_at", "") or ""),
                 "topic_fp": str((item or {}).get("topic_fp", "") or ""),
@@ -2461,6 +2468,11 @@ class AgentWorkflow:
             for x in (authority_links or [])
             if str(x or "").strip()
         ][:2]
+
+        def _is_forbidden_news_source(url: str) -> bool:
+            low = str(url or "").strip().lower()
+            return any(bad in low for bad in ("google.com", "googleusercontent.com", "googleapis.com"))
+
         def _publisher_label(url: str) -> str:
             host = (urlparse(str(url or "")).netloc or "").lower()
             if "security.googleblog.com" in host:
@@ -2482,12 +2494,16 @@ class AgentWorkflow:
                 return "Source"
             return " ".join(x.capitalize() for x in label_parts[:2]) + " Report"
         source_items: list[str] = []
-        if source_url:
+        if source_url and (not _is_forbidden_news_source(source_url)):
+            source_label = f"{_publisher_label(source_url)} (Original report)"
             source_items.append(
-                f'<li><a href="{escape(source_url)}" rel="nofollow noopener" target="_blank">Original report</a></li>'
+                (
+                    f'<li><a href="{escape(source_url)}" rel="nofollow noopener" target="_blank">'
+                    f"{escape(source_label)}</a></li>"
+                )
             )
         for link in safe_authorities:
-            if any(bad in link.lower() for bad in ("google.com", "googleusercontent.com", "googleapis.com")):
+            if _is_forbidden_news_source(link):
                 continue
             source_items.append(
                 f'<li><a href="{escape(link)}" rel="nofollow noopener" target="_blank">{escape(_publisher_label(link))}</a></li>'
@@ -2532,7 +2548,7 @@ class AgentWorkflow:
             "<h2>What Happened</h2>"
             f"<p>According to reports, this {escape(cat)} update affects users who rely on daily workflows.</p>"
             f"<p>{escape(question_lines[0])}</p>"
-            "<h2>Why It Matters (for normal users)</h2>"
+            "<h2>Why It Matters</h2>"
             "<p>If this change impacts login, sync, notifications, or background tasks, normal usage can degrade quickly.</p>"
             f"<p>{escape(question_lines[1])}</p>"
             "<h2>What To Do Now</h2>"
@@ -2572,9 +2588,12 @@ class AgentWorkflow:
         self._progress("news_pool", "뉴스 풀 갱신/클레임", 18)
         working_draft_id = ""
         claimed_item: dict[str, Any] | None = None
-        claimed_id = 0
+        claimed_event_id = ""
         claim_finalized = False
         degraded_note = self._append_note(preflight_index_note or "", sync_note)
+        if str(getattr(self.settings.quality, "qa_mode", "quick") or "quick").strip().lower() != "full":
+            self.settings.quality.qa_mode = "full"
+            degraded_note = self._append_note(degraded_note, "qa_mode_forced=full")
         if queue_advisory:
             degraded_note = self._append_note(degraded_note, queue_advisory)
         try:
@@ -2618,11 +2637,13 @@ class AgentWorkflow:
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
 
-            claimed_id = int((claimed_item or {}).get("id", 0) or 0)
+            claimed_event_id = str(
+                (claimed_item or {}).get("event_id", "") or (claimed_item or {}).get("id", "") or ""
+            ).strip()
             selected = self._news_item_to_candidate(claimed_item)
             category = str((selected.meta or {}).get("news_category", "platform") or "platform").strip().lower() or "platform"
             global_keywords = list(getattr(selected, "long_tail_keywords", []) or [])[:8]
-            reason = f"news_pool_claimed={claimed_id};category={category}"
+            reason = f"news_pool_claimed={claimed_event_id};category={category}"
             labels = self._build_public_labels(
                 title=selected.title,
                 candidate=selected,
@@ -2709,11 +2730,8 @@ class AgentWorkflow:
             )
             if self.settings.quality.enabled and self.settings.quality.strict_mode:
                 min_quality = max(91, int(getattr(self.settings.quality, "min_quality_score", 85) or 85))
-                configured_max_passes = int(getattr(self.settings.quality, "qa_retry_max_passes", 0) or 0)
-                # News mode hard rule: retry loop must run even when qa_retry_max_passes=0.
-                max_passes = max(15, configured_max_passes) if configured_max_passes > 0 else 15
-                max_passes = min(25, max_passes)
-                no_progress_limit = 4
+                max_passes = 15
+                no_progress_limit = 3
                 pass_no = 0
                 no_progress = 0
                 loop_stop_reason = "not_started"
@@ -2726,7 +2744,7 @@ class AgentWorkflow:
                         "initial_score": int(qa_result.score),
                         "initial_failed_keys": self._qa_failed_keys(qa_result)[:8],
                         "initial_hard_failures": list(getattr(qa_result, "hard_failures", []) or [])[:8],
-                        "configured_retry_max_passes": int(configured_max_passes),
+                        "configured_retry_max_passes": int(max_passes),
                         "effective_retry_max_passes": int(max_passes),
                         "no_progress_limit": int(no_progress_limit),
                         "target_score": int(min_quality),
@@ -3029,7 +3047,7 @@ class AgentWorkflow:
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
             if self.settings.quality.enabled and self.settings.quality.strict_mode:
-                min_quality = int(getattr(self.settings.quality, "min_quality_score", 85) or 85)
+                min_quality = max(91, int(getattr(self.settings.quality, "min_quality_score", 85) or 85))
                 if post_image_qa.score < min_quality:
                     hold_reason = f"post_image_qa_below_threshold:{post_image_qa.score}/{min_quality}"
                     self.logs.append_run(
@@ -3082,13 +3100,13 @@ class AgentWorkflow:
                 title=draft.title,
                 html_body=final_html,
                 labels=labels,
-                reason=f"news_pool_id={claimed_id};images={len(images)}",
+                reason=f"news_pool_id={claimed_event_id};images={len(images)}",
             )
             degraded_note = self._append_note(degraded_note, image_note)
 
             if dry_run:
-                if claimed_id:
-                    self.news_pool_store.rollback_claim(claimed_id)
+                if claimed_event_id:
+                    self.news_pool_store.rollback_claim(claimed_event_id)
                     claim_finalized = True
                 dry_path = self.root / "storage" / "logs" / f"dry_run_news_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.html"
                 dry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3101,7 +3119,7 @@ class AgentWorkflow:
                         source_url=draft.source_url,
                         published_url="dry-run://not-published",
                         note=self._append_note(
-                            f"Dry-run news success;news_pool_id={claimed_id};category={category};images={len(images)};dry_html={dry_path.name}",
+                            f"Dry-run news success;news_pool_id={claimed_event_id};category={category};images={len(images)};dry_html={dry_path.name}",
                             degraded_note,
                         ),
                     )
@@ -3127,8 +3145,8 @@ class AgentWorkflow:
                 meta_description=meta_description,
                 preflight_thumbnail_src=preflight_thumb_src,
             )
-            if claimed_id:
-                self.news_pool_store.mark_used(claimed_id, str(getattr(published, "url", "") or ""))
+            if claimed_event_id:
+                self.news_pool_store.mark_used(claimed_event_id, str(getattr(published, "url", "") or ""))
                 claim_finalized = True
             self._update_news_rotation_state_on_publish(claimed_item or {}, category)
             self._mark_news_pack_used(images, str(getattr(published, "post_id", "") or ""))
@@ -3149,7 +3167,7 @@ class AgentWorkflow:
                     published_url=published.url,
                     note=self._append_note(
                         (
-                            f"Published news successfully;news_pool_id={claimed_id};category={category};"
+                            f"Published news successfully;news_pool_id={claimed_event_id};category={category};"
                             f"images={len(images)};qa={qa_result.score};"
                             f"total_gemini_calls={max(0, int(self.logs.get_today_gemini_count()) - int(today_gemini_before))}"
                         ),
@@ -3179,9 +3197,9 @@ class AgentWorkflow:
             self._workflow_perf_finish_run("hold", hold_reason)
             return WorkflowResult("hold", hold_reason)
         finally:
-            if claimed_id and (not claim_finalized):
+            if claimed_event_id and (not claim_finalized):
                 try:
-                    self.news_pool_store.rollback_claim(claimed_id)
+                    self.news_pool_store.rollback_claim(claimed_event_id)
                 except Exception:
                     pass
 
@@ -6254,12 +6272,12 @@ class AgentWorkflow:
             if len(parts) == 1:
                 return (
                     parts[0],
-                    "Use the practical steps below to apply this quickly in real work.",
+                    "Use the key signals below to apply this update in real operations.",
                 )
         safe_title = re.sub(r"\s+", " ", str(title or "")).strip() or "this topic"
         return (
-            f"This guide gives the fastest practical answer about {safe_title}.",
-            "Start with one safe troubleshooting step, then scale only after you verify the result.",
+            f"This update provides a concise readout on {safe_title}.",
+            "Start with one low-risk verification step, then expand only after confirming impact.",
         )
 
     def _optimize_thumbnail_alt(self, images: list[ImageAsset], candidate: TopicCandidate) -> None:
@@ -6366,14 +6384,34 @@ class AgentWorkflow:
                 for row in shape_rows[-60:]
                 if str((row or {}).get("shape_id", "") or "").strip()
             )
-            api_ready = bool(
-                (self.settings.gemini.api_key or "").strip()
-                and (self.settings.gemini.api_key or "").strip() != "GEMINI_API_KEY"
-            )
-            allow_gemini = api_ready and (self._gemini_budget_remaining() > 0)
             rejected_due_to_similarity = 0
             rejected_due_to_shape = 0
             total_candidates = 0
+
+            recent_token_sets = [
+                set(re.findall(r"[a-z0-9]+", str(t or "").lower()))
+                for t in (recent_titles or [])[:40]
+                if str(t or "").strip()
+            ]
+
+            def title_similarity_to_recent(t: str) -> float:
+                words = set(re.findall(r"[a-z0-9]+", str(t or "").lower()))
+                if not words:
+                    return 1.0
+                best = 0.0
+                for rw in recent_token_sets:
+                    if not rw:
+                        continue
+                    inter = len(words & rw)
+                    union = len(words | rw)
+                    if union <= 0:
+                        continue
+                    score = inter / union
+                    if score > best:
+                        best = score
+                if self._title_first_words_key(t, n=4) in recent_first4:
+                    best = max(best, 1.0)
+                return best
 
             def score_news_title(t: str) -> int:
                 tt = re.sub(r"\s+", " ", str(t or "")).strip()
@@ -6409,6 +6447,8 @@ class AgentWorkflow:
                     s += 3
                 if self._is_recent_title_duplicate(tt):
                     s -= 200
+                sim = title_similarity_to_recent(tt)
+                s -= int(round(sim * 90))
                 return s
 
             def filter_news_candidates(rows: list[str]) -> list[str]:
@@ -6437,31 +6477,30 @@ class AgentWorkflow:
                 return out
 
             best = raw
-            if allow_gemini:
-                try:
-                    variants = self.brain.generate_news_title_variants(
-                        category=(category_hint or "platform"),
-                        source_title=topic_phrase,
-                        source_snippet=(
-                            str(getattr(candidate, "body", "") or "")[:420]
-                            if isinstance(candidate, TopicCandidate)
-                            else ""
-                        ),
-                        recent_titles=recent_titles,
-                        banned_tokens=banned_tokens,
-                        limit=10,
-                    )
-                    if self.brain.call_count:
-                        self.logs.increment_today_gemini_count(self.brain.call_count)
-                        self.brain.reset_run_counter()
-                    total_candidates += len(list(variants or []))
-                    filtered_variants = filter_news_candidates(list(variants or []))
-                    if filtered_variants:
-                        best = max(filtered_variants, key=score_news_title)
-                except Exception:
-                    if self.brain.call_count:
-                        self.logs.increment_today_gemini_count(self.brain.call_count)
-                        self.brain.reset_run_counter()
+            try:
+                variants = self.brain.generate_news_title_variants(
+                    category=(category_hint or "platform"),
+                    source_title=topic_phrase,
+                    source_snippet=(
+                        str(getattr(candidate, "body", "") or "")[:420]
+                        if isinstance(candidate, TopicCandidate)
+                        else ""
+                    ),
+                    recent_titles=recent_titles,
+                    banned_tokens=banned_tokens,
+                    limit=10,
+                )
+                if self.brain.call_count:
+                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                    self.brain.reset_run_counter()
+                total_candidates += len(list(variants or []))
+                filtered_variants = filter_news_candidates(list(variants or []))
+                if filtered_variants:
+                    best = max(filtered_variants, key=score_news_title)
+            except Exception:
+                if self.brain.call_count:
+                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                    self.brain.reset_run_counter()
 
             verbs = [
                 "shifts",
@@ -6533,12 +6572,34 @@ class AgentWorkflow:
                     )
                     title_local = re.sub(r"\s+", " ", title_local).strip(" -:")[:100]
                     candidates_local.append(title_local)
+                # Guarantee at least 20 combinatorial candidates as fallback floor.
+                while len(candidates_local) < 20:
+                    verb = random.choice(verbs)
+                    angle = random.choice(angles)
+                    tpl = random.choice(frames)
+                    title_local = tpl.format(
+                        topic=topic_phrase,
+                        verb=verb,
+                        verb_cap=(verb[:1].upper() + verb[1:]),
+                        angle=angle,
+                        category=category_word,
+                    )
+                    title_local = re.sub(r"\s+", " ", title_local).strip(" -:")[:100]
+                    candidates_local.append(title_local)
                 total_candidates += len(candidates_local)
                 filtered_local = filter_news_candidates(candidates_local)
                 if filtered_local:
-                    best = max(filtered_local, key=score_news_title)
+                    ranked_local = sorted(
+                        filtered_local,
+                        key=lambda cand: (title_similarity_to_recent(cand), -score_news_title(cand), len(cand)),
+                    )
+                    best = ranked_local[0]
                 elif candidates_local:
-                    best = max(candidates_local, key=score_news_title)
+                    ranked_all = sorted(
+                        candidates_local,
+                        key=lambda cand: (title_similarity_to_recent(cand), -score_news_title(cand), len(cand)),
+                    )
+                    best = ranked_all[0]
 
             best = re.sub(
                 r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
