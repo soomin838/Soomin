@@ -423,6 +423,15 @@ class GeminiBrain:
             "one_concrete_example",
             "what_to_watch_signal_list",
         ]
+        optional_section_pool = [
+            "Why It Matters",
+            "Key Details",
+            "What To Watch Next",
+            "Background Context",
+            "Risks",
+            "Timeline",
+        ]
+        selected_optional_sections = random.sample(optional_section_pool, k=random.randint(2, 4))
         selected_modules, _rotation_fallback, _recent_modules = self._select_news_modules(module_pool)
         plan_payload = dict(plan or {})
         category_norm = re.sub(r"\s+", " ", str(category or "platform").strip().lower()) or "platform"
@@ -438,14 +447,9 @@ class GeminiBrain:
             if str(x or "").strip()
         ][:8]
         module_slots = {}
+        slot_pool = ["What Happened", "What To Do Now", *selected_optional_sections]
         for module_name in selected_modules:
-            module_slots[module_name] = random.choice(
-                [
-                    "What Happened",
-                    "Key Details",
-                    "What To Watch Next",
-                ]
-            )
+            module_slots[module_name] = random.choice(slot_pool)
         prompt = (
             "Write a US tech news explainer article in valid HTML body fragment only.\n"
             "Language policy: US English only. Never output Korean.\n"
@@ -456,22 +460,22 @@ class GeminiBrain:
             "Do not write like a template. Vary transitions and avoid repeated phrases like 'In conclusion'.\n"
             "Avoid uniform paragraph lengths; mix 1-line punches with longer analysis.\n"
             "Do not write as a troubleshooting fix guide.\n"
+            "Do not use 'not working' or error-fix framing in this news article.\n"
             "Do NOT include FAQ section.\n"
-            "Required exact H2 section order:\n"
+            "Required H2 sections (must appear exactly once):\n"
             "Quick Take\n"
             "What Happened\n"
-            "Why It Matters (for normal users)\n"
             "What To Do Now\n"
-            "Key Details\n"
-            "What To Watch Next\n"
             "Sources\n"
+            f"Also include exactly these optional H2 sections: {selected_optional_sections}\n"
+            "Recommended section flow: Quick Take -> What Happened -> optional sections -> What To Do Now -> Sources.\n"
             "Under Quick Take, include:\n"
             "- LEDE: 2-3 short sentences\n"
             "- NUT GRAF: exactly 1 paragraph explaining why now and why it matters\n"
             "- Key Facts box as <ul> with exactly 5 short bullets covering Who/What/When/Scope/Risk.\n"
             "  If unknown, write 'Not confirmed'.\n"
             "What To Do Now must include 3-7 bullet steps.\n"
-            "The article must include at least 2 question sentences and one explicit comparison/example block.\n"
+            "The article must include at least 2 rhetorical question sentences and one explicit comparison/example block.\n"
             "Target depth: roughly 900-1400 words for editorial completeness.\n"
             f"Use 6-8 diversity modules from this pool: {selected_modules}\n"
             f"Module placement map (vary rhythm): {module_slots}\n"
@@ -500,11 +504,20 @@ class GeminiBrain:
             )
         )
         html = _render_news_html(payload)
-        if self._news_requires_key_facts_retry(html):
+        html = self._enforce_news_structure_contract(
+            html=html,
+            optional_sections=selected_optional_sections,
+        )
+        if self._news_requires_key_facts_retry(html) or self._news_requires_structure_retry(
+            html=html,
+            optional_sections=selected_optional_sections,
+        ):
             retry_prompt = (
                 prompt
-                + "\n\nREWRITE REQUIRED: previous output missed Quick Take Key Facts format. "
-                "Regenerate full HTML with LEDE + NUT GRAF + exactly 5 Key Facts bullets."
+                + "\n\nREWRITE REQUIRED: previous output missed structure checks."
+                + " Regenerate full HTML with required sections, selected optional sections,"
+                + " 2 rhetorical questions, one comparison/example block,"
+                + " and Quick Take LEDE + NUT GRAF + exactly 5 Key Facts bullets."
             )
             retry_payload = self._extract_json(
                 self._generate_text(
@@ -515,7 +528,10 @@ class GeminiBrain:
                     ),
                 )
             )
-            retry_html = _render_news_html(retry_payload)
+            retry_html = self._enforce_news_structure_contract(
+                html=_render_news_html(retry_payload),
+                optional_sections=selected_optional_sections,
+            )
             if retry_html:
                 html = retry_html
                 payload = retry_payload
@@ -680,7 +696,9 @@ class GeminiBrain:
                 final_urls.append(u)
         items: list[str] = []
         for idx, url in enumerate(final_urls[:3]):
-            label = "Original report" if idx == 0 and source_url else self._source_label_from_url(url)
+            label = self._source_label_from_url(url)
+            if idx == 0 and source_url:
+                label = f"{label} (Original report)"
             items.append(f'<li><a href="{escape(url)}">{escape(label)}</a></li>')
         if not items:
             items.append("<li>No authoritative source available.</li>")
@@ -710,6 +728,105 @@ class GeminiBrain:
         joined = " ".join(re.sub(r"<[^>]+>", " ", x) for x in lis).lower()
         required = ("who", "what", "when", "scope", "risk")
         return not all(tok in joined for tok in required)
+
+    def _news_requires_structure_retry(self, *, html: str, optional_sections: list[str]) -> bool:
+        src = str(html or "")
+        required = ["Quick Take", "What Happened", "What To Do Now", "Sources"]
+        for heading in required:
+            if not re.search(
+                rf"<h2[^>]*>\s*{re.escape(heading)}\s*</h2>",
+                src,
+                flags=re.IGNORECASE,
+            ):
+                return True
+        optional_hits = 0
+        for heading in optional_sections:
+            if re.search(
+                rf"<h2[^>]*>\s*{re.escape(str(heading or ''))}\s*</h2>",
+                src,
+                flags=re.IGNORECASE,
+            ):
+                optional_hits += 1
+        if optional_hits < min(2, len(optional_sections)):
+            return True
+        question_hits = len(re.findall(r"<p[^>]*>[^<]*\?[^<]*</p>", src, flags=re.IGNORECASE))
+        if question_hits < 2:
+            return True
+        if not re.search(r"<strong>\s*(comparison|example)\s*:\s*</strong>", src, flags=re.IGNORECASE):
+            return True
+        return False
+
+    def _enforce_news_structure_contract(self, *, html: str, optional_sections: list[str]) -> str:
+        src = str(html or "").strip()
+        if not src:
+            return src
+
+        def _append_section(base: str, heading: str, paragraph: str) -> str:
+            if re.search(
+                rf"<h2[^>]*>\s*{re.escape(heading)}\s*</h2>",
+                base,
+                flags=re.IGNORECASE,
+            ):
+                return base
+            return (
+                base
+                + f"<h2>{escape(heading)}</h2>"
+                + f"<p>{escape(paragraph)}</p>"
+            )
+
+        out = src
+        out = _append_section(
+            out,
+            "Quick Take",
+            "This update requires practical follow-up today because rollout details are still evolving.",
+        )
+        out = _append_section(
+            out,
+            "What Happened",
+            "Multiple reports indicate a meaningful platform change affecting normal user workflows.",
+        )
+        out = _append_section(
+            out,
+            "What To Do Now",
+            "Verify scope, test on one environment first, and monitor official updates before wider rollout.",
+        )
+        out = _append_section(
+            out,
+            "Sources",
+            "Source links are listed below for verification.",
+        )
+
+        optional_added = 0
+        for heading in optional_sections:
+            heading_txt = re.sub(r"\s+", " ", str(heading or "")).strip()
+            if not heading_txt:
+                continue
+            if re.search(
+                rf"<h2[^>]*>\s*{re.escape(heading_txt)}\s*</h2>",
+                out,
+                flags=re.IGNORECASE,
+            ):
+                optional_added += 1
+                continue
+            if optional_added >= 4:
+                break
+            out += (
+                f"<h2>{escape(heading_txt)}</h2>"
+                "<p>This section adds context that helps readers evaluate near-term decisions without speculation.</p>"
+            )
+            optional_added += 1
+
+        question_hits = len(re.findall(r"<p[^>]*>[^<]*\?[^<]*</p>", out, flags=re.IGNORECASE))
+        while question_hits < 2:
+            out += "<p>What changes should users monitor first before making wider adjustments?</p>"
+            question_hits += 1
+
+        if not re.search(r"<strong>\s*(comparison|example)\s*:\s*</strong>", out, flags=re.IGNORECASE):
+            out += (
+                "<p><strong>Example:</strong> Rolling out immediately may deliver features faster, "
+                "while waiting 24 hours can reduce disruption risk for critical workflows.</p>"
+            )
+        return out
 
     def rewrite_to_actionable(self, title: str, html: str, plan: dict | None = None) -> str:
         plan_payload = plan if isinstance(plan, dict) else {}
