@@ -295,27 +295,17 @@ class NewsPackSeeder:
         state: NewsPackState,
     ) -> tuple[ProviderResult | None, str, str, list[dict[str, Any]]]:
         width, height = (1280, 720) if str(kind).lower() == "thumb_bg" else (960, 540)
-        order = [
+        configured_order = [
             str(x or "").strip().lower()
             for x in (getattr(self.settings, "provider_order", []) or [])
             if str(x or "").strip()
         ]
-        if not order:
-            order = ["pollinations_auth", "pollinations_anon", "gemini"]
-        # Enforce provider sequence so auth 429 always falls through to anon first.
-        normalized: list[str] = []
-        for name in order:
-            if name not in normalized:
-                normalized.append(name)
-        if "pollinations_auth" in normalized and "pollinations_anon" not in normalized:
-            auth_idx = normalized.index("pollinations_auth")
-            normalized.insert(auth_idx + 1, "pollinations_anon")
+        # Hard policy for news mode: always try auth -> anon -> gemini in this sequence.
         canonical = ["pollinations_auth", "pollinations_anon", "gemini"]
-        ordered: list[str] = [name for name in canonical if name in normalized]
-        for name in normalized:
-            if name not in ordered:
-                ordered.append(name)
-        order = ordered
+        order: list[str] = list(canonical)
+        for name in configured_order:
+            if name and (name not in order):
+                order.append(name)
         pollinations_service_limited = False
         attempts: list[dict[str, Any]] = []
         provider_try_order = list(order)
