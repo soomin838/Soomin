@@ -35,6 +35,7 @@ from .news_pack_picker import NewsPackPicker
 from .news_pack_seeder import NewsPackSeeder
 from .publish_ledger import PublishLedger, make_ledger_key
 from .readability import optimize_html_readability
+from .title_diversity import choose_diverse_title
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
 from .patterns import PatternEngine
@@ -216,6 +217,8 @@ class AgentWorkflow:
         self._retry_reset_on_success = bool(getattr(getattr(self.settings, "workflow", None), "retry_reset_on_success", True))
         self._watchdog_state_path = self.root / "storage" / "state" / "watchdog_state.json"
         self._watchdog_enabled = bool(getattr(getattr(self.settings, "watchdog", None), "enabled", True))
+        self._title_diversity_state_path = self.root / "storage" / "state" / "title_pattern_state.json"
+        self._title_diversity_enabled = bool(getattr(getattr(self.settings, "title_diversity", None), "enabled", True))
         self._last_news_pool_refresh_stats: dict[str, Any] = {}
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
         self.news_cluster_engine = NewsClusterEngine(
@@ -3405,6 +3408,31 @@ class AgentWorkflow:
                 return WorkflowResult("hold", hold_reason)
             if go_live_warnings:
                 degraded_note = self._append_note(degraded_note, "go_live_warnings=" + ",".join(go_live_warnings[:3]))
+
+            if self._title_diversity_enabled:
+                try:
+                    title_mix = choose_diverse_title(
+                        base_title=str(draft.title or ""),
+                        cluster_id=str((selected.meta or {}).get("cluster_id", "") or ""),
+                        facet=str((selected.meta or {}).get("selected_facet", "impact") or "impact"),
+                        category=str(category or ""),
+                        run_start_minute=str(run_start_minute or ""),
+                        stable_hash_fn=stable_hash,
+                        state_path=self._title_diversity_state_path,
+                        settings=getattr(self.settings, "title_diversity", None),
+                    )
+                    diversified_title = str(title_mix.get("title", "") or "").strip()
+                    if diversified_title:
+                        draft.title = diversified_title
+                    alt_titles = title_mix.get("alt_titles", [])
+                    if isinstance(alt_titles, list):
+                        draft.alt_titles = [str(x).strip() for x in alt_titles if str(x).strip()]
+                    degraded_note = self._append_note(
+                        degraded_note,
+                        f"title_pattern={int(title_mix.get('pattern_id', -1) or -1)}",
+                    )
+                except Exception:
+                    degraded_note = self._append_note(degraded_note, "title_diversity_failed")
 
             labels = self._build_public_labels(
                 title=draft.title,
