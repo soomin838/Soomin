@@ -148,6 +148,16 @@ def main() -> int:
             current_title="Policy update and account verification changes",
             current_keywords=["policy", "account", "verification", "platform update"],
         )
+        internal_marker_start = len(
+            re.findall(r"<!--\s*RZ-INTERNAL:START\s*-->", out, flags=re.IGNORECASE)
+        )
+        internal_marker_end = len(
+            re.findall(r"<!--\s*RZ-INTERNAL:END\s*-->", out, flags=re.IGNORECASE)
+        )
+        if internal_marker_start != internal_marker_end:
+            raise AssertionError("Case1 failed: RZ-INTERNAL markers are unbalanced.")
+        if internal_marker_start > 1:
+            raise AssertionError("Case1 failed: expected at most one RZ-INTERNAL block on first run.")
 
         hrefs = re.findall(r'href=["\']([^"\']+)["\']', out, flags=re.IGNORECASE)
         unique_hrefs = set(hrefs)
@@ -165,6 +175,18 @@ def main() -> int:
             limit = int(len(out) * 0.40)
             if first_internal_pos > limit:
                 raise AssertionError("Case1 failed: internal body link was not inserted in first 40% of HTML.")
+
+        out_rerun = wf._inject_internal_links_and_related_coverage(  # noqa: SLF001
+            out,
+            current_title="Policy update and account verification changes",
+            current_keywords=["policy", "account", "verification", "platform update"],
+        )
+        rerun_start = len(re.findall(r"<!--\s*RZ-INTERNAL:START\s*-->", out_rerun, flags=re.IGNORECASE))
+        rerun_end = len(re.findall(r"<!--\s*RZ-INTERNAL:END\s*-->", out_rerun, flags=re.IGNORECASE))
+        if rerun_start != rerun_end:
+            raise AssertionError("Case1 failed: RZ-INTERNAL markers are unbalanced after rerun.")
+        if rerun_start > 1:
+            raise AssertionError("Case1 failed: RZ-INTERNAL block is not idempotent after rerun.")
 
         rel_block = re.search(
             r"<h2>\s*Related Coverage\s*</h2>\s*<ul>(.*?)</ul>",
@@ -204,7 +226,7 @@ def main() -> int:
                 if rel_short_count > 1:
                     raise AssertionError("Case3 failed: shortage mode should not force many related links.")
 
-        print("Case 1 PASS: body internal link insertion works (or fail-open on shortage)")
+        print("Case 1 PASS: body internal link insertion works and RZ-INTERNAL marker is idempotent")
         print(f"  total_hrefs={len(hrefs)}, internal_hrefs={len(internal_urls)}")
         print("Case 2 PASS: Related Coverage block is generated with safe internal links")
         print(f"  related_count={len(rel_urls)}")

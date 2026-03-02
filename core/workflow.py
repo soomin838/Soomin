@@ -40,6 +40,7 @@ from .content_entropy import check_entropy
 from .visual_diagnostics import diagnose_visual_settings
 from .title_diversity import choose_diverse_title
 from .run_metrics import RunMetricsLogger, parse_reason_codes
+from .clickbait_sanitizer import sanitize_clickbait_terms
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
 from .patterns import PatternEngine
@@ -771,7 +772,8 @@ class AgentWorkflow:
         status_hint: str,
         message_hint: str,
     ) -> None:
-        ctx = dict(self._run_metrics_context.get(str(scope or ""), {}) or {})
+        scope_key = str(scope or "").strip() or "run"
+        ctx = dict(self._run_metrics_context.get(scope_key, {}) or {})
         run_record = self._latest_run_record_since(int(baseline_log_id or 0))
 
         status = str((run_record.get("status") if isinstance(run_record, dict) else "") or status_hint or "failed").strip().lower()
@@ -831,16 +833,17 @@ class AgentWorkflow:
             or baseline_run_id
             or uuid.uuid4().hex[:12]
         ).strip()
-        dedupe_key = str(run_id or "").strip()
-        if not dedupe_key:
-            dedupe_key = uuid.uuid4().hex[:12]
+        if not run_id:
+            run_id = uuid.uuid4().hex[:12]
+        dedupe_key = f"{scope_key}|{run_id}"
         if dedupe_key in self._run_metrics_emitted_keys:
             return
         self._run_metrics_emitted_keys.add(dedupe_key)
 
         payload = {
             "ts_utc": datetime.now(timezone.utc).isoformat(),
-            "run_id": dedupe_key,
+            "run_id": run_id,
+            "scope": scope_key,
             "status": status,
             "reason_codes": reason_codes,
             "topic_cluster": topic_cluster or "default",
@@ -3660,6 +3663,10 @@ class AgentWorkflow:
             except Exception:
                 pass
 
+            final_html, degraded_note, _ = self._apply_body_clickbait_sanitizer(
+                final_html,
+                degraded_note,
+            )
             dry_run = bool(getattr(self.settings.budget, "dry_run", False))
             preflight_thumb_src = self._preflight_thumb_src_from_images(images)
             degraded_note = self._annotate_image_pipeline_diagnostics(
@@ -3810,6 +3817,10 @@ class AgentWorkflow:
                 )
             except Exception:
                 degraded_note = self._append_note(degraded_note, "internal_links_failed")
+            final_html, degraded_note, _ = self._apply_body_clickbait_sanitizer(
+                final_html,
+                degraded_note,
+            )
 
             entropy_settings = getattr(self.settings, "entropy_check", None)
             entropy_result: dict[str, Any] = {"ok": True, "reasons": []}
@@ -5576,6 +5587,10 @@ class AgentWorkflow:
             )
         except Exception:
             generation_degraded_note = self._append_note(generation_degraded_note, "internal_links_failed")
+        final_html, generation_degraded_note, _ = self._apply_body_clickbait_sanitizer(
+            final_html,
+            generation_degraded_note,
+        )
         draft.title = self._double_unescape(str(draft.title or "")).strip()
         seo_topic = self._infer_topic_cluster(draft.title, global_keywords, final_html)
         seo_focus_keywords = self._compute_focus_keywords(draft.title, final_html, seo_topic)
@@ -6337,6 +6352,20 @@ class AgentWorkflow:
             return left
         return f"{left};{right}"
 
+    def _apply_body_clickbait_sanitizer(
+        self,
+        html: str,
+        note: str = "",
+    ) -> tuple[str, str, list[str]]:
+        sanitized_html, replaced = sanitize_clickbait_terms(str(html or ""))
+        updated_note = str(note or "")
+        if replaced:
+            updated_note = self._append_note(
+                updated_note,
+                "body_clickbait_sanitized:" + "|".join(replaced),
+            )
+        return sanitized_html, updated_note, replaced
+
     def _log_news_mode_guard(self, blocked_fn: str, reason: str = "") -> None:
         if not is_news_mode(self.settings):
             return
@@ -6975,6 +7004,7 @@ class AgentWorkflow:
             score=90,
             url="",
         )
+        resume_degraded_note = ""
 
         self._progress("visual", "중단 문서 재개: 이미지 라이브러리 선택", 74)
         target_images = self._image_target_max()
@@ -7079,6 +7109,10 @@ class AgentWorkflow:
             )
         except Exception:
             pass
+        final_html, resume_degraded_note, _ = self._apply_body_clickbait_sanitizer(
+            final_html,
+            resume_degraded_note,
+        )
         seo_topic = self._infer_topic_cluster(title, list(self.last_global_keywords or []), final_html)
         seo_focus_keywords = self._compute_focus_keywords(title, final_html, seo_topic)
         seo_slug_base = self._compute_seo_slug(title, seo_topic)
@@ -7142,7 +7176,10 @@ class AgentWorkflow:
             candidate=candidate,
         )
         if go_live_errors:
-            raise RuntimeError("Go-live gate failed: " + "; ".join(go_live_errors[:5]))
+            fail_msg = "Go-live gate failed: " + "; ".join(go_live_errors[:5])
+            if resume_degraded_note:
+                fail_msg = self._append_note(fail_msg, resume_degraded_note)
+            raise RuntimeError(fail_msg)
 
         qa_result = self._qa_evaluate(
             final_html,
@@ -7309,6 +7346,8 @@ class AgentWorkflow:
         self._cleanup_local_image_files(images)
 
         note = f"resumed_from_wip=draft_done, qa={qa_result.score}, images={len(images)}, scheduled_at={publish_at.isoformat()}"
+        if resume_degraded_note:
+            note = self._append_note(note, resume_degraded_note)
         if go_live_warnings:
             note = self._append_note(note, "go_live_warnings=" + ",".join(go_live_warnings[:4]))
         if queue_advisory:
@@ -10604,6 +10643,12 @@ class AgentWorkflow:
     def _strip_legacy_internal_link_blocks(self, html: str) -> str:
         out = str(html or "")
         out = re.sub(
+            r"<!--\s*RZ-INTERNAL:START\s*-->.*?<!--\s*RZ-INTERNAL:END\s*-->",
+            "",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        out = re.sub(
             r"<!--\s*RZ-RELATED:START\s*-->.*?<!--\s*RZ-RELATED:END\s*-->",
             "",
             out,
@@ -10642,12 +10687,14 @@ class AgentWorkflow:
         block = str(target.group(0) or "")
         if "</p>" not in block.lower():
             return src, False
-        sentence = (
-            f' For background context, see <a href="{escape(url, quote=True)}" rel="noopener">'
-            f"{escape(anchor)}</a>."
+        marker_block = (
+            "<!-- RZ-INTERNAL:START -->"
+            '<p class="rz-internal-link">For background context, see '
+            f'<a href="{escape(url, quote=True)}" rel="noopener">{escape(anchor)}</a>.'
+            "</p><!-- RZ-INTERNAL:END -->"
         )
-        replaced = re.sub(r"</p>\s*$", sentence + "</p>", block, count=1, flags=re.IGNORECASE)
-        out = src[: target.start()] + replaced + src[target.end() :]
+        insert_at = target.end()
+        out = src[:insert_at] + marker_block + src[insert_at:]
         return out, True
 
     def _collect_internal_link_candidates(
