@@ -76,6 +76,10 @@ publish:
   thumbnail_preflight_retry_delay_sec: 8
   min_images_required: 0
   max_images_per_post: 5
+ledger:
+  enabled: true
+  ttl_days: 90
+  path: storage/ledger/publish_ledger.jsonl
 quality:
   enabled: true
   strict_mode: true

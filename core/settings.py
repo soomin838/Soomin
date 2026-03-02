@@ -228,6 +228,13 @@ class PublishSettings:
 
 
 @dataclass
+class LedgerSettings:
+    enabled: bool = True
+    ttl_days: int = 90
+    path: str = "storage/ledger/publish_ledger.jsonl"
+
+
+@dataclass
 class QualitySettings:
     enabled: bool = True
     strict_mode: bool = True
@@ -552,6 +559,7 @@ class AppSettings:
     news_pack: NewsPackSettings = field(default_factory=NewsPackSettings)
     budget: BudgetSettings = field(default_factory=BudgetSettings)
     publish: PublishSettings = field(default_factory=PublishSettings)
+    ledger: LedgerSettings = field(default_factory=LedgerSettings)
     quality: QualitySettings = field(default_factory=QualitySettings)
     actionability_gate: ActionabilityGateSettings = field(default_factory=ActionabilityGateSettings)
     generation: GenerationSettings = field(default_factory=GenerationSettings)
@@ -607,6 +615,7 @@ def load_settings(path: Path) -> AppSettings:
     keywords_raw = dict(raw.get("keywords", {}) or {})
     keyword_sources_raw = dict((keywords_raw.get("sources", {}) or {}))
     sync_raw = dict(raw.get("sync", {}) or {})
+    ledger_raw = dict(raw.get("ledger", {}) or {})
 
     if isinstance(qa_raw, dict):
         if "qa_mode" in qa_raw:
@@ -813,6 +822,7 @@ def load_settings(path: Path) -> AppSettings:
         news_pack=_construct_dc(NewsPackSettings, news_pack_raw),
         budget=_construct_dc(BudgetSettings, raw.get("budget", {})),
         publish=publish_obj,
+        ledger=_construct_dc(LedgerSettings, ledger_raw),
         quality=_construct_dc(QualitySettings, quality_raw),
         actionability_gate=_construct_dc(ActionabilityGateSettings, actionability_raw),
         generation=_construct_dc(GenerationSettings, generation_raw),
