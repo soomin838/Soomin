@@ -102,6 +102,12 @@ publish:
   thumbnail_preflight_retry_delay_sec: 8
   min_images_required: 0
   max_images_per_post: 5
+internal_links:
+  enabled: true
+  body_link_count: 1
+  related_link_count: 2
+  overlap_threshold: 0.4
+  canonical_internal_host: ''
 ledger:
   enabled: true
   ttl_days: 90

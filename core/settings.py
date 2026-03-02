@@ -590,6 +590,7 @@ class InternalLinksPolicySettings:
     body_link_count: int = 1
     related_link_count: int = 2
     overlap_threshold: float = 0.4
+    canonical_internal_host: str = ""
 
 
 @dataclass

@@ -9559,6 +9559,301 @@ class AgentWorkflow:
     def _internal_links_pool_path(self) -> Path:
         return (self.root / "storage" / "state" / "internal_links_pool.json").resolve()
 
+    def _legacy_posts_index_cache_path(self) -> Path:
+        return (self.root / "storage" / "state" / "posts_index.json").resolve()
+
+    def _normalize_host(self, value: str) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        if "://" in text:
+            try:
+                text = str(urlparse(text).netloc or "").strip().lower()
+            except Exception:
+                return ""
+        text = text.split("/", 1)[0].split("@")[-1].strip()
+        if ":" in text:
+            text = text.split(":", 1)[0].strip()
+        if text.startswith("www."):
+            text = text[4:].strip()
+        return text
+
+    def _host_from_url(self, url: str) -> str:
+        try:
+            return self._normalize_host(urlparse(str(url or "").strip()).netloc)
+        except Exception:
+            return ""
+
+    def _canonical_internal_host(self) -> str:
+        configured = str(
+            getattr(getattr(self.settings, "internal_links", None), "canonical_internal_host", "") or ""
+        ).strip()
+        return self._normalize_host(configured)
+
+    def _parse_utc_soft(self, value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    def _infer_topic_cluster(
+        self,
+        title: str,
+        keywords: list[str] | str | None = None,
+        html: str | None = None,
+    ) -> str:
+        vocab = " ".join(
+            [
+                str(title or ""),
+                " ".join(self._parse_focus_keywords(keywords or "")),
+                re.sub(r"<[^>]+>", " ", str(html or "")),
+            ]
+        ).lower()
+        scored = [
+            ("security", ["security", "breach", "exploit", "malware", "vulnerability", "vuln", "cve", "patch"]),
+            ("policy", ["policy", "regulation", "compliance", "law", "legal", "terms", "guideline"]),
+            ("platform", ["platform", "rollout", "release", "service", "api", "outage", "update"]),
+            ("mobile", ["mobile", "android", "ios", "iphone", "ipad", "galaxy", "pixel"]),
+            ("ai", ["ai", "llm", "model", "inference", "training", "copilot", "gemini"]),
+            ("chips", ["chip", "gpu", "cpu", "semiconductor", "silicon", "nvidia", "amd", "intel"]),
+            ("privacy", ["privacy", "tracking", "consent", "personal data", "data collection", "gdpr"]),
+        ]
+        best = ("default", 0)
+        for topic, words in scored:
+            count = 0
+            for token in words:
+                if token in vocab:
+                    count += 1
+            if count > best[1]:
+                best = (topic, count)
+        return best[0] if best[1] > 0 else "default"
+
+    def _refresh_internal_links_pool(self) -> None:
+        path = self._internal_links_pool_path()
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=180)
+        canonical_host = self._canonical_internal_host()
+        allowed_topics = {"security", "policy", "platform", "mobile", "ai", "chips", "privacy", "default"}
+        pool_rows: list[dict[str, Any]] = []
+
+        # keep existing rows first so manual curation can survive refresh
+        pool_rows.extend(self._load_internal_links_pool())
+
+        # local posts index
+        try:
+            recent_rows = self.posts_index.query_recent(
+                limit=500,
+                include_future=False,
+                statuses=["live", "scheduled"],
+                exclude_deleted=True,
+            )
+        except Exception:
+            recent_rows = []
+        for row in recent_rows:
+            focus = self._parse_focus_keywords(str((row or {}).get("focus_keywords", "") or ""))
+            title = str((row or {}).get("title", "") or "").strip()
+            summary = str((row or {}).get("summary", "") or "").strip()
+            topic = self._infer_topic_cluster(title, focus, summary)
+            pool_rows.append(
+                {
+                    "url": str((row or {}).get("url", "") or "").strip(),
+                    "title": title,
+                    "keywords": focus,
+                    "tags": [topic] if topic else ["default"],
+                    "topic": topic or "default",
+                    "updated_at_utc": str(
+                        (row or {}).get("published_at")
+                        or (row or {}).get("last_seen_at")
+                        or now.isoformat()
+                    ),
+                    "source": "posts_index",
+                }
+            )
+
+        # local publish ledger
+        ledger_path = Path(getattr(self, "_publish_ledger_path", self.root / "storage" / "ledger" / "publish_ledger.jsonl"))
+        if ledger_path.exists():
+            try:
+                with ledger_path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        row_txt = str(line or "").strip()
+                        if not row_txt:
+                            continue
+                        try:
+                            row = json.loads(row_txt)
+                        except Exception:
+                            continue
+                        if not isinstance(row, dict):
+                            continue
+                        url = str(
+                            row.get("url")
+                            or row.get("post_url")
+                            or row.get("published_url")
+                            or ""
+                        ).strip()
+                        title = str(row.get("title", "") or "").strip()
+                        if not url or not title:
+                            continue
+                        topic = self._infer_topic_cluster(title, row.get("keywords", []), "")
+                        pool_rows.append(
+                            {
+                                "url": url,
+                                "title": title,
+                                "keywords": self._parse_focus_keywords(row.get("keywords", "")),
+                                "tags": [topic],
+                                "topic": topic,
+                                "updated_at_utc": str(row.get("created_at_utc", "") or now.isoformat()),
+                                "source": "publish_ledger",
+                            }
+                        )
+            except Exception:
+                pass
+
+        # optional legacy cache file
+        cache_path = self._legacy_posts_index_cache_path()
+        if cache_path.exists():
+            try:
+                cache_obj = json.loads(cache_path.read_text(encoding="utf-8"))
+                if isinstance(cache_obj, dict):
+                    cache_rows = cache_obj.get("items") or cache_obj.get("posts") or []
+                elif isinstance(cache_obj, list):
+                    cache_rows = cache_obj
+                else:
+                    cache_rows = []
+                if not isinstance(cache_rows, list):
+                    cache_rows = []
+            except Exception:
+                cache_rows = []
+            for row in cache_rows:
+                if not isinstance(row, dict):
+                    continue
+                url = str((row or {}).get("url", "") or "").strip()
+                title = str((row or {}).get("title", "") or "").strip()
+                if not url or not title:
+                    continue
+                topic = self._infer_topic_cluster(
+                    title,
+                    row.get("keywords") or row.get("focus_keywords") or "",
+                    row.get("summary") or row.get("html") or "",
+                )
+                pool_rows.append(
+                    {
+                        "url": url,
+                        "title": title,
+                        "keywords": self._parse_focus_keywords(
+                            row.get("keywords") or row.get("focus_keywords") or ""
+                        ),
+                        "tags": [topic],
+                        "topic": topic,
+                        "updated_at_utc": str(
+                            (row or {}).get("updated_at_utc")
+                            or (row or {}).get("published_at")
+                            or now.isoformat()
+                        ),
+                        "source": "posts_index_cache",
+                    }
+                )
+
+        normalized: list[dict[str, Any]] = []
+        for row in pool_rows:
+            url = str((row or {}).get("url", "") or "").strip()
+            title = str((row or {}).get("title", "") or "").strip()
+            if not url or not title:
+                continue
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            host = self._host_from_url(url)
+            if not host:
+                continue
+            updated = (
+                self._parse_utc_soft((row or {}).get("updated_at_utc"))
+                or self._parse_utc_soft((row or {}).get("published_at"))
+                or self._parse_utc_soft((row or {}).get("last_seen_at"))
+                or self._parse_utc_soft((row or {}).get("created_at_utc"))
+                or now
+            )
+            if updated < cutoff:
+                continue
+            keywords_val = (row or {}).get("keywords", [])
+            if isinstance(keywords_val, list):
+                keywords = [str(x).strip() for x in keywords_val if str(x).strip()]
+            elif isinstance(keywords_val, set):
+                keywords = [str(x).strip() for x in keywords_val if str(x).strip()]
+            else:
+                keywords = [str(x).strip() for x in self._parse_focus_keywords(keywords_val) if str(x).strip()]
+            if keywords:
+                keywords = sorted(set(keywords))
+            topic = str((row or {}).get("topic", "") or "").strip().lower()
+            if topic not in allowed_topics:
+                topic = self._infer_topic_cluster(title, keywords, str((row or {}).get("summary", "") or ""))
+            if topic not in allowed_topics:
+                topic = "default"
+            tags_raw = (row or {}).get("tags", [])
+            if isinstance(tags_raw, list):
+                tags = [
+                    str(x).strip().lower()
+                    for x in tags_raw
+                    if str(x).strip().lower() in allowed_topics
+                ]
+            else:
+                tags = []
+            if topic not in tags:
+                tags.insert(0, topic)
+            if not tags:
+                tags = ["default"]
+            normalized.append(
+                {
+                    "url": url,
+                    "title": title,
+                    "keywords": keywords[:12],
+                    "tags": tags[:2],
+                    "topic": topic,
+                    "updated_at_utc": updated.isoformat(),
+                    "source": str((row or {}).get("source", "pool") or "pool"),
+                    "_host": host,
+                }
+            )
+
+        if canonical_host:
+            normalized = [row for row in normalized if str(row.get("_host", "")) == canonical_host]
+        else:
+            dominant = self._same_site_host_from_candidates(normalized)
+            if dominant:
+                normalized = [row for row in normalized if str(row.get("_host", "")) == dominant]
+
+        normalized.sort(
+            key=lambda x: str(x.get("updated_at_utc", "") or ""),
+            reverse=True,
+        )
+        deduped: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        for row in normalized:
+            url = str(row.get("url", "") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            payload = dict(row)
+            payload.pop("_host", None)
+            deduped.append(payload)
+            if len(deduped) >= 500:
+                break
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(deduped, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     def _load_internal_links_pool(self) -> list[dict[str, Any]]:
         path = self._internal_links_pool_path()
         if not path.exists():
@@ -9583,9 +9878,9 @@ class AgentWorkflow:
         counts: dict[str, int] = {}
         for row in rows:
             url = str((row or {}).get("url", "") or "").strip()
-            if not url:
-                continue
-            host = (urlparse(url).netloc or "").lower().strip()
+            host = str((row or {}).get("_host", "") or "").strip().lower()
+            if not host and url:
+                host = self._host_from_url(url)
             if not host:
                 continue
             counts[host] = int(counts.get(host, 0) or 0) + 1
@@ -9610,6 +9905,12 @@ class AgentWorkflow:
 
     def _strip_legacy_internal_link_blocks(self, html: str) -> str:
         out = str(html or "")
+        out = re.sub(
+            r"<!--\s*RZ-RELATED:START\s*-->.*?<!--\s*RZ-RELATED:END\s*-->",
+            "",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         out = re.sub(
             r"<p[^>]*>\s*If you want a complementary walkthrough,\s*read\s*<a[^>]*>.*?</a>\.\s*</p>",
             "",
@@ -9655,11 +9956,18 @@ class AgentWorkflow:
         self,
         current_title: str,
         current_keywords: list[str] | None = None,
+        current_html: str | None = None,
     ) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
         current_title_l = str(current_title or "").strip().lower()
         current_kw = self._parse_focus_keywords(current_keywords or current_title)
+        current_topic = self._infer_topic_cluster(
+            current_title,
+            current_kw,
+            current_html or "",
+        )
+        canonical_host = self._canonical_internal_host()
 
         for row in self._load_internal_links_pool():
             url = str((row or {}).get("url", "") or "").strip()
@@ -9673,6 +9981,9 @@ class AgentWorkflow:
             parsed = urlparse(url)
             if parsed.scheme not in {"http", "https"}:
                 continue
+            host = self._host_from_url(url)
+            if canonical_host and host != canonical_host:
+                continue
             token_source = " ".join(
                 [
                     title,
@@ -9681,11 +9992,14 @@ class AgentWorkflow:
                 ]
             )
             overlap = self._keyword_overlap(current_kw, self._parse_focus_keywords(token_source))
+            row_topic = str((row or {}).get("topic", "") or "").strip().lower() or self._infer_topic_cluster(title, token_source, "")
+            topic_bonus = 0.2 if row_topic == current_topic else 0.0
             candidates.append(
                 {
                     "url": url,
                     "title": title,
-                    "score": float(overlap),
+                    "topic": row_topic,
+                    "score": float(overlap) + float(topic_bonus),
                     "source": "pool",
                 }
             )
@@ -9709,15 +10023,21 @@ class AgentWorkflow:
             parsed = urlparse(url)
             if parsed.scheme not in {"http", "https"}:
                 continue
+            host = self._host_from_url(url)
+            if canonical_host and host != canonical_host:
+                continue
             kw = self._parse_focus_keywords(
                 f"{title} {(row or {}).get('focus_keywords', '')}"
             )
             overlap = self._keyword_overlap(current_kw, kw)
+            row_topic = self._infer_topic_cluster(title, kw, str((row or {}).get("summary", "") or ""))
+            topic_bonus = 0.2 if row_topic == current_topic else 0.0
             candidates.append(
                 {
                     "url": url,
                     "title": title,
-                    "score": float(overlap),
+                    "topic": row_topic,
+                    "score": float(overlap) + float(topic_bonus),
                     "source": "posts_index",
                 }
             )
@@ -9738,15 +10058,22 @@ class AgentWorkflow:
         src = str(html or "")
         if not src:
             return src
+        if not bool(getattr(self.settings.internal_links, "enabled", True)):
+            return src
+        try:
+            self._refresh_internal_links_pool()
+        except Exception:
+            pass
         out = self._strip_legacy_internal_link_blocks(src)
         candidates = self._collect_internal_link_candidates(
             current_title=current_title,
             current_keywords=current_keywords,
+            current_html=out,
         )
         if not candidates:
             return out
 
-        site_host = self._same_site_host_from_candidates(candidates)
+        site_host = self._canonical_internal_host() or self._same_site_host_from_candidates(candidates)
         if not site_host:
             return out
 
@@ -9758,7 +10085,7 @@ class AgentWorkflow:
         picked: list[dict[str, Any]] = []
         for row in candidates:
             url = str((row or {}).get("url", "") or "").strip()
-            host = (urlparse(url).netloc or "").lower().strip()
+            host = self._host_from_url(url)
             if not url or host != site_host:
                 continue
             if url in existing_urls:
@@ -9777,9 +10104,8 @@ class AgentWorkflow:
             if body_inserted:
                 used_urls.add(first_url)
 
-        related_min = max(0, int(getattr(self.settings.publish, "related_posts_min", 2) or 2))
-        related_max = max(related_min, int(getattr(self.settings.publish, "related_posts_max", 3) or 3))
-        related_max = min(3, max(0, related_max))
+        related_target = max(0, int(getattr(self.settings.internal_links, "related_link_count", 2) or 2))
+        related_max = min(3, related_target)
         related_rows: list[dict[str, Any]] = []
         for row in picked[1 if body_inserted else 0 :]:
             url = str((row or {}).get("url", "") or "").strip()
@@ -9805,7 +10131,12 @@ class AgentWorkflow:
         if not lis:
             return out
 
-        related_block = "<h2>Related Coverage</h2><ul>" + "".join(lis) + "</ul>"
+        related_block = (
+            "<!-- RZ-RELATED:START -->"
+            "<h2>Related Coverage</h2><ul>"
+            + "".join(lis)
+            + "</ul><!-- RZ-RELATED:END -->"
+        )
         m_sources = re.search(r"<h2[^>]*>\s*Sources\s*</h2>", out, flags=re.IGNORECASE)
         if m_sources:
             out = out[: m_sources.start()] + related_block + out[m_sources.start() :]
