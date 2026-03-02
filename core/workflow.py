@@ -34,6 +34,7 @@ from .news_pack_manifest import NewsPackManifest
 from .news_pack_picker import NewsPackPicker
 from .news_pack_seeder import NewsPackSeeder
 from .publish_ledger import PublishLedger, make_ledger_key
+from .readability import optimize_html_readability
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
 from .patterns import PatternEngine
@@ -3179,8 +3180,14 @@ class AgentWorkflow:
                             note=self._append_note(self._append_note(hold_reason, detail_note), degraded_note),
                         )
                     )
-                    self._workflow_perf_finish_run("hold", hold_reason)
-                    return WorkflowResult("hold", hold_reason)
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+
+            if bool(getattr(getattr(self.settings, "readability", None), "enabled", True)):
+                try:
+                    final_html = optimize_html_readability(final_html, self.settings.readability)
+                except Exception:
+                    degraded_note = self._append_note(degraded_note, "readability_failed")
 
             actionability = self._evaluate_actionability_gate(draft.title, final_html)
             if not actionability.ok:
