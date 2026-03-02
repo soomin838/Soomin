@@ -270,6 +270,18 @@ class ReadabilitySettings:
 
 
 @dataclass
+class TitleDiversitySettings:
+    enabled: bool = True
+    patterns_total: int = 6
+    cluster_pattern_ttl_days: int = 14
+    numeric_ratio: float = 0.40
+    question_ratio: float = 0.20
+    analysis_ratio: float = 0.40
+    min_title_chars: int = 45
+    max_title_chars: int = 70
+
+
+@dataclass
 class QualitySettings:
     enabled: bool = True
     strict_mode: bool = True
@@ -598,6 +610,7 @@ class AppSettings:
     publish: PublishSettings = field(default_factory=PublishSettings)
     ledger: LedgerSettings = field(default_factory=LedgerSettings)
     readability: ReadabilitySettings = field(default_factory=ReadabilitySettings)
+    title_diversity: TitleDiversitySettings = field(default_factory=TitleDiversitySettings)
     quality: QualitySettings = field(default_factory=QualitySettings)
     actionability_gate: ActionabilityGateSettings = field(default_factory=ActionabilityGateSettings)
     generation: GenerationSettings = field(default_factory=GenerationSettings)
@@ -655,6 +668,7 @@ def load_settings(path: Path) -> AppSettings:
     sync_raw = dict(raw.get("sync", {}) or {})
     ledger_raw = dict(raw.get("ledger", {}) or {})
     readability_raw = dict(raw.get("readability", {}) or {})
+    title_diversity_raw = dict(raw.get("title_diversity", {}) or {})
     workflow_raw = dict(raw.get("workflow", {}) or {})
     watchdog_raw = dict(raw.get("watchdog", {}) or {})
 
@@ -867,6 +881,7 @@ def load_settings(path: Path) -> AppSettings:
         publish=publish_obj,
         ledger=_construct_dc(LedgerSettings, ledger_raw),
         readability=_construct_dc(ReadabilitySettings, readability_raw),
+        title_diversity=_construct_dc(TitleDiversitySettings, title_diversity_raw),
         quality=_construct_dc(QualitySettings, quality_raw),
         actionability_gate=_construct_dc(ActionabilityGateSettings, actionability_raw),
         generation=_construct_dc(GenerationSettings, generation_raw),

@@ -113,6 +113,15 @@ readability:
   paragraph_sentence_max: 5
   repeated_sentence_starter_max: 3
   transition_repeat_max: 1
+title_diversity:
+  enabled: true
+  patterns_total: 6
+  cluster_pattern_ttl_days: 14
+  numeric_ratio: 0.4
+  question_ratio: 0.2
+  analysis_ratio: 0.4
+  min_title_chars: 45
+  max_title_chars: 70
 quality:
   enabled: true
   strict_mode: true
