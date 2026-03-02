@@ -44,7 +44,7 @@ def diagnose_visual_settings(settings: AppSettings, root: Path) -> dict[str, Any
     max_inline = int(getattr(settings.visual, "max_inline_images", 0) or 0)
 
     api_key_raw = str(getattr(settings.gemini, "api_key", "") or "").strip()
-    has_gemini_api_key = bool(api_key_raw and api_key_raw != "GEMINI_API_KEY")
+    has_gemini_api_key = bool(api_key_raw)
 
     min_images_required = int(getattr(settings.publish, "min_images_required", 0) or 0)
     max_images_per_post = int(getattr(settings.publish, "max_images_per_post", 0) or 0)

@@ -758,37 +758,53 @@ def load_settings(path: Path) -> AppSettings:
         raw.setdefault("gemini", {})
         raw["gemini"]["max_calls_per_run"] = int(llm_raw.get("max_calls_per_post", raw["gemini"].get("max_calls_per_run", 3)))
         if "enable_image_generation" in llm_raw:
-            raw.setdefault("visual", {})
-            raw["visual"]["enable_gemini_image_generation"] = bool(llm_raw.get("enable_image_generation"))
+            visual_raw_existing = raw.get("visual", {})
+            has_visual_explicit = isinstance(visual_raw_existing, dict) and bool(visual_raw_existing)
+            if has_visual_explicit:
+                settings_warnings.append(
+                    "llm.enable_image_generation is ignored because visual.* is source of truth."
+                )
+            else:
+                raw.setdefault("visual", {})
+                raw["visual"]["enable_gemini_image_generation"] = bool(llm_raw.get("enable_image_generation"))
     if images_raw:
-        raw.setdefault("visual", {})
-        visual_raw = dict(raw.get("visual", {}) or {})
-        banner_count = int(images_raw.get("banner_count", 1))
-        inline_count = int(images_raw.get("inline_count", 1))
-        has_visual_explicit = bool(visual_raw)
+        visual_raw_existing = raw.get("visual", {})
+        has_visual_explicit = isinstance(visual_raw_existing, dict) and bool(visual_raw_existing)
+        settings_warnings.append(
+            "images.* is legacy; migrate image configuration to visual.*."
+        )
         if has_visual_explicit:
             settings_warnings.append(
                 "Both visual.* and images.* are present; runtime uses visual.* as source of truth."
             )
-        raw["visual"].setdefault("target_images_per_post", max(1, banner_count + inline_count))
-        raw["visual"].setdefault("max_banner_images", max(1, banner_count))
-        raw["visual"].setdefault("max_inline_images", max(0, inline_count))
-        raw["visual"].setdefault("cache_dir", str(images_raw.get("cache_dir", "storage/image_cache")))
-        raw["visual"].setdefault("fallback_banner", str(images_raw.get("fallback_banner", "assets/fallback/banner.png")))
-        raw["visual"].setdefault("fallback_inline", str(images_raw.get("fallback_inline", "assets/fallback/inline.png")))
-        raw["visual"].setdefault(
-            "prompt_suffix",
-            str(images_raw.get("prompt_suffix", "no text, no letters, no numbers, no logos, no watermark")),
-        )
-        # Runtime source of truth: local library images + Blogger media upload.
-        src_provider = str(images_raw.get("provider", "library") or "library").strip().lower()
-        if src_provider not in {"library", "gemini"}:
-            settings_warnings.append(
-                f"images.provider={src_provider} is deprecated; runtime forces visual.image_provider=gemini."
+        else:
+            raw.setdefault("visual", {})
+            banner_count = int(images_raw.get("banner_count", 1))
+            inline_count = int(images_raw.get("inline_count", 1))
+            raw["visual"]["target_images_per_post"] = max(1, banner_count + inline_count)
+            raw["visual"]["max_banner_images"] = max(1, banner_count)
+            raw["visual"]["max_inline_images"] = max(0, inline_count)
+            raw["visual"].setdefault("cache_dir", str(images_raw.get("cache_dir", "storage/image_cache")))
+            raw["visual"].setdefault("fallback_banner", str(images_raw.get("fallback_banner", "assets/fallback/banner.png")))
+            raw["visual"].setdefault("fallback_inline", str(images_raw.get("fallback_inline", "assets/fallback/inline.png")))
+            raw["visual"].setdefault(
+                "prompt_suffix",
+                str(images_raw.get("prompt_suffix", "no text, no letters, no numbers, no logos, no watermark")),
             )
-        raw["visual"]["image_provider"] = "library"
-        raw["visual"]["enable_gemini_image_generation"] = False
-        raw["visual"]["pollinations_enabled"] = False
+            src_provider = str(images_raw.get("provider", "library") or "library").strip().lower()
+            if src_provider not in {"library", "gemini"}:
+                settings_warnings.append(
+                    f"images.provider={src_provider} is unsupported; defaulting visual.image_provider=library."
+                )
+                src_provider = "library"
+            if src_provider == "gemini":
+                raw["visual"]["image_provider"] = "gemini"
+                raw["visual"]["enable_gemini_image_generation"] = True
+            else:
+                raw["visual"]["image_provider"] = "library"
+                # Do not force-disable generation; keep permissive default for compatibility.
+                raw["visual"].setdefault("enable_gemini_image_generation", True)
+            raw["visual"].setdefault("pollinations_enabled", False)
     if publishing_raw:
         raw.setdefault("budget", {})
         raw.setdefault("publish", {})
