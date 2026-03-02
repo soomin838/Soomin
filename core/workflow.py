@@ -3532,6 +3532,14 @@ class AgentWorkflow:
 
             final_html = self._inject_images_into_html(final_html, images)
             degraded_note = self._apply_ctr_visual_density_note(degraded_note, images)
+            try:
+                final_html = self._inject_internal_links_and_related_coverage(
+                    final_html,
+                    current_title=draft.title,
+                    current_keywords=global_keywords,
+                )
+            except Exception:
+                degraded_note = self._append_note(degraded_note, "internal_links_failed")
 
             entropy_settings = getattr(self.settings, "entropy_check", None)
             entropy_result: dict[str, Any] = {"ok": True, "reasons": []}
@@ -3696,6 +3704,14 @@ class AgentWorkflow:
                                     )
                             final_html = self._inject_images_into_html(final_html, images)
                             degraded_note = self._apply_ctr_visual_density_note(degraded_note, images)
+                            try:
+                                final_html = self._inject_internal_links_and_related_coverage(
+                                    final_html,
+                                    current_title=draft.title,
+                                    current_keywords=global_keywords,
+                                )
+                            except Exception:
+                                degraded_note = self._append_note(degraded_note, "internal_links_failed")
 
                             if dry_run:
                                 gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
@@ -5211,6 +5227,14 @@ class AgentWorkflow:
                 )
         final_html = self._inject_images_into_html(final_html, images)
         generation_degraded_note = self._apply_ctr_visual_density_note(generation_degraded_note, images)
+        try:
+            final_html = self._inject_internal_links_and_related_coverage(
+                final_html,
+                current_title=draft.title,
+                current_keywords=global_keywords,
+            )
+        except Exception:
+            generation_degraded_note = self._append_note(generation_degraded_note, "internal_links_failed")
         draft.title = self._double_unescape(str(draft.title or "")).strip()
         gate_preview_html = ""
         preflight_thumb_src = self._preflight_thumb_src_from_images(images)
@@ -6653,6 +6677,14 @@ class AgentWorkflow:
                     hold_msg += f" | draft_checkpoint={updated_draft_id}"
                 return WorkflowResult("hold", hold_msg)
         final_html = self._inject_images_into_html(final_html, images)
+        try:
+            final_html = self._inject_internal_links_and_related_coverage(
+                final_html,
+                current_title=title,
+                current_keywords=list(self.last_global_keywords or []),
+            )
+        except Exception:
+            pass
         gate_preview_html = ""
         preflight_thumb_src = self._preflight_thumb_src_from_images(images)
         resume_first_thumb_source = str(getattr(images[0], "source_url", "") or "").strip() if images else ""
@@ -9523,6 +9555,263 @@ class AgentWorkflow:
         if na == 0 or nb == 0:
             return 0.0
         return dot / (na * nb)
+
+    def _internal_links_pool_path(self) -> Path:
+        return (self.root / "storage" / "state" / "internal_links_pool.json").resolve()
+
+    def _load_internal_links_pool(self) -> list[dict[str, Any]]:
+        path = self._internal_links_pool_path()
+        if not path.exists():
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("[]", encoding="utf-8")
+            except Exception:
+                return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if isinstance(raw, list):
+            return [dict(x) for x in raw if isinstance(x, dict)]
+        if isinstance(raw, dict):
+            items = raw.get("items", [])
+            if isinstance(items, list):
+                return [dict(x) for x in items if isinstance(x, dict)]
+        return []
+
+    def _same_site_host_from_candidates(self, rows: list[dict[str, Any]]) -> str:
+        counts: dict[str, int] = {}
+        for row in rows:
+            url = str((row or {}).get("url", "") or "").strip()
+            if not url:
+                continue
+            host = (urlparse(url).netloc or "").lower().strip()
+            if not host:
+                continue
+            counts[host] = int(counts.get(host, 0) or 0) + 1
+        if not counts:
+            return ""
+        ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        return str(ranked[0][0] or "").strip().lower()
+
+    def _sanitize_internal_anchor(self, title: str) -> str:
+        text = self._clean_anchor_text(title)
+        text = re.sub(
+            r"\b(free|guaranteed|must|scam|proven|click here)\b",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", text) if w]
+        if len(words) >= 3:
+            return " ".join(words[:6]).strip()
+        compact = re.sub(r"\s+", " ", text).strip()
+        return compact[:80] if compact else "Related coverage"
+
+    def _strip_legacy_internal_link_blocks(self, html: str) -> str:
+        out = str(html or "")
+        out = re.sub(
+            r"<p[^>]*>\s*If you want a complementary walkthrough,\s*read\s*<a[^>]*>.*?</a>\.\s*</p>",
+            "",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        out = re.sub(
+            r"<h2[^>]*>\s*(Related Coverage|More Fix Guides You Might Like)\s*</h2>\s*<ul>.*?</ul>",
+            "",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        return out
+
+    def _insert_internal_body_link_first40(self, html: str, url: str, anchor: str) -> tuple[str, bool]:
+        src = str(html or "")
+        if not src:
+            return src, False
+        paragraphs = list(re.finditer(r"<p\b[^>]*>.*?</p>", src, flags=re.IGNORECASE | re.DOTALL))
+        if not paragraphs:
+            return src, False
+        limit = int(max(1, len(src) * 0.40))
+        target = None
+        for m in paragraphs:
+            if m.start() <= limit:
+                target = m
+                break
+        if target is None:
+            target = paragraphs[0]
+        block = str(target.group(0) or "")
+        if "</p>" not in block.lower():
+            return src, False
+        sentence = (
+            f' For background context, see <a href="{escape(url, quote=True)}" rel="noopener">'
+            f"{escape(anchor)}</a>."
+        )
+        replaced = re.sub(r"</p>\s*$", sentence + "</p>", block, count=1, flags=re.IGNORECASE)
+        out = src[: target.start()] + replaced + src[target.end() :]
+        return out, True
+
+    def _collect_internal_link_candidates(
+        self,
+        current_title: str,
+        current_keywords: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        current_title_l = str(current_title or "").strip().lower()
+        current_kw = self._parse_focus_keywords(current_keywords or current_title)
+
+        for row in self._load_internal_links_pool():
+            url = str((row or {}).get("url", "") or "").strip()
+            title = str((row or {}).get("title", "") or "").strip()
+            if not url or not title:
+                continue
+            if url in seen:
+                continue
+            if title.lower() == current_title_l:
+                continue
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            token_source = " ".join(
+                [
+                    title,
+                    " ".join(str(x or "") for x in (row.get("keywords", []) if isinstance(row.get("keywords", []), list) else [])),
+                    " ".join(str(x or "") for x in (row.get("tags", []) if isinstance(row.get("tags", []), list) else [])),
+                ]
+            )
+            overlap = self._keyword_overlap(current_kw, self._parse_focus_keywords(token_source))
+            candidates.append(
+                {
+                    "url": url,
+                    "title": title,
+                    "score": float(overlap),
+                    "source": "pool",
+                }
+            )
+            seen.add(url)
+
+        rows = self.posts_index.query_recent(
+            limit=260,
+            include_future=False,
+            statuses=["live"],
+            exclude_deleted=True,
+        )
+        for row in rows:
+            title = str((row or {}).get("title", "") or "").strip()
+            url = str((row or {}).get("url", "") or "").strip()
+            if not title or not url:
+                continue
+            if url in seen:
+                continue
+            if title.lower() == current_title_l:
+                continue
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"}:
+                continue
+            kw = self._parse_focus_keywords(
+                f"{title} {(row or {}).get('focus_keywords', '')}"
+            )
+            overlap = self._keyword_overlap(current_kw, kw)
+            candidates.append(
+                {
+                    "url": url,
+                    "title": title,
+                    "score": float(overlap),
+                    "source": "posts_index",
+                }
+            )
+            seen.add(url)
+
+        candidates.sort(
+            key=lambda x: (float(x.get("score", 0.0) or 0.0), str(x.get("title", ""))),
+            reverse=True,
+        )
+        return candidates
+
+    def _inject_internal_links_and_related_coverage(
+        self,
+        html: str,
+        current_title: str,
+        current_keywords: list[str] | None = None,
+    ) -> str:
+        src = str(html or "")
+        if not src:
+            return src
+        out = self._strip_legacy_internal_link_blocks(src)
+        candidates = self._collect_internal_link_candidates(
+            current_title=current_title,
+            current_keywords=current_keywords,
+        )
+        if not candidates:
+            return out
+
+        site_host = self._same_site_host_from_candidates(candidates)
+        if not site_host:
+            return out
+
+        existing_urls: set[str] = set(
+            u.strip()
+            for u in re.findall(r'href=["\']([^"\']+)["\']', out, flags=re.IGNORECASE)
+            if str(u or "").strip()
+        )
+        picked: list[dict[str, Any]] = []
+        for row in candidates:
+            url = str((row or {}).get("url", "") or "").strip()
+            host = (urlparse(url).netloc or "").lower().strip()
+            if not url or host != site_host:
+                continue
+            if url in existing_urls:
+                continue
+            picked.append(row)
+        if not picked:
+            return out
+
+        used_urls = set(existing_urls)
+        body_inserted = False
+        first = picked[0]
+        first_url = str(first.get("url", "") or "").strip()
+        if first_url and first_url not in used_urls:
+            anchor = self._sanitize_internal_anchor(str(first.get("title", "") or "Related coverage"))
+            out, body_inserted = self._insert_internal_body_link_first40(out, first_url, anchor)
+            if body_inserted:
+                used_urls.add(first_url)
+
+        related_min = max(0, int(getattr(self.settings.publish, "related_posts_min", 2) or 2))
+        related_max = max(related_min, int(getattr(self.settings.publish, "related_posts_max", 3) or 3))
+        related_max = min(3, max(0, related_max))
+        related_rows: list[dict[str, Any]] = []
+        for row in picked[1 if body_inserted else 0 :]:
+            url = str((row or {}).get("url", "") or "").strip()
+            if not url or url in used_urls:
+                continue
+            related_rows.append(row)
+            used_urls.add(url)
+            if len(related_rows) >= related_max:
+                break
+
+        if not related_rows:
+            return out
+
+        lis: list[str] = []
+        for row in related_rows:
+            url = str((row or {}).get("url", "") or "").strip()
+            anchor = self._sanitize_internal_anchor(str((row or {}).get("title", "") or "Related coverage"))
+            if not url or not anchor:
+                continue
+            lis.append(
+                f'<li><a href="{escape(url, quote=True)}" rel="noopener">{escape(anchor)}</a></li>'
+            )
+        if not lis:
+            return out
+
+        related_block = "<h2>Related Coverage</h2><ul>" + "".join(lis) + "</ul>"
+        m_sources = re.search(r"<h2[^>]*>\s*Sources\s*</h2>", out, flags=re.IGNORECASE)
+        if m_sources:
+            out = out[: m_sources.start()] + related_block + out[m_sources.start() :]
+        else:
+            out = out + related_block
+        return out
 
     def _build_internal_links_block(
         self,
