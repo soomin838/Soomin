@@ -182,6 +182,9 @@ class Publisher:
         existing_draft_post_id: str | None = None,
         meta_description: str | None = None,
         preflight_thumbnail_src: str | None = None,
+        seo_slug: str | None = None,
+        focus_keywords: list[str] | None = None,
+        topic_cluster: str | None = None,
     ) -> PublishResult:
         creds = self._oauth_credentials()
         service = build("blogger", "v3", credentials=creds)
@@ -260,6 +263,18 @@ class Publisher:
             "content": post_html,
             "labels": labels,
         }
+        self._log_publish_backend_event(
+            {
+                "event": "seo_meta_received",
+                "seo_slug": str(seo_slug or "").strip(),
+                "topic_cluster": str(topic_cluster or "").strip().lower(),
+                "focus_keywords": [
+                    str(x).strip().lower()
+                    for x in (focus_keywords or [])
+                    if str(x).strip()
+                ][:8],
+            }
+        )
         if seo_description:
             payload["customMetaData"] = seo_description
         target_post_id = str(existing_draft_post_id or "").strip()

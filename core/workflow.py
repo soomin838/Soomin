@@ -199,6 +199,9 @@ class AgentWorkflow:
         self._news_pool_refresh_tick_log_path = self.root / "storage" / "logs" / "news_pool_refresh_tick.jsonl"
         self._news_rotation_state_path = self.root / "storage" / "state" / "news_rotation_state.json"
         self._news_cluster_state_path = self.root / "storage" / "state" / "news_cluster_state.json"
+        self._slug_ledger_path = self.root / "storage" / "state" / "slug_ledger.jsonl"
+        self._slug_ledger_ttl_days = 180
+        self._internal_links_pool_refresh_cooldown_hours = 6
         ledger_rel = str(getattr(getattr(self.settings, "ledger", None), "path", "storage/ledger/publish_ledger.jsonl") or "storage/ledger/publish_ledger.jsonl")
         ledger_path = Path(ledger_rel)
         if not ledger_path.is_absolute():
@@ -3532,11 +3535,21 @@ class AgentWorkflow:
 
             final_html = self._inject_images_into_html(final_html, images)
             degraded_note = self._apply_ctr_visual_density_note(degraded_note, images)
+            news_link_topic = self._infer_topic_cluster(
+                draft.title,
+                global_keywords,
+                final_html,
+            )
+            news_link_keywords = self._compute_focus_keywords(
+                draft.title,
+                final_html,
+                news_link_topic,
+            )
             try:
                 final_html = self._inject_internal_links_and_related_coverage(
                     final_html,
                     current_title=draft.title,
-                    current_keywords=global_keywords,
+                    current_keywords=news_link_keywords,
                 )
             except Exception:
                 degraded_note = self._append_note(degraded_note, "internal_links_failed")
@@ -3704,11 +3717,21 @@ class AgentWorkflow:
                                     )
                             final_html = self._inject_images_into_html(final_html, images)
                             degraded_note = self._apply_ctr_visual_density_note(degraded_note, images)
+                            rewrite_link_topic = self._infer_topic_cluster(
+                                draft.title,
+                                global_keywords,
+                                final_html,
+                            )
+                            rewrite_link_keywords = self._compute_focus_keywords(
+                                draft.title,
+                                final_html,
+                                rewrite_link_topic,
+                            )
                             try:
                                 final_html = self._inject_internal_links_and_related_coverage(
                                     final_html,
                                     current_title=draft.title,
-                                    current_keywords=global_keywords,
+                                    current_keywords=rewrite_link_keywords,
                                 )
                             except Exception:
                                 degraded_note = self._append_note(degraded_note, "internal_links_failed")
@@ -3744,6 +3767,18 @@ class AgentWorkflow:
                     self._workflow_perf_finish_run("skipped", skip_reason)
                     return WorkflowResult("skipped", skip_reason)
 
+            seo_topic = self._infer_topic_cluster(
+                draft.title,
+                global_keywords,
+                final_html,
+            )
+            seo_focus_keywords = self._compute_focus_keywords(
+                draft.title,
+                final_html,
+                seo_topic,
+            )
+            seo_slug_base = self._compute_seo_slug(draft.title, seo_topic)
+            seo_slug = ""
             labels = self._build_public_labels(
                 title=draft.title,
                 candidate=selected,
@@ -3812,6 +3847,8 @@ class AgentWorkflow:
                     "blog_id": ledger_blog_id,
                     "title": str(draft.title or ""),
                     "source_url": str(draft.source_url or ""),
+                    "topic_cluster": str(seo_topic or "default"),
+                    "focus_keywords": list(seo_focus_keywords or [])[:6],
                 }
                 ledger_exists = bool(
                     (ledger_key in self._failed_ledger_keys_in_run)
@@ -3873,6 +3910,13 @@ class AgentWorkflow:
                     self._workflow_perf_finish_run("skipped", skip_reason)
                     return WorkflowResult("skipped", skip_reason)
 
+            seo_slug = self._reserve_unique_slug(
+                seo_slug_base,
+                title=str(draft.title or ""),
+                topic=str(seo_topic or "default"),
+            )
+            if ledger_payload:
+                ledger_payload["seo_slug"] = str(seo_slug or "")
             self._progress("publish", "Blogger 예약 발행 처리", 92)
             published = self.publisher.publish_post(
                 draft.title,
@@ -3883,6 +3927,9 @@ class AgentWorkflow:
                 existing_draft_post_id=(working_draft_id or None),
                 meta_description=meta_description,
                 preflight_thumbnail_src=preflight_thumb_src,
+                seo_slug=seo_slug,
+                focus_keywords=seo_focus_keywords,
+                topic_cluster=seo_topic,
             )
             published_url_value = str(getattr(published, "url", "") or "").strip()
             published_ok = bool(published and published_url_value)
@@ -5227,15 +5274,29 @@ class AgentWorkflow:
                 )
         final_html = self._inject_images_into_html(final_html, images)
         generation_degraded_note = self._apply_ctr_visual_density_note(generation_degraded_note, images)
+        seo_topic_for_links = self._infer_topic_cluster(
+            draft.title,
+            global_keywords,
+            final_html,
+        )
+        seo_keywords_for_links = self._compute_focus_keywords(
+            draft.title,
+            final_html,
+            seo_topic_for_links,
+        )
         try:
             final_html = self._inject_internal_links_and_related_coverage(
                 final_html,
                 current_title=draft.title,
-                current_keywords=global_keywords,
+                current_keywords=seo_keywords_for_links,
             )
         except Exception:
             generation_degraded_note = self._append_note(generation_degraded_note, "internal_links_failed")
         draft.title = self._double_unescape(str(draft.title or "")).strip()
+        seo_topic = self._infer_topic_cluster(draft.title, global_keywords, final_html)
+        seo_focus_keywords = self._compute_focus_keywords(draft.title, final_html, seo_topic)
+        seo_slug_base = self._compute_seo_slug(draft.title, seo_topic)
+        seo_slug = ""
         gate_preview_html = ""
         preflight_thumb_src = self._preflight_thumb_src_from_images(images)
         first_thumb_source = str(getattr(images[0], "source_url", "") or "").strip() if images else ""
@@ -5390,6 +5451,11 @@ class AgentWorkflow:
                 generation_degraded_note,
                 "schedule_fallback_used",
             )
+        seo_slug = self._reserve_unique_slug(
+            seo_slug_base,
+            title=str(draft.title or ""),
+            topic=str(seo_topic or "default"),
+        )
         self._progress("publish", "Blogger 예약 발행 처리", 92)
         published = None
         last_publish_err = ""
@@ -5480,6 +5546,9 @@ class AgentWorkflow:
                         existing_draft_post_id=(working_draft_id or None),
                         meta_description=meta_description,
                         preflight_thumbnail_src=preflight_thumb_src,
+                        seo_slug=seo_slug,
+                        focus_keywords=seo_focus_keywords,
+                        topic_cluster=seo_topic,
                     ),
                     slow_ms=8000,
                     meta={"attempt": int(publish_try)},
@@ -5654,7 +5723,7 @@ class AgentWorkflow:
                 title=draft.title,
                 html=final_html,
                 summary=draft.summary,
-                global_keywords=global_keywords,
+                global_keywords=list(seo_focus_keywords or global_keywords),
                 candidate=selected,
                 publish_at=publish_at,
             )
@@ -6677,14 +6746,28 @@ class AgentWorkflow:
                     hold_msg += f" | draft_checkpoint={updated_draft_id}"
                 return WorkflowResult("hold", hold_msg)
         final_html = self._inject_images_into_html(final_html, images)
+        resume_link_topic = self._infer_topic_cluster(
+            title,
+            list(self.last_global_keywords or []),
+            final_html,
+        )
+        resume_link_keywords = self._compute_focus_keywords(
+            title,
+            final_html,
+            resume_link_topic,
+        )
         try:
             final_html = self._inject_internal_links_and_related_coverage(
                 final_html,
                 current_title=title,
-                current_keywords=list(self.last_global_keywords or []),
+                current_keywords=resume_link_keywords,
             )
         except Exception:
             pass
+        seo_topic = self._infer_topic_cluster(title, list(self.last_global_keywords or []), final_html)
+        seo_focus_keywords = self._compute_focus_keywords(title, final_html, seo_topic)
+        seo_slug_base = self._compute_seo_slug(title, seo_topic)
+        seo_slug = ""
         gate_preview_html = ""
         preflight_thumb_src = self._preflight_thumb_src_from_images(images)
         resume_first_thumb_source = str(getattr(images[0], "source_url", "") or "").strip() if images else ""
@@ -6780,6 +6863,11 @@ class AgentWorkflow:
         if publish_at is None:
             delay_min = max(10, int(getattr(self.settings.publish, "min_delay_minutes", 10)))
             publish_at = datetime.now(timezone.utc) + timedelta(minutes=delay_min + random.randint(1, 20))
+        seo_slug = self._reserve_unique_slug(
+            seo_slug_base,
+            title=str(title or ""),
+            topic=str(seo_topic or "default"),
+        )
 
         self._progress("publish", "중단 문서 재개: 예약 발행 처리", 92)
         meta_description = self._build_meta_description(
@@ -6862,6 +6950,9 @@ class AgentWorkflow:
                 existing_draft_post_id=(post_id or None),
                 meta_description=meta_description,
                 preflight_thumbnail_src=preflight_thumb_src,
+                seo_slug=seo_slug,
+                focus_keywords=seo_focus_keywords,
+                topic_cluster=seo_topic,
             ),
             slow_ms=8000,
         )
@@ -9556,6 +9647,269 @@ class AgentWorkflow:
             return 0.0
         return dot / (na * nb)
 
+    def _topic_seed_keywords(self, topic: str) -> list[str]:
+        key = str(topic or "default").strip().lower()
+        mapping: dict[str, list[str]] = {
+            "security": ["security", "patch", "vulnerability"],
+            "policy": ["policy", "compliance", "regulation"],
+            "platform": ["platform", "rollout", "release"],
+            "mobile": ["mobile", "android", "ios"],
+            "ai": ["ai", "model", "inference"],
+            "chips": ["chips", "gpu", "cpu"],
+            "privacy": ["privacy", "data", "tracking"],
+            "default": ["update", "analysis", "coverage"],
+        }
+        return list(mapping.get(key, mapping["default"]))
+
+    def _compute_focus_keywords(self, title: str, html: str, topic: str) -> list[str]:
+        stopwords = {
+            "about", "after", "also", "and", "are", "been", "being", "both", "but", "can",
+            "for", "from", "have", "into", "its", "just", "more", "most", "much", "only",
+            "other", "our", "out", "over", "same", "some", "than", "that", "the", "their",
+            "them", "then", "there", "these", "they", "this", "those", "through", "under",
+            "very", "what", "when", "where", "which", "while", "with", "would", "your",
+            "will", "you", "was", "were", "had", "has", "not", "now", "how", "why",
+        }
+        title_text = str(title or "").lower()
+        body_text = re.sub(r"<[^>]+>", " ", str(html or "")).lower()
+        body_text = re.sub(r"\s+", " ", body_text).strip()[:5000]
+
+        score: dict[str, float] = {}
+        for tok in re.findall(r"[a-z0-9][a-z0-9\-]{2,}", body_text):
+            if tok in stopwords or tok.isdigit():
+                continue
+            score[tok] = float(score.get(tok, 0.0) + 1.0)
+        for tok in re.findall(r"[a-z0-9][a-z0-9\-]{2,}", title_text):
+            if tok in stopwords or tok.isdigit():
+                continue
+            score[tok] = float(score.get(tok, 0.0) + 3.0)
+
+        ranked = sorted(score.items(), key=lambda x: (-float(x[1]), str(x[0])))
+        picked: list[str] = []
+        seen: set[str] = set()
+        for token, _ in ranked:
+            if token in seen:
+                continue
+            seen.add(token)
+            picked.append(token)
+            if len(picked) >= 6:
+                break
+
+        topic_seeds = self._topic_seed_keywords(topic)
+        if not any(seed in seen for seed in topic_seeds):
+            forced = ""
+            for seed in topic_seeds:
+                if seed not in seen:
+                    forced = seed
+                    break
+            if not forced:
+                forced = topic_seeds[0] if topic_seeds else "update"
+            picked.insert(0, forced)
+            seen.add(forced)
+
+        fillers = ["update", "coverage", "analysis", "guide", "overview"]
+        for token in fillers:
+            if len(picked) >= 3:
+                break
+            if token in seen:
+                continue
+            picked.append(token)
+            seen.add(token)
+
+        deduped = [str(x).strip().lower() for x in picked if str(x).strip()]
+        deduped = list(dict.fromkeys(deduped))
+        return deduped[:6]
+
+    def _clean_slug_token(self, value: str) -> str:
+        token = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower())
+        token = re.sub(r"-{2,}", "-", token).strip("-")
+        return token
+
+    def _iter_slug_ledger_records(self) -> list[dict[str, Any]]:
+        path = Path(self._slug_ledger_path).resolve()
+        if not path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    raw = str(line or "").strip()
+                    if not raw:
+                        continue
+                    try:
+                        parsed = json.loads(raw)
+                    except Exception:
+                        continue
+                    if isinstance(parsed, dict):
+                        rows.append(parsed)
+        except Exception:
+            return []
+        return rows
+
+    def _slug_exists_recent(self, slug: str) -> bool:
+        target = str(slug or "").strip().lower()
+        if not target:
+            return False
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(self._slug_ledger_ttl_days or 180)))
+        for row in self._iter_slug_ledger_records():
+            current = str((row or {}).get("slug", "") or "").strip().lower()
+            if current != target:
+                continue
+            created = self._parse_utc_soft((row or {}).get("created_at_utc"))
+            if created is None:
+                continue
+            if created >= cutoff:
+                return True
+        return False
+
+    def _record_slug_ledger(self, slug: str, title: str, topic: str) -> None:
+        clean_slug = str(slug or "").strip().lower()
+        if not clean_slug:
+            return
+        row = {
+            "slug": clean_slug,
+            "title": str(title or "").strip(),
+            "topic": str(topic or "default").strip().lower() or "default",
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        path = Path(self._slug_ledger_path).resolve()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _reserve_unique_slug(self, base_slug: str, title: str, topic: str) -> str:
+        clean_base = self._clean_slug_token(base_slug)
+        if not clean_base:
+            clean_base = f"{self._clean_slug_token(topic) or 'default'}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
+        clean_base = clean_base[:70].rstrip("-")
+        if len(clean_base) < 40:
+            clean_base = (clean_base + "-update-guide").strip("-")
+            clean_base = clean_base[:70].rstrip("-")
+        candidate = clean_base
+        for suffix_idx in range(1, 100):
+            if suffix_idx == 1:
+                candidate = clean_base
+            else:
+                suffix = f"-{suffix_idx}"
+                candidate = f"{clean_base[: max(1, 70 - len(suffix))].rstrip('-')}{suffix}"
+            if not self._slug_exists_recent(candidate):
+                self._record_slug_ledger(candidate, title=title, topic=topic)
+                return candidate
+        fallback = f"{self._clean_slug_token(topic) or 'default'}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        fallback = fallback[:70].rstrip("-")
+        self._record_slug_ledger(fallback, title=title, topic=topic)
+        return fallback
+
+    def _compute_seo_slug(self, title: str, topic: str) -> str:
+        banned = {"free", "scam", "guaranteed", "click", "porn", "must"}
+        topic_token = self._clean_slug_token(topic) or "default"
+        raw_tokens = [self._clean_slug_token(x) for x in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]{2,}", str(title or ""))]
+        raw_tokens = [x for x in raw_tokens if x and x not in banned and x != topic_token]
+        parts = [topic_token] + raw_tokens[:8]
+        slug = "-".join(parts)
+        slug = re.sub(r"-{2,}", "-", slug).strip("-")
+        if len(slug) < 40:
+            extras = [x for x in self._topic_seed_keywords(topic_token) if x not in parts and x not in banned]
+            for token in extras:
+                candidate = f"{slug}-{self._clean_slug_token(token)}".strip("-")
+                if len(candidate) > 70:
+                    break
+                slug = candidate
+                if len(slug) >= 40:
+                    break
+        if len(slug) > 70:
+            trimmed = slug[:70].rstrip("-")
+            if "-" in trimmed:
+                trimmed = trimmed.rsplit("-", 1)[0].strip("-")
+            slug = trimmed
+        if len(slug) < 40:
+            for token in ("update", "guide", "overview", datetime.now(timezone.utc).strftime("%Y%m")):
+                candidate = f"{slug}-{self._clean_slug_token(token)}".strip("-")
+                if len(candidate) > 70:
+                    break
+                slug = candidate
+                if len(slug) >= 40:
+                    break
+        if len(slug) < 40:
+            slug = f"{topic_token}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}-coverage-guide"
+            slug = slug[:70].rstrip("-")
+        slug = re.sub(r"-{2,}", "-", slug).strip("-")
+        return slug
+
+    def _related_coverage_heading_for_topic(self, topic: str) -> str:
+        key = str(topic or "default").strip().lower()
+        if key == "security":
+            return "Related Security Coverage"
+        if key == "policy":
+            return "Related Policy Coverage"
+        return "Related Coverage"
+
+    def _enforce_what_to_do_now_section(self, html: str, topic: str) -> str:
+        out = str(html or "")
+        key = str(topic or "").strip().lower()
+        if key not in {"security", "policy", "platform"}:
+            return out
+        templates: dict[str, list[str]] = {
+            "security": [
+                "Check vendor advisories and confirm patch scope for your systems.",
+                "Prioritize exposed services and schedule remediation with owners.",
+                "Track verification results and document unresolved risks.",
+            ],
+            "policy": [
+                "Review policy deltas and map them to existing internal controls.",
+                "Update owner checklists and rollout deadlines for affected teams.",
+                "Publish a short compliance note for audit traceability.",
+            ],
+            "platform": [
+                "Validate rollout status per environment before broad enablement.",
+                "Confirm fallback options and escalation contacts.",
+                "Capture user-impact signals and adjust deployment timing.",
+            ],
+        }
+        target_items = list(templates.get(key, templates["platform"]))
+        section_pattern = r"(<h2[^>]*>\s*What To Do Now\s*</h2>)(.*?)(?=<h2\b|$)"
+        match = re.search(section_pattern, out, flags=re.IGNORECASE | re.DOTALL)
+
+        def _normalize_items(raw_items: list[str]) -> list[str]:
+            cleaned: list[str] = []
+            seen_text: set[str] = set()
+            for item in raw_items:
+                text = re.sub(r"<[^>]+>", " ", str(item or ""))
+                text = re.sub(r"\s+", " ", text).strip(" .")
+                if not text:
+                    continue
+                key_text = text.lower()
+                if key_text in seen_text:
+                    continue
+                seen_text.add(key_text)
+                cleaned.append(text)
+            return cleaned
+
+        if match:
+            existing_items = re.findall(r"<li[^>]*>(.*?)</li>", str(match.group(2) or ""), flags=re.IGNORECASE | re.DOTALL)
+            normalized = _normalize_items(existing_items)
+            while len(normalized) < 3:
+                for seed in target_items:
+                    if seed.lower() not in {x.lower() for x in normalized}:
+                        normalized.append(seed)
+                    if len(normalized) >= 3:
+                        break
+            normalized = normalized[:5]
+            list_html = "<ul>" + "".join(f"<li>{escape(x)}</li>" for x in normalized) + "</ul>"
+            section_html = "<h2>What To Do Now</h2>" + list_html
+            out = out[: match.start()] + section_html + out[match.end() :]
+            return out
+
+        new_items = target_items[:3]
+        section_html = "<h2>What To Do Now</h2><ul>" + "".join(f"<li>{escape(x)}</li>" for x in new_items) + "</ul>"
+        m_sources = re.search(r"<h2[^>]*>\s*Sources\s*</h2>", out, flags=re.IGNORECASE)
+        if m_sources:
+            return out[: m_sources.start()] + section_html + out[m_sources.start() :]
+        return out + section_html
+
     def _internal_links_pool_path(self) -> Path:
         return (self.root / "storage" / "state" / "internal_links_pool.json").resolve()
 
@@ -9634,9 +9988,17 @@ class AgentWorkflow:
                 best = (topic, count)
         return best[0] if best[1] > 0 else "default"
 
-    def _refresh_internal_links_pool(self) -> None:
+    def _refresh_internal_links_pool(self, force: bool = False) -> None:
         path = self._internal_links_pool_path()
         now = datetime.now(timezone.utc)
+        if (not force) and path.exists():
+            try:
+                mtime_utc = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+                cooldown_hours = max(1, int(getattr(self, "_internal_links_pool_refresh_cooldown_hours", 6) or 6))
+                if (now - mtime_utc) < timedelta(hours=cooldown_hours):
+                    return
+            except Exception:
+                pass
         cutoff = now - timedelta(days=180)
         canonical_host = self._canonical_internal_host()
         allowed_topics = {"security", "policy", "platform", "mobile", "ai", "chips", "privacy", "default"}
@@ -9656,7 +10018,7 @@ class AgentWorkflow:
         except Exception:
             recent_rows = []
         for row in recent_rows:
-            focus = self._parse_focus_keywords(str((row or {}).get("focus_keywords", "") or ""))
+            focus = sorted(self._parse_focus_keywords(str((row or {}).get("focus_keywords", "") or "")))
             title = str((row or {}).get("title", "") or "").strip()
             summary = str((row or {}).get("summary", "") or "").strip()
             topic = self._infer_topic_cluster(title, focus, summary)
@@ -10047,7 +10409,10 @@ class AgentWorkflow:
             key=lambda x: (float(x.get("score", 0.0) or 0.0), str(x.get("title", ""))),
             reverse=True,
         )
-        return candidates
+        threshold = float(getattr(self.settings.internal_links, "overlap_threshold", 0.4) or 0.4)
+        threshold = max(0.0, threshold)
+        filtered = [row for row in candidates if float(row.get("score", 0.0) or 0.0) >= threshold]
+        return filtered
 
     def _inject_internal_links_and_related_coverage(
         self,
@@ -10065,6 +10430,12 @@ class AgentWorkflow:
         except Exception:
             pass
         out = self._strip_legacy_internal_link_blocks(src)
+        current_topic = self._infer_topic_cluster(
+            current_title,
+            current_keywords or [],
+            out,
+        )
+        out = self._enforce_what_to_do_now_section(out, current_topic)
         candidates = self._collect_internal_link_candidates(
             current_title=current_title,
             current_keywords=current_keywords,
@@ -10131,9 +10502,10 @@ class AgentWorkflow:
         if not lis:
             return out
 
+        related_heading = self._related_coverage_heading_for_topic(current_topic)
         related_block = (
             "<!-- RZ-RELATED:START -->"
-            "<h2>Related Coverage</h2><ul>"
+            f"<h2>{escape(related_heading)}</h2><ul>"
             + "".join(lis)
             + "</ul><!-- RZ-RELATED:END -->"
         )
@@ -10838,8 +11210,8 @@ class AgentWorkflow:
             return "mac"
         return "windows"
 
-    def _parse_focus_keywords(self, value: str | list[str]) -> set[str]:
-        if isinstance(value, list):
+    def _parse_focus_keywords(self, value: str | list[str] | set[str] | tuple[str, ...]) -> set[str]:
+        if isinstance(value, (list, set, tuple)):
             source = ",".join(str(x or "") for x in value)
         else:
             source = str(value or "")
