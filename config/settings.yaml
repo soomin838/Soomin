@@ -106,6 +106,13 @@ ledger:
   enabled: true
   ttl_days: 90
   path: storage/ledger/publish_ledger.jsonl
+readability:
+  enabled: true
+  max_sentence_words: 25
+  paragraph_sentence_min: 2
+  paragraph_sentence_max: 5
+  repeated_sentence_starter_max: 3
+  transition_repeat_max: 1
 quality:
   enabled: true
   strict_mode: true

@@ -260,6 +260,16 @@ class WatchdogSettings:
 
 
 @dataclass
+class ReadabilitySettings:
+    enabled: bool = True
+    max_sentence_words: int = 25
+    paragraph_sentence_min: int = 2
+    paragraph_sentence_max: int = 5
+    repeated_sentence_starter_max: int = 3
+    transition_repeat_max: int = 1
+
+
+@dataclass
 class QualitySettings:
     enabled: bool = True
     strict_mode: bool = True
@@ -587,6 +597,7 @@ class AppSettings:
     budget: BudgetSettings = field(default_factory=BudgetSettings)
     publish: PublishSettings = field(default_factory=PublishSettings)
     ledger: LedgerSettings = field(default_factory=LedgerSettings)
+    readability: ReadabilitySettings = field(default_factory=ReadabilitySettings)
     quality: QualitySettings = field(default_factory=QualitySettings)
     actionability_gate: ActionabilityGateSettings = field(default_factory=ActionabilityGateSettings)
     generation: GenerationSettings = field(default_factory=GenerationSettings)
@@ -643,6 +654,7 @@ def load_settings(path: Path) -> AppSettings:
     keyword_sources_raw = dict((keywords_raw.get("sources", {}) or {}))
     sync_raw = dict(raw.get("sync", {}) or {})
     ledger_raw = dict(raw.get("ledger", {}) or {})
+    readability_raw = dict(raw.get("readability", {}) or {})
     workflow_raw = dict(raw.get("workflow", {}) or {})
     watchdog_raw = dict(raw.get("watchdog", {}) or {})
 
@@ -854,6 +866,7 @@ def load_settings(path: Path) -> AppSettings:
         budget=_construct_dc(BudgetSettings, raw.get("budget", {})),
         publish=publish_obj,
         ledger=_construct_dc(LedgerSettings, ledger_raw),
+        readability=_construct_dc(ReadabilitySettings, readability_raw),
         quality=_construct_dc(QualitySettings, quality_raw),
         actionability_gate=_construct_dc(ActionabilityGateSettings, actionability_raw),
         generation=_construct_dc(GenerationSettings, generation_raw),
