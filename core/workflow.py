@@ -33,6 +33,7 @@ from .news_score import classify_category, contains_allow_keywords, has_blocked_
 from .news_pack_manifest import NewsPackManifest
 from .news_pack_picker import NewsPackPicker
 from .news_pack_seeder import NewsPackSeeder
+from .publish_ledger import PublishLedger, make_ledger_key
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
 from .patterns import PatternEngine
@@ -191,6 +192,13 @@ class AgentWorkflow:
         self._news_pool_refresh_tick_log_path = self.root / "storage" / "logs" / "news_pool_refresh_tick.jsonl"
         self._news_rotation_state_path = self.root / "storage" / "state" / "news_rotation_state.json"
         self._news_cluster_state_path = self.root / "storage" / "state" / "news_cluster_state.json"
+        ledger_rel = str(getattr(getattr(self.settings, "ledger", None), "path", "storage/ledger/publish_ledger.jsonl") or "storage/ledger/publish_ledger.jsonl")
+        ledger_path = Path(ledger_rel)
+        if not ledger_path.is_absolute():
+            ledger_path = (self.root / ledger_path).resolve()
+        self._publish_ledger_path = ledger_path
+        self._publish_ledger_enabled = bool(getattr(getattr(self.settings, "ledger", None), "enabled", True))
+        self._publish_ledger_ttl_days = max(1, int(getattr(getattr(self.settings, "ledger", None), "ttl_days", 90) or 90))
         self._last_news_pool_refresh_stats: dict[str, Any] = {}
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
         self.news_cluster_engine = NewsClusterEngine(
@@ -199,7 +207,12 @@ class AgentWorkflow:
             threshold=0.82,
             ttl_days=14,
         )
+        self.publish_ledger = PublishLedger(
+            path=self._publish_ledger_path,
+            ttl_days=self._publish_ledger_ttl_days,
+        )
         self._seen_cluster_ids_in_run: set[str] = set()
+        self._failed_ledger_keys_in_run: set[str] = set()
         self.news_pack_manifest = NewsPackManifest(
             root=self.root,
             manifest_path=str(getattr(self.settings.news_pack, "manifest_path", "storage/state/news_pack_manifest.jsonl")),
@@ -2604,6 +2617,7 @@ class AgentWorkflow:
         preflight_index_note: str,
         blog_snapshot: dict[str, Any],
         today_gemini_before: int,
+        news_retry_depth: int = 0,
     ) -> WorkflowResult:
         self._progress("news_pool", "뉴스 풀 갱신/클레임", 18)
         working_draft_id = ""
@@ -2784,6 +2798,12 @@ class AgentWorkflow:
                     else None,
                     stable_hash_fn=stable_hash,
                 ).as_dict()
+                try:
+                    selected_meta = dict(getattr(selected, "meta", {}) or {})
+                    selected_meta["selected_facet"] = str(local_facet_context.get("selected_facet", "impact") or "impact")
+                    selected.meta = selected_meta
+                except Exception:
+                    pass
                 draft = self._build_news_post_local_fallback(
                     selected,
                     category,
@@ -3241,6 +3261,78 @@ class AgentWorkflow:
                 publish_at = datetime.now(timezone.utc) + timedelta(minutes=15)
                 degraded_note = self._append_note(degraded_note, "schedule_fallback_used")
 
+            ledger_key = ""
+            ledger_payload: dict[str, Any] = {}
+            if self._publish_ledger_enabled:
+                ledger_event_id = str(event_id or "").strip() or str(claimed_id or "")
+                ledger_cluster_id = str((selected.meta or {}).get("cluster_id", "") or "").strip()
+                ledger_facet = str((selected.meta or {}).get("selected_facet", "impact") or "impact").strip().lower() or "impact"
+                ledger_blog_id = str(getattr(self.settings.blogger, "blog_id", "") or "").strip() or "default"
+                ledger_key = make_ledger_key(
+                    event_id=ledger_event_id,
+                    cluster_id=ledger_cluster_id,
+                    facet=ledger_facet,
+                    blog_id=ledger_blog_id,
+                )
+                ledger_payload = {
+                    "key": ledger_key,
+                    "event_id": ledger_event_id,
+                    "cluster_id": ledger_cluster_id,
+                    "facet": ledger_facet,
+                    "blog_id": ledger_blog_id,
+                    "title": str(draft.title or ""),
+                    "source_url": str(draft.source_url or ""),
+                }
+                ledger_exists = bool(
+                    (ledger_key in self._failed_ledger_keys_in_run)
+                    or self.publish_ledger.exists(ledger_key)
+                )
+                if ledger_exists:
+                    degraded_note = self._append_note(
+                        degraded_note,
+                        f"ledger_skip:{ledger_key}",
+                    )
+                    self._append_workflow_perf(
+                        "publish_ledger_skip",
+                        {
+                            "event_id": ledger_event_id,
+                            "cluster_id": ledger_cluster_id,
+                            "facet": ledger_facet,
+                            "key": ledger_key,
+                            "retry_depth": int(news_retry_depth),
+                        },
+                    )
+                    if claimed_id:
+                        try:
+                            self.news_pool_store.rollback_claim(claimed_id)
+                            claim_finalized = True
+                        except Exception:
+                            pass
+                    if int(news_retry_depth) < 3:
+                        return self._run_once_news_mode(
+                            manual_trigger=bool(manual_trigger),
+                            run_start_minute=run_start_minute,
+                            queue_advisory=queue_advisory,
+                            sync_note=sync_note,
+                            preflight_index_note=preflight_index_note,
+                            blog_snapshot=blog_snapshot,
+                            today_gemini_before=today_gemini_before,
+                            news_retry_depth=int(news_retry_depth) + 1,
+                        )
+                    hold_reason = "ledger_skip_exhausted"
+                    self.logs.append_run(
+                        RunRecord(
+                            status="hold",
+                            score=0,
+                            title=draft.title,
+                            source_url=draft.source_url,
+                            published_url="",
+                            note=self._append_note(hold_reason, degraded_note),
+                        )
+                    )
+                    self._workflow_perf_finish_run("hold", hold_reason)
+                    return WorkflowResult("hold", hold_reason)
+
             self._progress("publish", "Blogger 예약 발행 처리", 92)
             published = self.publisher.publish_post(
                 draft.title,
@@ -3252,6 +3344,19 @@ class AgentWorkflow:
                 meta_description=meta_description,
                 preflight_thumbnail_src=preflight_thumb_src,
             )
+            if self._publish_ledger_enabled and ledger_payload:
+                if not self.publish_ledger.record(ledger_payload):
+                    if ledger_key:
+                        self._failed_ledger_keys_in_run.add(ledger_key)
+                    degraded_note = self._append_note(degraded_note, "ledger_record_failed")
+                    self._append_workflow_perf(
+                        "publish_ledger_record_failed",
+                        {
+                            "key": str(ledger_key or ""),
+                            "event_id": str(ledger_payload.get("event_id", "") or ""),
+                            "cluster_id": str(ledger_payload.get("cluster_id", "") or ""),
+                        },
+                    )
             if claimed_id:
                 self.news_pool_store.mark_used(claimed_id, str(getattr(published, "url", "") or ""))
                 claim_finalized = True
@@ -3316,6 +3421,7 @@ class AgentWorkflow:
         self._maintenance_tick()
         self._pending_keyword_claims = []
         self._seen_cluster_ids_in_run = set()
+        self._failed_ledger_keys_in_run = set()
         self._active_slot_id = ""
         self._set_image_pipeline_state(
             "idle",

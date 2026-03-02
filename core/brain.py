@@ -718,6 +718,12 @@ class GeminiBrain:
             state_path=self._facet_rotation_state_path,
             stable_hash_fn=stable_hash,
         )
+        try:
+            meta = dict(getattr(candidate, "meta", {}) or {})
+            meta["selected_facet"] = str(facet_context.selected_facet or "impact")
+            candidate.meta = meta
+        except Exception:
+            pass
         facet_action_items = list(facet_context.action_items)
         structure_seed = stable_hash(f"{event_id}{run_start_minute}")
         structure_plan = build_structure(
