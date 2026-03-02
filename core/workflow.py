@@ -49,6 +49,7 @@ from .text_segmenter import section_bundle_for_llm
 from .thumbnail_overlay import ThumbnailOverlayRenderer
 from .topic_growth import TopicGrower
 from .visual import ImageAsset, VisualPipeline
+from .watchdog import Watchdog
 from .r2_uploader import R2Config, upload_file as r2_upload_file
 
 
@@ -199,6 +200,21 @@ class AgentWorkflow:
         self._publish_ledger_path = ledger_path
         self._publish_ledger_enabled = bool(getattr(getattr(self.settings, "ledger", None), "enabled", True))
         self._publish_ledger_ttl_days = max(1, int(getattr(getattr(self.settings, "ledger", None), "ttl_days", 90) or 90))
+        self._retry_enabled = bool(getattr(getattr(self.settings, "workflow", None), "retry_enabled", True))
+        self._retry_max_attempts_per_event = max(
+            1,
+            int(getattr(getattr(self.settings, "workflow", None), "retry_max_attempts_per_event", 4) or 4),
+        )
+        self._retry_debounce_seconds = [
+            max(0, int(x))
+            for x in (list(getattr(getattr(self.settings, "workflow", None), "retry_debounce_seconds", [0, 30, 120, 600]) or [0, 30, 120, 600]))
+            if str(x).strip()
+        ]
+        if not self._retry_debounce_seconds:
+            self._retry_debounce_seconds = [0, 30, 120, 600]
+        self._retry_reset_on_success = bool(getattr(getattr(self.settings, "workflow", None), "retry_reset_on_success", True))
+        self._watchdog_state_path = self.root / "storage" / "state" / "watchdog_state.json"
+        self._watchdog_enabled = bool(getattr(getattr(self.settings, "watchdog", None), "enabled", True))
         self._last_news_pool_refresh_stats: dict[str, Any] = {}
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
         self.news_cluster_engine = NewsClusterEngine(
@@ -211,8 +227,37 @@ class AgentWorkflow:
             path=self._publish_ledger_path,
             ttl_days=self._publish_ledger_ttl_days,
         )
+        self.watchdog = Watchdog(
+            state_path=self._watchdog_state_path,
+            enabled=self._watchdog_enabled,
+            settings={
+                "max_same_hard_failure_streak": int(
+                    getattr(getattr(self.settings, "watchdog", None), "max_same_hard_failure_streak", 3) or 3
+                ),
+                "max_event_wallclock_minutes": int(
+                    getattr(getattr(self.settings, "watchdog", None), "max_event_wallclock_minutes", 20) or 20
+                ),
+                "max_event_total_attempts": int(
+                    getattr(getattr(self.settings, "watchdog", None), "max_event_total_attempts", 6) or 6
+                ),
+                "max_global_holds_per_hour": int(
+                    getattr(getattr(self.settings, "watchdog", None), "max_global_holds_per_hour", 12) or 12
+                ),
+                "max_provider_530_streak": int(
+                    getattr(getattr(self.settings, "watchdog", None), "max_provider_530_streak", 6) or 6
+                ),
+                "max_provider_429_streak": int(
+                    getattr(getattr(self.settings, "watchdog", None), "max_provider_429_streak", 4) or 4
+                ),
+                "backoff_on_provider_failure_minutes": dict(
+                    getattr(getattr(self.settings, "watchdog", None), "backoff_on_provider_failure_minutes", {}) or {}
+                ),
+                "retry_reset_on_success": bool(self._retry_reset_on_success),
+            },
+        )
         self._seen_cluster_ids_in_run: set[str] = set()
         self._failed_ledger_keys_in_run: set[str] = set()
+        self._ledger_skip_streak_in_run: dict[str, int] = {}
         self.news_pack_manifest = NewsPackManifest(
             root=self.root,
             manifest_path=str(getattr(self.settings.news_pack, "manifest_path", "storage/state/news_pack_manifest.jsonl")),
@@ -2607,6 +2652,29 @@ class AgentWorkflow:
             extracted_urls=[source_url, *safe_authorities][:8],
         )
 
+    def _retry_debounce_seconds_for_attempt(self, attempt_no: int) -> int:
+        schedule = list(self._retry_debounce_seconds or [0, 30, 120, 600])
+        idx = max(0, int(attempt_no) - 1)
+        if idx >= len(schedule):
+            return int(schedule[-1])
+        return int(schedule[idx])
+
+    def _provider_http_code_from_error(self, message: str) -> int | None:
+        msg = str(message or "").lower()
+        if "530" in msg or "http_530" in msg:
+            return 530
+        if "429" in msg or "http_429" in msg or "rate limit" in msg:
+            return 429
+        return None
+
+    def _watchdog_hold_gate(self, reason: str) -> tuple[bool, str]:
+        if not self._watchdog_enabled:
+            return False, str(reason or "")
+        blocked, detail = self.watchdog.should_hold_global()
+        if blocked:
+            return True, f"watchdog_global_limit:{detail}"
+        return False, str(reason or "")
+
     def _run_once_news_mode(
         self,
         *,
@@ -2618,6 +2686,7 @@ class AgentWorkflow:
         blog_snapshot: dict[str, Any],
         today_gemini_before: int,
         news_retry_depth: int = 0,
+        retry_event_id: str = "",
     ) -> WorkflowResult:
         self._progress("news_pool", "뉴스 풀 갱신/클레임", 18)
         working_draft_id = ""
@@ -2668,6 +2737,12 @@ class AgentWorkflow:
                     or (attempt_selected.meta or {}).get("news_pool_id", "")
                     or attempt_claimed_id
                 ).strip()
+                if str(retry_event_id or "").strip() and attempt_event_id != str(retry_event_id or "").strip():
+                    try:
+                        self.news_pool_store.rollback_claim(attempt_claimed_id)
+                    except Exception:
+                        pass
+                    continue
                 cluster_decision = self.news_cluster_engine.assign_cluster(
                     event_id=attempt_event_id,
                     title=str(getattr(attempt_selected, "title", "") or ""),
@@ -2711,6 +2786,9 @@ class AgentWorkflow:
                     if cluster_skip_count > 0
                     else "news_pool_empty"
                 )
+                global_blocked, global_reason = self._watchdog_hold_gate(hold_reason)
+                if global_blocked:
+                    hold_reason = global_reason
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -2759,6 +2837,29 @@ class AgentWorkflow:
                 or claimed_id
             ).strip()
             retry_index = (selected.meta or {}).get("retry_index", None)
+            self.watchdog.begin_event(event_id)
+            abort_event, abort_reason = self.watchdog.should_abort_event(event_id)
+            if abort_event:
+                skip_reason = f"watchdog_abort:{abort_reason}"
+                degraded_note = self._append_note(degraded_note, skip_reason)
+                if claimed_id:
+                    try:
+                        self.news_pool_store.rollback_claim(claimed_id)
+                        claim_finalized = True
+                    except Exception:
+                        pass
+                self.logs.append_run(
+                    RunRecord(
+                        status="skipped",
+                        score=0,
+                        title=str(selected.title or ""),
+                        source_url=str(getattr(selected, "url", "") or ""),
+                        published_url="",
+                        note=self._append_note(skip_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("skipped", skip_reason)
+                return WorkflowResult("skipped", skip_reason)
             if api_ready and self._gemini_budget_remaining() > 0:
                 try:
                     draft = self.brain.generate_news_post(
@@ -2782,6 +2883,28 @@ class AgentWorkflow:
                     if self.brain.call_count:
                         self.logs.increment_today_gemini_count(self.brain.call_count)
                         self.brain.reset_run_counter()
+                    provider_code = self._provider_http_code_from_error(str(exc))
+                    if provider_code in {429, 530}:
+                        self.watchdog.register_provider_failure(event_id, int(provider_code))
+                        backoff_minutes = self.watchdog.compute_backoff_minutes(event_id, int(provider_code))
+                        if backoff_minutes is not None:
+                            hold_reason = f"provider_backoff_http_{int(provider_code)}:{int(backoff_minutes)}m"
+                            degraded_note = self._append_note(degraded_note, hold_reason)
+                            global_blocked, global_reason = self._watchdog_hold_gate(hold_reason)
+                            if global_blocked:
+                                hold_reason = global_reason
+                            self.logs.append_run(
+                                RunRecord(
+                                    status="hold",
+                                    score=0,
+                                    title=str(selected.title or ""),
+                                    source_url=str(getattr(selected, "url", "") or ""),
+                                    published_url="",
+                                    note=self._append_note(hold_reason, degraded_note),
+                                )
+                            )
+                            self._workflow_perf_finish_run("hold", hold_reason)
+                            return WorkflowResult("hold", hold_reason)
                     degraded_note = self._append_note(degraded_note, f"news_gemini_failed={str(exc)[:120]}")
             if draft is None:
                 local_facet_context = resolve_facet_context(
@@ -3015,6 +3138,37 @@ class AgentWorkflow:
                         f"authority_links={int(qa_metrics.get('authority_links', 0))}"
                     )
                     hold_reason = f"qa_below_threshold:{qa_result.score}/{min_quality}"
+                    self.watchdog.register_hard_failure(event_id, hold_reason)
+                    can_retry = bool(self._retry_enabled and int(news_retry_depth) < int(self._retry_max_attempts_per_event))
+                    abort_now, abort_reason = self.watchdog.should_abort_event(event_id)
+                    if can_retry and (not abort_now):
+                        next_depth = int(news_retry_depth) + 1
+                        debounce = self._retry_debounce_seconds_for_attempt(next_depth)
+                        if debounce > 0:
+                            degraded_note = self._append_note(degraded_note, f"retry_debounce={debounce}s")
+                            time.sleep(float(debounce))
+                        if claimed_id:
+                            try:
+                                self.news_pool_store.rollback_claim(claimed_id)
+                                claim_finalized = True
+                            except Exception:
+                                pass
+                        return self._run_once_news_mode(
+                            manual_trigger=bool(manual_trigger),
+                            run_start_minute=run_start_minute,
+                            queue_advisory=queue_advisory,
+                            sync_note=sync_note,
+                            preflight_index_note=preflight_index_note,
+                            blog_snapshot=blog_snapshot,
+                            today_gemini_before=today_gemini_before,
+                            news_retry_depth=next_depth,
+                            retry_event_id=event_id,
+                        )
+                    if abort_now:
+                        hold_reason = f"{hold_reason};watchdog_abort={abort_reason}"
+                    global_blocked, global_reason = self._watchdog_hold_gate(hold_reason)
+                    if global_blocked:
+                        hold_reason = global_reason
                     self.logs.append_run(
                         RunRecord(
                             status="hold",
@@ -3031,6 +3185,37 @@ class AgentWorkflow:
             actionability = self._evaluate_actionability_gate(draft.title, final_html)
             if not actionability.ok:
                 hold_reason = "actionability_gate_failed:" + ",".join(actionability.reasons[:4])
+                self.watchdog.register_hard_failure(event_id, hold_reason)
+                can_retry = bool(self._retry_enabled and int(news_retry_depth) < int(self._retry_max_attempts_per_event))
+                abort_now, abort_reason = self.watchdog.should_abort_event(event_id)
+                if can_retry and (not abort_now):
+                    next_depth = int(news_retry_depth) + 1
+                    debounce = self._retry_debounce_seconds_for_attempt(next_depth)
+                    if debounce > 0:
+                        degraded_note = self._append_note(degraded_note, f"retry_debounce={debounce}s")
+                        time.sleep(float(debounce))
+                    if claimed_id:
+                        try:
+                            self.news_pool_store.rollback_claim(claimed_id)
+                            claim_finalized = True
+                        except Exception:
+                            pass
+                    return self._run_once_news_mode(
+                        manual_trigger=bool(manual_trigger),
+                        run_start_minute=run_start_minute,
+                        queue_advisory=queue_advisory,
+                        sync_note=sync_note,
+                        preflight_index_note=preflight_index_note,
+                        blog_snapshot=blog_snapshot,
+                        today_gemini_before=today_gemini_before,
+                        news_retry_depth=next_depth,
+                        retry_event_id=event_id,
+                    )
+                if abort_now:
+                    hold_reason = f"{hold_reason};watchdog_abort={abort_reason}"
+                global_blocked, global_reason = self._watchdog_hold_gate(hold_reason)
+                if global_blocked:
+                    hold_reason = global_reason
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -3288,6 +3473,10 @@ class AgentWorkflow:
                     or self.publish_ledger.exists(ledger_key)
                 )
                 if ledger_exists:
+                    self.watchdog.register_hard_failure(event_id, "ledger_skip")
+                    event_key = str(event_id or "").strip() or str(claimed_id or "")
+                    current_skip_streak = int(self._ledger_skip_streak_in_run.get(event_key, 0) or 0) + 1
+                    self._ledger_skip_streak_in_run[event_key] = int(current_skip_streak)
                     degraded_note = self._append_note(
                         degraded_note,
                         f"ledger_skip:{ledger_key}",
@@ -3308,7 +3497,8 @@ class AgentWorkflow:
                             claim_finalized = True
                         except Exception:
                             pass
-                    if int(news_retry_depth) < 3:
+                    abort_now, abort_reason = self.watchdog.should_abort_event(event_id)
+                    if (not abort_now) and int(current_skip_streak) < 3 and int(news_retry_depth) < 3:
                         return self._run_once_news_mode(
                             manual_trigger=bool(manual_trigger),
                             run_start_minute=run_start_minute,
@@ -3318,20 +3508,25 @@ class AgentWorkflow:
                             blog_snapshot=blog_snapshot,
                             today_gemini_before=today_gemini_before,
                             news_retry_depth=int(news_retry_depth) + 1,
+                            retry_event_id="",
                         )
-                    hold_reason = "ledger_skip_exhausted"
+                    skip_reason = (
+                        f"ledger_skip_watchdog_abort:{abort_reason}"
+                        if abort_now
+                        else f"ledger_skip_exhausted:{current_skip_streak}"
+                    )
                     self.logs.append_run(
                         RunRecord(
-                            status="hold",
+                            status="skipped",
                             score=0,
                             title=draft.title,
                             source_url=draft.source_url,
                             published_url="",
-                            note=self._append_note(hold_reason, degraded_note),
+                            note=self._append_note(skip_reason, degraded_note),
                         )
                     )
-                    self._workflow_perf_finish_run("hold", hold_reason)
-                    return WorkflowResult("hold", hold_reason)
+                    self._workflow_perf_finish_run("skipped", skip_reason)
+                    return WorkflowResult("skipped", skip_reason)
 
             self._progress("publish", "Blogger 예약 발행 처리", 92)
             published = self.publisher.publish_post(
@@ -3344,7 +3539,9 @@ class AgentWorkflow:
                 meta_description=meta_description,
                 preflight_thumbnail_src=preflight_thumb_src,
             )
-            if self._publish_ledger_enabled and ledger_payload:
+            published_url_value = str(getattr(published, "url", "") or "").strip()
+            published_ok = bool(published and published_url_value)
+            if self._publish_ledger_enabled and ledger_payload and published_ok:
                 if not self.publish_ledger.record(ledger_payload):
                     if ledger_key:
                         self._failed_ledger_keys_in_run.add(ledger_key)
@@ -3357,6 +3554,8 @@ class AgentWorkflow:
                             "cluster_id": str(ledger_payload.get("cluster_id", "") or ""),
                         },
                     )
+            elif self._publish_ledger_enabled and ledger_payload and (not published_ok):
+                degraded_note = self._append_note(degraded_note, "ledger_record_skipped_publish_not_confirmed")
             if claimed_id:
                 self.news_pool_store.mark_used(claimed_id, str(getattr(published, "url", "") or ""))
                 claim_finalized = True
@@ -3390,11 +3589,28 @@ class AgentWorkflow:
             self._remember_title_fingerprint(draft.title)
             self._cleanup_local_image_files(images)
             self._mark_active_slot("consumed", "publish_success", post_id=str(getattr(published, "post_id", "") or ""))
+            self.watchdog.register_success(event_id)
             msg = f"{published.url} (scheduled: {publish_at.isoformat()})"
             self._workflow_perf_finish_run("success", msg)
             return WorkflowResult("success", msg)
         except Exception as exc:
             hold_reason = str(exc)[:240] or "news_mode_error"
+            wd_event_id = str(locals().get("event_id", "") or "").strip()
+            provider_code = self._provider_http_code_from_error(hold_reason)
+            if wd_event_id and provider_code in {429, 530}:
+                self.watchdog.register_provider_failure(wd_event_id, int(provider_code))
+                backoff_minutes = self.watchdog.compute_backoff_minutes(wd_event_id, int(provider_code))
+                if backoff_minutes is not None:
+                    hold_reason = f"provider_backoff_http_{int(provider_code)}:{int(backoff_minutes)}m"
+            elif wd_event_id:
+                self.watchdog.register_hard_failure(wd_event_id, hold_reason)
+            if wd_event_id:
+                abort_now, abort_reason = self.watchdog.should_abort_event(wd_event_id)
+                if abort_now:
+                    hold_reason = self._append_note(hold_reason, f"watchdog_abort={abort_reason}")
+            global_blocked, global_reason = self._watchdog_hold_gate(hold_reason)
+            if global_blocked:
+                hold_reason = global_reason
             self.logs.append_run(
                 RunRecord(
                     status="hold",
@@ -3422,6 +3638,7 @@ class AgentWorkflow:
         self._pending_keyword_claims = []
         self._seen_cluster_ids_in_run = set()
         self._failed_ledger_keys_in_run = set()
+        self._ledger_skip_streak_in_run = {}
         self._active_slot_id = ""
         self._set_image_pipeline_state(
             "idle",
