@@ -27,6 +27,7 @@ from .index_sync import BloggerIndexSync
 from .logstore import LogStore, RunRecord
 from .news_pool import NewsPoolStore
 from .news_rss import fetch_feed_detailed
+from .news_clustering import NewsClusterEngine, should_skip_same_run
 from .news_facets import ensure_what_to_do_now_section, facet_emphasis_hint, resolve_facet_context
 from .news_score import classify_category, contains_allow_keywords, has_blocked_keywords, score_news_item
 from .news_pack_manifest import NewsPackManifest
@@ -189,8 +190,16 @@ class AgentWorkflow:
         self._news_pool_refresh_log_path = self.root / "storage" / "logs" / "news_pool_refresh.jsonl"
         self._news_pool_refresh_tick_log_path = self.root / "storage" / "logs" / "news_pool_refresh_tick.jsonl"
         self._news_rotation_state_path = self.root / "storage" / "state" / "news_rotation_state.json"
+        self._news_cluster_state_path = self.root / "storage" / "state" / "news_cluster_state.json"
         self._last_news_pool_refresh_stats: dict[str, Any] = {}
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
+        self.news_cluster_engine = NewsClusterEngine(
+            state_path=self._news_cluster_state_path,
+            stable_hash_fn=stable_hash,
+            threshold=0.82,
+            ttl_days=14,
+        )
+        self._seen_cluster_ids_in_run: set[str] = set()
         self.news_pack_manifest = NewsPackManifest(
             root=self.root,
             manifest_path=str(getattr(self.settings.news_pack, "manifest_path", "storage/state/news_pack_manifest.jsonl")),
@@ -2625,13 +2634,69 @@ class AgentWorkflow:
                     degraded_note,
                     self._append_note(force_note, f"news_pool_low={queued_now}/{min_items}"),
                 )
-            claimed_item = self._profile_call(
-                "news_pool_claim",
-                lambda: self._claim_news_item(force_refresh_once=True),
-                slow_ms=1800,
-            )
-            if not claimed_item:
-                hold_reason = "news_pool_empty"
+            selected: TopicCandidate | None = None
+            cluster_id = ""
+            cluster_skip_count = 0
+            max_claim_attempts = 6
+            for claim_try in range(1, max_claim_attempts + 1):
+                claimed_item = self._profile_call(
+                    "news_pool_claim",
+                    lambda: self._claim_news_item(force_refresh_once=bool(claim_try == 1)),
+                    slow_ms=1800,
+                )
+                if not claimed_item:
+                    break
+                attempt_claimed_id = int((claimed_item or {}).get("id", 0) or 0)
+                attempt_selected = self._news_item_to_candidate(claimed_item)
+                attempt_event_id = str(
+                    (attempt_selected.meta or {}).get("event_id", "")
+                    or (attempt_selected.meta or {}).get("news_event_id", "")
+                    or (attempt_selected.meta or {}).get("news_pool_id", "")
+                    or attempt_claimed_id
+                ).strip()
+                cluster_decision = self.news_cluster_engine.assign_cluster(
+                    event_id=attempt_event_id,
+                    title=str(getattr(attempt_selected, "title", "") or ""),
+                    body=str(getattr(attempt_selected, "body", "") or ""),
+                    run_start_minute=str(run_start_minute or "").strip(),
+                )
+                attempt_meta = dict(getattr(attempt_selected, "meta", {}) or {})
+                attempt_meta["cluster_id"] = str(cluster_decision.cluster_id or "")
+                attempt_meta["cluster_similarity"] = float(cluster_decision.best_similarity)
+                attempt_meta["cluster_matched_existing"] = bool(cluster_decision.matched_existing)
+                attempt_selected.meta = attempt_meta
+                attempt_cluster_id = str(attempt_meta.get("cluster_id", "") or "")
+                if should_skip_same_run(attempt_cluster_id, self._seen_cluster_ids_in_run):
+                    cluster_skip_count += 1
+                    degraded_note = self._append_note(
+                        degraded_note,
+                        f"cluster_skip_same_cycle={attempt_cluster_id or 'none'}",
+                    )
+                    self._append_workflow_perf(
+                        "news_cluster_skip",
+                        {
+                            "claim_try": int(claim_try),
+                            "claimed_id": int(attempt_claimed_id),
+                            "cluster_id": str(attempt_cluster_id or ""),
+                            "similarity": float(cluster_decision.best_similarity),
+                        },
+                    )
+                    try:
+                        self.news_pool_store.rollback_claim(attempt_claimed_id)
+                    except Exception:
+                        pass
+                    continue
+                selected = attempt_selected
+                claimed_id = int(attempt_claimed_id)
+                cluster_id = attempt_cluster_id
+                break
+
+            if not selected:
+                hold_reason = (
+                    f"news_cluster_skip_exhausted:{cluster_skip_count}"
+                    if cluster_skip_count > 0
+                    else "news_pool_empty"
+                )
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -2645,11 +2710,11 @@ class AgentWorkflow:
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
 
-            claimed_id = int((claimed_item or {}).get("id", 0) or 0)
-            selected = self._news_item_to_candidate(claimed_item)
             category = str((selected.meta or {}).get("news_category", "platform") or "platform").strip().lower() or "platform"
             global_keywords = list(getattr(selected, "long_tail_keywords", []) or [])[:8]
-            reason = f"news_pool_claimed={claimed_id};category={category}"
+            reason = f"news_pool_claimed={claimed_id};category={category};cluster_id={cluster_id or 'none'}"
+            if cluster_id:
+                degraded_note = self._append_note(degraded_note, f"news_cluster_id={cluster_id}")
             labels = self._build_public_labels(
                 title=selected.title,
                 candidate=selected,
@@ -2693,6 +2758,7 @@ class AgentWorkflow:
                             "event_id": event_id,
                             "run_start_minute": str(run_start_minute or "").strip(),
                             "retry_index": retry_index,
+                            "cluster_id": str((selected.meta or {}).get("cluster_id", "") or ""),
                         },
                     )
                     if self.brain.call_count:
@@ -3249,6 +3315,7 @@ class AgentWorkflow:
         run_start_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
         self._maintenance_tick()
         self._pending_keyword_claims = []
+        self._seen_cluster_ids_in_run = set()
         self._active_slot_id = ""
         self._set_image_pipeline_state(
             "idle",
