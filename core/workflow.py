@@ -2563,6 +2563,7 @@ class AgentWorkflow:
         self,
         *,
         manual_trigger: bool,
+        run_start_minute: str,
         queue_advisory: str,
         sync_note: str,
         preflight_index_note: str,
@@ -2646,6 +2647,12 @@ class AgentWorkflow:
             )
             draft: DraftPost | None = None
             reference_guidance = self.references.build_guidance()
+            event_id = str(
+                (selected.meta or {}).get("event_id", "")
+                or (selected.meta or {}).get("news_event_id", "")
+                or (selected.meta or {}).get("news_pool_id", "")
+                or claimed_id
+            ).strip()
             if api_ready and self._gemini_budget_remaining() > 0:
                 try:
                     draft = self.brain.generate_news_post(
@@ -2653,7 +2660,12 @@ class AgentWorkflow:
                         self.settings.authority_links,
                         reference_guidance,
                         category=category,
-                        plan={"primary_keyword": selected.title, "news_category": category},
+                        plan={
+                            "primary_keyword": selected.title,
+                            "news_category": category,
+                            "event_id": event_id,
+                            "run_start_minute": str(run_start_minute or "").strip(),
+                        },
                     )
                     if self.brain.call_count:
                         self.logs.increment_today_gemini_count(self.brain.call_count)
@@ -3187,6 +3199,7 @@ class AgentWorkflow:
 
     def run_once(self, manual_trigger: bool = False) -> WorkflowResult:
         self._workflow_perf_start_run(manual_trigger=bool(manual_trigger))
+        run_start_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
         self._maintenance_tick()
         self._pending_keyword_claims = []
         self._active_slot_id = ""
@@ -3300,6 +3313,7 @@ class AgentWorkflow:
         if is_news_mode(self.settings):
             return self._run_once_news_mode(
                 manual_trigger=bool(manual_trigger),
+                run_start_minute=run_start_minute,
                 queue_advisory=queue_advisory,
                 sync_note=sync_note,
                 preflight_index_note=preflight_index_note,
