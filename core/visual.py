@@ -20,6 +20,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from .brain import DraftPost
+from .r2_uploader import R2Config, upload_bytes as r2_upload_bytes
 from .settings import VisualSettings
 
 try:
@@ -45,15 +46,16 @@ class VisualPipeline:
         session_dir: Path,
         visual_settings: VisualSettings,
         gemini_api_key: str,
+        r2_config: Any | None = None,
     ) -> None:
         self.temp_dir = temp_dir
         self.session_dir = session_dir
         self.visual_settings = visual_settings
         self.gemini_api_key = gemini_api_key
+        self.r2_config = r2_config
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        self.image_cache_dir = (self.temp_dir.parent.parent / str(getattr(self.visual_settings, "cache_dir", "storage/image_cache"))).resolve()
-        self.image_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.image_cache_dir = self.temp_dir
         self._visual_log_path = self.temp_dir.parent / "logs" / "visual_pipeline.jsonl"
         self._visual_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_rotate_max_bytes = 50 * 1024 * 1024
@@ -72,118 +74,39 @@ class VisualPipeline:
     def build(self, draft: DraftPost, prompt_plan: dict[str, Any] | None = None) -> list[ImageAsset]:
         self._current_run_hashes = set()
         self._current_run_embeddings = []
-        if not bool(getattr(self.visual_settings, "enable_gemini_image_generation", False)):
-            self._log_visual_event(
-                {
-                    "event": "visual_build_skipped",
-                    "reason": "gemini_image_generation_disabled",
-                }
-            )
-            return []
-        provider = str(getattr(self.visual_settings, "image_provider", "gemini") or "gemini").strip().lower()
+        provider = str(getattr(self.visual_settings, "image_provider", "library") or "library").strip().lower()
         target = max(1, int(self.visual_settings.target_images_per_post))
         body_slots = max(0, target - 1)
         self._log_visual_event(
             {
                 "event": "visual_build_start",
                 "provider": provider,
+                "mode": "local_generated_r2",
                 "target_images_per_post": int(target),
                 "target_banner": 1,
                 "target_inline": int(body_slots),
             }
         )
-        if provider != "gemini":
-            self._log_visual_event(
-                {
-                    "event": "image_provider_forced",
-                    "requested": provider,
-                    "forced": "gemini",
-                }
-            )
-            provider = "gemini"
-        # Generated-only policy:
-        # - Total images per post = target_images_per_post
-        # - 1 thumbnail is created in ensure_generated_thumbnail()
-        # - Remaining slots are content images from contextual prompts
         paragraphs = self._extract_paragraphs(draft.html)
         selected_paragraphs = self._select_target_paragraphs(paragraphs, body_slots)
-
-        # API usage optimization: prompt generation is local keyword-based (no Gemini call).
-        prompts = self._generate_prompts_with_gemini(selected_paragraphs, draft.title)
-        inline_plan_prompt = re.sub(
-            r"\s+",
-            " ",
-            str((prompt_plan or {}).get("inline_prompt", "") or "").strip(),
-        )
-        self._log_visual_event(
-            {
-                "event": "visual_prompt_plan",
-                "source": str((prompt_plan or {}).get("source", "fallback") or "fallback"),
-                "banner_prompt_len": len(str((prompt_plan or {}).get("banner_prompt", "") or "")),
-                "inline_prompt_len": len(inline_plan_prompt),
-            }
-        )
-        if inline_plan_prompt:
-            if prompts:
-                prompts[0] = inline_plan_prompt
-            else:
-                prompts = [inline_plan_prompt]
         assets: list[ImageAsset] = []
-
-        for i, paragraph in enumerate(selected_paragraphs):
-            prompt = prompts[i] if i < len(prompts) else self._fallback_prompt(paragraph, draft.title)
-            generated = self._generate_image_with_gemini(
-                prompt,
-                i + 1,
-                paragraph,
-                draft.title,
-                role="content",
-            )
-            if generated is not None:
-                assets.append(generated)
-            if len(assets) >= body_slots:
-                break
-
-        # Fill remaining body slots with contextual retry prompts.
-        no_progress_count = 0
         seed_contexts = selected_paragraphs if selected_paragraphs else [draft.summary or draft.title]
         cursor = 0
         while len(assets) < body_slots:
             idx = len(assets) + 1
             context = seed_contexts[cursor % len(seed_contexts)] if seed_contexts else (draft.summary or draft.title)
             cursor += 1
-            prompt = self._fallback_prompt(context or draft.summary, draft.title)
-            generated = self._generate_image_with_gemini(
-                prompt,
-                idx,
-                context or "",
-                draft.title,
+            generated = self._build_local_generated_asset(
                 role="content",
+                index=idx,
+                paragraph=str(context or ""),
+                keyword=draft.title,
             )
-            if generated is not None:
-                assets.append(generated)
-                no_progress_count = 0
-                continue
-
-            no_progress_count += 1
-            if no_progress_count >= 3:
+            if generated is None:
                 break
+            assets.append(generated)
 
-        assets = self.ensure_unique_assets(assets)
-        valid_assets: list[ImageAsset] = []
-        for asset in assets:
-            if self._optimize_image_for_seo(asset.path, role="content"):
-                valid_assets.append(asset)
-            else:
-                self._log_visual_event(
-                    {
-                        "event": "image_asset_dropped",
-                        "reason": "missing_or_optimize_failed",
-                        "path": str(getattr(asset, "path", "")),
-                        "role": "content",
-                    }
-                )
-        result = valid_assets[:body_slots]
+        result = self.ensure_unique_assets(assets)[:body_slots]
         reasons: list[str] = []
         if len(result) < body_slots:
             reasons.append(f"inline_shortfall({len(result)}/{body_slots})")
@@ -209,40 +132,26 @@ class VisualPipeline:
     ) -> list[ImageAsset]:
         if not images:
             images = []
-        # If there is already a generated thumbnail candidate, move it to index 0.
+        # Keep any existing R2-hosted thumbnail candidate as slot 0.
         for idx, asset in enumerate(images):
-            kind = (getattr(asset, "source_kind", "") or "").strip().lower()
-            if kind in {"gemini", "generated"} and Path(getattr(asset, "path", "")).exists():
+            src = str(getattr(asset, "source_url", "") or "").strip()
+            if src and self._is_valid_r2_public_url(src):
                 if idx != 0:
                     images.insert(0, images.pop(idx))
-                self._optimize_image_for_seo(images[0].path, role="thumbnail")
                 return images
 
-        # Generate a dedicated thumbnail when screenshot-only set is returned.
-        prompt = re.sub(
-            r"\s+",
-            " ",
-            str((prompt_plan or {}).get("banner_prompt", "") or "").strip(),
-        )
-        if not prompt:
-            prompt = self._build_thumbnail_prompt(draft)
-        generated = self._generate_image_with_gemini(
-            prompt=prompt,
+        generated = self._build_local_generated_asset(
+            role="thumbnail",
             index=0,
             paragraph=(draft.summary or draft.title),
             keyword=draft.title,
-            role="thumbnail",
         )
-        if generated is None:
-            generated = self._fallback_asset_for_role(role="thumbnail", index=0)
         if generated is None:
             raise RuntimeError("Generated thumbnail creation failed. retry required")
         generated.anchor_text = ""
         generated.alt = self._build_alt_text(draft.title, "thumbnail")
-        if not self._optimize_image_for_seo(generated.path, role="thumbnail"):
-            raise RuntimeError("Generated thumbnail file missing after creation. retry required")
         images.insert(0, generated)
-        return images
+        return self.ensure_unique_assets(images)
 
     def regenerate_thumbnail_once(
         self,
@@ -255,29 +164,17 @@ class VisualPipeline:
         """
         existing = list(images or [])
         body_assets = existing[1:] if len(existing) > 1 else []
-        prompt = re.sub(
-            r"\s+",
-            " ",
-            str((prompt_plan or {}).get("banner_prompt", "") or "").strip(),
-        )
-        if not prompt:
-            prompt = self._build_thumbnail_prompt(draft)
         index_seed = 900 + random.randint(1, 80)
-        generated = self._generate_image_with_gemini(
-            prompt=prompt,
+        generated = self._build_local_generated_asset(
+            role="thumbnail",
             index=index_seed,
             paragraph=(draft.summary or draft.title),
             keyword=draft.title,
-            role="thumbnail",
         )
-        if generated is None:
-            generated = self._fallback_asset_for_role(role="thumbnail", index=index_seed)
         if generated is None:
             return self.ensure_unique_assets(existing)
         generated.anchor_text = ""
         generated.alt = self._build_alt_text(draft.title, "thumbnail")
-        if not self._optimize_image_for_seo(generated.path, role="thumbnail"):
-            return self.ensure_unique_assets(existing)
         out = [generated] + body_assets
         return self.ensure_unique_assets(out)
 
@@ -307,42 +204,24 @@ class VisualPipeline:
             seed_contexts = [draft.title or "device troubleshooting"]
 
         cursor = 0
-        no_progress = 0
-        # Use high index offset to avoid filename collisions with existing generated_XX files.
         file_index_seed = 100 + len(current)
-
-        retry_budget = max(int(min_retry_attempts or 5), missing * 6)
+        retry_budget = max(int(min_retry_attempts or 5), missing * 4)
         attempts = 0
         while missing > 0 and attempts < retry_budget:
             attempts += 1
             context = seed_contexts[cursor % len(seed_contexts)] if seed_contexts else (draft.summary or draft.title)
             cursor += 1
-            prompt = self._fallback_prompt(context or draft.summary, draft.title)
-            generated = self._generate_image_with_gemini(
-                prompt=prompt,
+            generated = self._build_local_generated_asset(
+                role="content",
                 index=file_index_seed,
                 paragraph=context or "",
                 keyword=draft.title,
-                role="content",
             )
             file_index_seed += 1
             if generated is None:
-                no_progress += 1
-                if no_progress >= 4:
-                    no_progress = 0
-                continue
-            cand_hash = self._file_sha1(generated.path)
-            if cand_hash and any(cand_hash == self._file_sha1(img.path) for img in current):
-                try:
-                    generated.path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                continue
-            if not self._optimize_image_for_seo(generated.path, role="content"):
                 continue
             current.append(generated)
             missing -= 1
-            no_progress = 0
 
         return self._dedupe_assets_by_content(current)[:target]
 
@@ -362,19 +241,30 @@ class VisualPipeline:
 
     def _dedupe_assets_by_content(self, images: list[ImageAsset]) -> list[ImageAsset]:
         out: list[ImageAsset] = []
-        seen_hashes: set[str] = set()
+        seen_keys: set[str] = set()
         for img in (images or []):
+            src = str(getattr(img, "source_url", "") or "").strip()
+            if src:
+                key = f"url:{src.lower()}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                out.append(img)
+                continue
+            key = ""
             try:
                 p = Path(getattr(img, "path", ""))
             except Exception:
                 p = Path("")
-            if not str(p) or (not p.exists()) or (not p.is_file()):
+            if str(p) and p.exists() and p.is_file():
+                digest = self._file_sha1(p)
+                key = f"sha1:{digest}" if digest else f"path:{str(p)}"
+            elif str(p):
+                key = f"path:{str(p)}"
+            if key and key in seen_keys:
                 continue
-            digest = self._file_sha1(p)
-            if digest and digest in seen_hashes:
-                continue
-            if digest:
-                seen_hashes.add(digest)
+            if key:
+                seen_keys.add(key)
             out.append(img)
         return out
 
@@ -927,6 +817,15 @@ class VisualPipeline:
         keyword: str,
         role: str = "content",
     ) -> ImageAsset | None:
+        # Stage-13 policy: Gemini image generation path is permanently disabled.
+        self._log_visual_event(
+            {
+                "event": "gemini_generation_disabled_policy",
+                "index": int(index or 0),
+                "role": str(role or "content"),
+            }
+        )
+        return None
         prompt_text = self._enforce_no_text_rule(re.sub(r"\s+", " ", str(prompt or "")).strip())
         if self._looks_like_news_prompt(prompt_text):
             prompt_text = self._enforce_news_visual_prompt(prompt_text)
@@ -1685,49 +1584,12 @@ class VisualPipeline:
         return re.sub(r"\s+", " ", pick).strip()[:180]
 
     def _fallback_asset_for_role(self, role: str, index: int) -> ImageAsset | None:
-        is_thumb = str(role or "").strip().lower() == "thumbnail"
-        rel = (
-            str(getattr(self.visual_settings, "fallback_banner", "assets/fallback/banner.png"))
-            if is_thumb
-            else str(getattr(self.visual_settings, "fallback_inline", "assets/fallback/inline.png"))
-        )
-        src = (self.temp_dir.parent.parent / rel).resolve()
-        if not src.exists():
-            try:
-                src.parent.mkdir(parents=True, exist_ok=True)
-                self._create_runtime_fallback_image(src, role="thumbnail" if is_thumb else "inline")
-            except Exception:
-                # Guaranteed fallback creation path even when Pillow rendering fails.
-                try:
-                    tiny_png = base64.b64decode(
-                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAoMBgA6n7QkAAAAASUVORK5CYII="
-                    )
-                    src.write_bytes(tiny_png)
-                except Exception:
-                    return None
-        if not src.exists():
-            return None
-        ext = src.suffix or ".png"
-        dst = self.temp_dir / f"generated_{index:02d}_fallback{ext}"
-        try:
-            shutil.copy2(src, dst)
-        except Exception:
-            return None
-        self._log_visual_event(
-            {
-                "event": "gemini_image_fallback_local",
-                "role": "thumbnail" if is_thumb else "inline",
-                "source": str(src),
-                "target": str(dst),
-            }
-        )
-        return ImageAsset(
-            path=dst,
-            alt=self._build_alt_text("troubleshooting workflow", "fallback image"),
-            anchor_text="",
-            source_kind="gemini",
-            source_url="local://fallback",
-            license_note="Local fallback image.",
+        role_key = "thumbnail" if str(role or "").strip().lower() == "thumbnail" else "content"
+        return self._build_local_generated_asset(
+            role=role_key,
+            index=index,
+            paragraph="",
+            keyword="troubleshooting workflow",
         )
 
     def _create_runtime_fallback_image(self, path: Path, role: str = "inline") -> None:
@@ -1779,6 +1641,122 @@ class VisualPipeline:
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         img.save(path, format="PNG", optimize=True)
+
+    def _runtime_r2_config(self) -> R2Config | None:
+        raw = self.r2_config
+        if raw is None:
+            return None
+        cfg = R2Config(
+            endpoint_url=str(getattr(raw, "endpoint_url", "") or "").strip(),
+            bucket=str(getattr(raw, "bucket", "") or "").strip(),
+            access_key_id=str(getattr(raw, "access_key_id", "") or "").strip(),
+            secret_access_key=str(getattr(raw, "secret_access_key", "") or "").strip(),
+            public_base_url=str(getattr(raw, "public_base_url", "") or "").strip().rstrip("/"),
+            prefix=str(getattr(raw, "prefix", "library") or "library").strip() or "library",
+            cache_control=str(
+                getattr(raw, "cache_control", "public, max-age=31536000, immutable")
+                or "public, max-age=31536000, immutable"
+            ).strip(),
+        )
+        if not (
+            cfg.endpoint_url
+            and cfg.bucket
+            and cfg.access_key_id
+            and cfg.secret_access_key
+            and cfg.public_base_url
+        ):
+            return None
+        return cfg
+
+    def _is_valid_r2_public_url(self, url: str) -> bool:
+        clean = str(url or "").strip()
+        if not clean:
+            return False
+        try:
+            host = (urlparse(clean).netloc or "").lower()
+        except Exception:
+            return False
+        cfg = self._runtime_r2_config()
+        if cfg is None:
+            return False
+        try:
+            expected = (urlparse(cfg.public_base_url).netloc or "").lower()
+        except Exception:
+            expected = ""
+        return bool(host and expected and host == expected)
+
+    def _virtual_asset_path(self, role: str, index: int) -> Path:
+        role_key = "thumb" if str(role or "").strip().lower() == "thumbnail" else "inline"
+        return (self.temp_dir / f"virtual_{role_key}_{int(index):02d}.png").resolve()
+
+    def _build_local_generated_asset(
+        self,
+        role: str,
+        index: int,
+        paragraph: str,
+        keyword: str,
+    ) -> ImageAsset | None:
+        cfg = self._runtime_r2_config()
+        if cfg is None:
+            self._log_visual_event(
+                {
+                    "event": "local_r2_asset_skipped",
+                    "reason": "missing_r2_config",
+                    "role": str(role or "content"),
+                }
+            )
+            return None
+
+        role_key = "thumbnail" if str(role or "").strip().lower() == "thumbnail" else "content"
+        tmp_path = (self.temp_dir / f"generated_{role_key}_{int(index):02d}.png").resolve()
+        try:
+            self._create_runtime_fallback_image(tmp_path, role="thumbnail" if role_key == "thumbnail" else "inline")
+            try:
+                self._optimize_image_for_seo(tmp_path, role=role_key)
+            except Exception:
+                pass
+            data = tmp_path.read_bytes()
+            r2_url = r2_upload_bytes(
+                root=self.temp_dir.parent.parent,
+                cfg=cfg,
+                content=data,
+                filename_hint=f"{role_key}_{index:02d}",
+                category="thumb" if role_key == "thumbnail" else "content",
+                content_type="image/png",
+            )
+            if not self._is_valid_r2_public_url(r2_url):
+                self._log_visual_event(
+                    {
+                        "event": "local_r2_asset_skipped",
+                        "reason": "r2_public_url_invalid",
+                        "role": role_key,
+                        "url": str(r2_url)[:220],
+                    }
+                )
+                return None
+            return ImageAsset(
+                path=self._virtual_asset_path(role_key, index),
+                alt=self._build_alt_text(keyword, "generated image"),
+                anchor_text=str(paragraph or ""),
+                source_kind="generated",
+                source_url=str(r2_url),
+                license_note="Generated locally and hosted on Cloudflare R2.",
+            )
+        except Exception as exc:
+            self._log_visual_event(
+                {
+                    "event": "local_r2_asset_failed",
+                    "reason": str(exc)[:220],
+                    "role": role_key,
+                    "index": int(index),
+                }
+            )
+            return None
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _extract_image_payload(self, data: dict, method: str) -> tuple[bytes | None, str]:
         if method == "predict":

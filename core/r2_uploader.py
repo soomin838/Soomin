@@ -5,6 +5,8 @@ from pathlib import Path
 import hashlib
 import json
 import mimetypes
+import os
+import tempfile
 
 import boto3
 
@@ -48,8 +50,32 @@ def _save_cache(root: Path, data: dict) -> None:
     cp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _is_dry_run() -> bool:
+    return str(os.getenv("R2_DRY_RUN", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dryrun_url(cfg: R2Config, category: str, filename_hint: str) -> str:
+    prefix = (cfg.prefix or "library").strip("/")
+    cat = re_sub_nonword(str(category or "generic").strip().lower()) or "generic"
+    name = re_sub_nonword(str(filename_hint or "image").strip().lower()) or "image"
+    token = hashlib.sha1(f"{cat}|{name}".encode("utf-8", errors="ignore")).hexdigest()[:12]
+    object_key = f"{prefix}/dryrun/{cat}/{name}_{token}.png"
+    return cfg.public_base_url.rstrip("/") + "/" + object_key
+
+
+def re_sub_nonword(value: str) -> str:
+    out = "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in str(value or ""))
+    out = out.strip("_")
+    while "__" in out:
+        out = out.replace("__", "_")
+    return out[:60]
+
+
 def upload_file(root: Path, cfg: R2Config, file_path: Path, category: str) -> str:
     file_path = Path(file_path).resolve()
+    if _is_dry_run():
+        return _dryrun_url(cfg, category=category, filename_hint=file_path.stem)
+
     cache = _load_cache(root)
     key_fp = _fingerprint(file_path)
     cached = cache.get(key_fp)
@@ -82,4 +108,47 @@ def upload_file(root: Path, cfg: R2Config, file_path: Path, category: str) -> st
     cache[key_fp] = public_url
     _save_cache(root, cache)
     return public_url
+
+
+def upload_bytes(
+    root: Path,
+    cfg: R2Config,
+    content: bytes,
+    filename_hint: str,
+    category: str,
+    content_type: str,
+) -> str:
+    if _is_dry_run():
+        return _dryrun_url(cfg, category=category, filename_hint=filename_hint)
+
+    ct = str(content_type or "").strip().lower()
+    ext = ".bin"
+    if "png" in ct:
+        ext = ".png"
+    elif "jpeg" in ct or "jpg" in ct:
+        ext = ".jpg"
+    elif "webp" in ct:
+        ext = ".webp"
+    elif "gif" in ct:
+        ext = ".gif"
+
+    safe_hint = re_sub_nonword(filename_hint) or "image"
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext, prefix=f"rz_{safe_hint[:24]}_") as tmp:
+            tmp.write(content or b"")
+            tmp.flush()
+            tmp_path = Path(tmp.name).resolve()
+        return upload_file(
+            root=root,
+            cfg=cfg,
+            file_path=tmp_path,
+            category=category,
+        )
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 

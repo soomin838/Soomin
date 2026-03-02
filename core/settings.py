@@ -105,7 +105,7 @@ class VisualSettings:
     max_inline_images: int = 4
     image_provider: str = "library"
     screenshot_priority_keywords: list[str] = field(default_factory=list)
-    enable_gemini_image_generation: bool = True
+    enable_gemini_image_generation: bool = False
     gemini_image_model: str = "models/imagen-3.0-generate-001"
     gemini_prompt_model: str = "gemini-2.0-flash"
     allow_chart_fallback: bool = False
@@ -766,7 +766,11 @@ def load_settings(path: Path) -> AppSettings:
                 )
             else:
                 raw.setdefault("visual", {})
-                raw["visual"]["enable_gemini_image_generation"] = bool(llm_raw.get("enable_image_generation"))
+                if bool(llm_raw.get("enable_image_generation")):
+                    settings_warnings.append(
+                        "llm.enable_image_generation=true is ignored by Stage-13 policy (gemini image generation disabled)."
+                    )
+                raw["visual"]["enable_gemini_image_generation"] = False
     if images_raw:
         visual_raw_existing = raw.get("visual", {})
         has_visual_explicit = isinstance(visual_raw_existing, dict) and bool(visual_raw_existing)
@@ -798,12 +802,14 @@ def load_settings(path: Path) -> AppSettings:
                 )
                 src_provider = "library"
             if src_provider == "gemini":
-                raw["visual"]["image_provider"] = "gemini"
-                raw["visual"]["enable_gemini_image_generation"] = True
+                settings_warnings.append(
+                    "images.provider=gemini is ignored by Stage-13 policy; forcing visual.image_provider=library."
+                )
+                raw["visual"]["image_provider"] = "library"
+                raw["visual"]["enable_gemini_image_generation"] = False
             else:
                 raw["visual"]["image_provider"] = "library"
-                # Do not force-disable generation; keep permissive default for compatibility.
-                raw["visual"].setdefault("enable_gemini_image_generation", True)
+                raw["visual"].setdefault("enable_gemini_image_generation", False)
             raw["visual"].setdefault("pollinations_enabled", False)
     if publishing_raw:
         raw.setdefault("budget", {})

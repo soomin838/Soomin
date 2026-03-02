@@ -366,8 +366,8 @@ visual:
   target_images_per_post: 5
   max_banner_images: 1
   max_inline_images: 4
-  image_provider: gemini
-  enable_gemini_image_generation: true
+  image_provider: library
+  enable_gemini_image_generation: false
   allow_chart_fallback: false
   gemini_prompt_model: gemini-2.0-flash
   gemini_image_model: models/imagen-3.0-generate-001

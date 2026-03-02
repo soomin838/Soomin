@@ -88,6 +88,7 @@ class AgentWorkflow:
             session_dir=root / "storage" / "sessions",
             visual_settings=settings.visual,
             gemini_api_key=settings.gemini.api_key,
+            r2_config=getattr(settings.publish, "r2", None),
         )
         self.publisher = Publisher(
             credentials_path=root / settings.blogger.credentials_path,
@@ -409,6 +410,21 @@ class AgentWorkflow:
     def _news_pack_record_to_asset(self, row: dict[str, Any], index: int) -> ImageAsset | None:
         if not isinstance(row, dict):
             return None
+        src_url = str(row.get("r2_url", "") or "").strip()
+        if src_url and self.publisher._is_allowed_image_url(src_url, allow_data_uri=False):  # noqa: SLF001
+            kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
+            alt = "Editorial illustration supporting this tech news section."
+            if kind == "thumb_final":
+                alt = "Editorial thumbnail illustration for this tech news article."
+            virtual = (self.root / "storage" / "temp_images" / f"news_pack_virtual_{int(index):02d}.png").resolve()
+            return ImageAsset(
+                path=virtual,
+                alt=alt,
+                anchor_text="",
+                source_kind="news_pack",
+                source_url=src_url,
+                license_note="NewsPack generated background",
+            )
         local_raw = str(row.get("local_path", "") or "").strip()
         if not local_raw:
             return None
@@ -421,7 +437,6 @@ class AgentWorkflow:
         alt = "Editorial illustration supporting this tech news section."
         if kind == "thumb_final":
             alt = "Editorial thumbnail illustration for this tech news article."
-        src_url = str(row.get("r2_url", "") or "").strip()
         return ImageAsset(
             path=local,
             alt=alt,
@@ -485,7 +500,7 @@ class AgentWorkflow:
                 "provider": "local_overlay",
                 "prompt": f"overlay:{hook}",
                 "prompt_hash": hashlib.sha1(f"overlay:{hook}".encode("utf-8", errors="ignore")).hexdigest(),
-                "local_path": str(rendered),
+                "local_path": "",
                 "r2_key": str(r2_url).split(r2_cfg.public_base_url.rstrip("/") + "/", 1)[-1],
                 "r2_url": str(r2_url),
                 "sha1": sha1,
@@ -503,8 +518,12 @@ class AgentWorkflow:
                 "style_tags": ["yt_clean", "overlay"],
             }
         )
+        try:
+            rendered.unlink(missing_ok=True)
+        except Exception:
+            pass
         return ImageAsset(
-            path=rendered,
+            path=(self.root / "storage" / "temp_images" / f"news_pack_virtual_thumb_{token}.png").resolve(),
             alt="Editorial thumbnail illustration for this tech news article.",
             anchor_text="",
             source_kind="news_pack",
@@ -3387,7 +3406,7 @@ class AgentWorkflow:
                 gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
             else:
                 if images:
-                    preflight_thumb_src = str(getattr(images[0], "source_url", "") or "").strip()
+                    preflight_thumb_src = self._preflight_thumb_src_from_images(images)
                     if not preflight_thumb_src:
                         images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
                             draft=draft,
@@ -5189,19 +5208,21 @@ class AgentWorkflow:
                 raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         else:
             try:
+                preflight_thumb_src = self._preflight_thumb_src_from_images(images)
                 if images:
-                    images, preflight_thumb_src = self._profile_call(
-                        "thumbnail_preflight_with_recovery",
-                        lambda: self._preflight_thumbnail_with_recovery(
-                            draft=draft,
-                            candidate=selected,
-                            images=images,
-                            prompt_plan=image_prompt_plan,
-                            max_attempts=3,
-                            manual_trigger=manual_trigger,
-                        ),
-                        slow_ms=8000,
-                    )
+                    if not preflight_thumb_src:
+                        images, preflight_thumb_src = self._profile_call(
+                            "thumbnail_preflight_with_recovery",
+                            lambda: self._preflight_thumbnail_with_recovery(
+                                draft=draft,
+                                candidate=selected,
+                                images=images,
+                                prompt_plan=image_prompt_plan,
+                                max_attempts=3,
+                                manual_trigger=manual_trigger,
+                            ),
+                            slow_ms=8000,
+                        )
                 creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
                 gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
                     final_html,
@@ -6606,19 +6627,21 @@ class AgentWorkflow:
                 raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         else:
             try:
+                preflight_thumb_src = self._preflight_thumb_src_from_images(images)
                 if images:
-                    images, preflight_thumb_src = self._profile_call(
-                        "resume_thumbnail_preflight_with_recovery",
-                        lambda: self._preflight_thumbnail_with_recovery(
-                            draft=draft,
-                            candidate=candidate,
-                            images=images,
-                            prompt_plan=image_prompt_plan,
-                            max_attempts=3,
-                            manual_trigger=manual_trigger,
-                        ),
-                        slow_ms=8000,
-                    )
+                    if not preflight_thumb_src:
+                        images, preflight_thumb_src = self._profile_call(
+                            "resume_thumbnail_preflight_with_recovery",
+                            lambda: self._preflight_thumbnail_with_recovery(
+                                draft=draft,
+                                candidate=candidate,
+                                images=images,
+                                prompt_plan=image_prompt_plan,
+                                max_attempts=3,
+                                manual_trigger=manual_trigger,
+                            ),
+                            slow_ms=8000,
+                        )
                 creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
                 gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
                     final_html,
@@ -7855,6 +7878,16 @@ class AgentWorkflow:
                 if src.startswith("local://fallback"):
                     return False, "inline_image_generation_failed"
         return True, ""
+
+    def _preflight_thumb_src_from_images(self, images: list[ImageAsset]) -> str:
+        if not images:
+            return ""
+        src = str(getattr(images[0], "source_url", "") or "").strip()
+        if not src:
+            return ""
+        if self.publisher._is_allowed_image_url(src, allow_data_uri=False):  # noqa: SLF001
+            return src
+        return ""
 
     def _run_manual_upload_probe_session(self, max_total_seconds: int = 90) -> dict[str, Any]:
         started = time.perf_counter()
