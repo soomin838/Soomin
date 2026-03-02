@@ -240,7 +240,7 @@ class QualitySettings:
     humanity_hard_fail_block: bool = True
     min_word_count: int = 900
     max_word_count: int = 1400
-    min_h2: int = 7
+    min_h2: int = 5
     min_h3: int = 0
     min_list_items: int = 3
     min_external_links: int = 1

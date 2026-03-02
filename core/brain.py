@@ -14,6 +14,15 @@ from urllib.parse import urlparse
 
 import requests
 
+from .news_facets import (
+    FACET_POOL,
+    ensure_what_to_do_now_section,
+    facet_emphasis_hint,
+    normalize_category,
+    normalize_facet,
+    reorder_optional_sections_for_facet,
+    resolve_facet_context,
+)
 from .scout import TopicCandidate
 from .settings import GeminiSettings
 
@@ -44,7 +53,6 @@ NEWS_SECTION_TITLES = {
 
 NEWS_OPTIONAL_SECTION_IDS = (
     "why_it_matters",
-    "what_to_do_now",
     "key_details",
     "what_to_watch_next",
     "background_context",
@@ -85,6 +93,7 @@ def _fallback_structure_plan() -> dict[str, object]:
     section_ids = list(NEWS_FALLBACK_SECTION_IDS)
     return {
         "seed": stable_hash("fallback_structure"),
+        "requested_section_count": 5,
         "intro_index": 0,
         "conclusion_index": 0,
         "section_ids": section_ids,
@@ -93,7 +102,8 @@ def _fallback_structure_plan() -> dict[str, object]:
 
 
 def build_structure(seed, event_data) -> dict[str, object]:
-    _ = event_data
+    event_payload = dict(event_data or {}) if isinstance(event_data, dict) else {}
+    selected_facet = normalize_facet(str(event_payload.get("facet", "") or ""))
     try:
         seed_value = int(seed)
     except Exception:
@@ -102,11 +112,14 @@ def build_structure(seed, event_data) -> dict[str, object]:
     rng = random.Random(seed_value)
     requested_count = rng.randint(3, 6)
     target_h2_count = max(5, requested_count)
-    optional_needed = max(0, target_h2_count - 3)
-    optional = list(NEWS_OPTIONAL_SECTION_IDS)
-    rng.shuffle(optional)
+    optional_needed = max(0, target_h2_count - 4)
+    optional = reorder_optional_sections_for_facet(
+        optional_sections=list(NEWS_OPTIONAL_SECTION_IDS),
+        facet=selected_facet,
+        seed=seed_value,
+    )
     picked_optional = optional[:optional_needed]
-    raw_ids = ["quick_take", "what_happened", *picked_optional, "sources"]
+    raw_ids = ["quick_take", "what_happened", *picked_optional, "what_to_do_now", "sources"]
 
     section_ids: list[str] = []
     seen: set[str] = set()
@@ -122,6 +135,7 @@ def build_structure(seed, event_data) -> dict[str, object]:
 
     return {
         "seed": seed_value,
+        "requested_section_count": requested_count,
         "intro_index": rng.randint(0, len(NEWS_INTRO_TEMPLATES) - 1),
         "conclusion_index": rng.randint(0, len(NEWS_CONCLUSION_TEMPLATES) - 1),
         "section_ids": section_ids,
@@ -142,12 +156,20 @@ def render_from_plan(structure_plan, event_data) -> dict[str, object]:
                 continue
             seen.add(key)
             section_ids.append(key)
+    if "what_to_do_now" not in section_ids:
+        if "sources" in section_ids:
+            insert_at = max(0, section_ids.index("sources"))
+            section_ids.insert(insert_at, "what_to_do_now")
+        else:
+            section_ids.append("what_to_do_now")
     if len(section_ids) < 5:
         fb = _fallback_structure_plan()
         section_ids = list(fb.get("section_ids", []))
         plan = fb
 
     section_count = len(section_ids)
+    requested_count = int(plan.get("requested_section_count", section_count) or section_count)
+    requested_count = max(3, min(6, requested_count))
     intro_index = int(plan.get("intro_index", 0) or 0)
     conclusion_index = int(plan.get("conclusion_index", 0) or 0)
     intro_index = max(0, min(intro_index, len(NEWS_INTRO_TEMPLATES) - 1))
@@ -169,6 +191,7 @@ def render_from_plan(structure_plan, event_data) -> dict[str, object]:
     section_titles = [NEWS_SECTION_TITLES.get(sid, sid.replace("_", " ").title()) for sid in section_ids]
     return {
         "seed": seed_value,
+        "requested_section_count": requested_count,
         "intro_index": intro_index,
         "conclusion_index": conclusion_index,
         "section_ids": section_ids,
@@ -196,6 +219,9 @@ class GeminiBrain:
         )
         self._news_module_log_path = (
             Path(__file__).resolve().parent.parent / "storage" / "logs" / "news_module_rotation.jsonl"
+        )
+        self._facet_rotation_state_path = (
+            Path(__file__).resolve().parent.parent / "storage" / "state" / "facet_rotation_state.json"
         )
 
     def choose_best(
@@ -537,6 +563,57 @@ class GeminiBrain:
             extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
         )
 
+    def _suggest_news_facets_with_llm(
+        self,
+        *,
+        title: str,
+        body: str,
+        category: str,
+        event_id: str,
+        run_start_minute: str,
+    ) -> list[str]:
+        api_key = str(getattr(self.settings, "api_key", "") or "").strip()
+        if (not api_key) or api_key == "GEMINI_API_KEY":
+            return []
+        prompt = (
+            "Select perspective facets for a US tech news explainer.\n"
+            f"Allowed facets only: {list(FACET_POOL)}\n"
+            "Return strict JSON only: {\"facets\": [\"...\"]}\n"
+            "Rules:\n"
+            "- Keep only allowed facet tokens.\n"
+            "- Order by editorial usefulness for this event.\n"
+            "- Return 4-6 items.\n"
+            f"Category: {normalize_category(category)}\n"
+            f"Event ID: {event_id}\n"
+            f"Run start minute: {run_start_minute}\n"
+            f"Title: {title}\n"
+            f"Body: {body[:1500]}\n"
+        )
+        try:
+            parsed = self._extract_json(
+                self._generate_text(
+                    prompt,
+                    system_instruction=(
+                        "You are an editor assistant. Return compact JSON only and never include prose outside JSON."
+                    ),
+                )
+            )
+        except Exception:
+            return []
+
+        raw = parsed.get("facets", [])
+        if not isinstance(raw, list):
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            key = normalize_facet(str(item or ""))
+            if (not key) or key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+        return out
+
     def generate_news_post(
         self,
         candidate: TopicCandidate,
@@ -545,6 +622,14 @@ class GeminiBrain:
         category: str,
         plan: dict | None = None,
     ) -> DraftPost:
+        source_link = str(getattr(candidate, "url", "") or "").strip()
+        safe_authorities = [
+            re.sub(r"\s+", " ", str(x or "").strip())
+            for x in (authority_links or [])
+            if str(x or "").strip()
+        ][:8]
+        facet_action_items: list[str] = []
+
         def _render_news_html(payload_obj: dict) -> str:
             body_html = str(payload_obj.get("content_html", payload_obj.get("html", "")) or "")
             body_html = self._remove_ai_markers(body_html, domain="tech_news_explainer")
@@ -555,11 +640,12 @@ class GeminiBrain:
                 flags=re.IGNORECASE | re.DOTALL,
             )
             body_html = self._enforce_html_minimum(body_html)
-            return self._normalize_news_sources_section(
+            out = self._normalize_news_sources_section(
                 html=body_html,
                 source_url=source_link,
                 authority_links=safe_authorities,
             )
+            return ensure_what_to_do_now_section(html=out, action_items=facet_action_items)
 
         module_pool = [
             "impact_by_user_type",
@@ -577,18 +663,12 @@ class GeminiBrain:
         ]
         selected_modules, _rotation_fallback, _recent_modules = self._select_news_modules(module_pool)
         plan_payload = dict(plan or {})
-        category_norm = re.sub(r"\s+", " ", str(category or "platform").strip().lower()) or "platform"
+        category_norm = normalize_category(category)
         primary_topic = re.sub(
             r"\s+",
             " ",
             str(plan_payload.get("primary_keyword", "") or candidate.title or "").strip(),
         )[:160]
-        source_link = str(getattr(candidate, "url", "") or "").strip()
-        safe_authorities = [
-            re.sub(r"\s+", " ", str(x or "").strip())
-            for x in (authority_links or [])
-            if str(x or "").strip()
-        ][:8]
         module_slots = {}
         for module_name in selected_modules:
             module_slots[module_name] = random.choice(
@@ -612,6 +692,33 @@ class GeminiBrain:
             or event_meta.get("run_start_minute", "")
             or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
         ).strip()
+        retry_index = (
+            plan_payload.get("retry_index", None)
+            if isinstance(plan_payload, dict)
+            else None
+        )
+        if retry_index is None:
+            retry_index = event_meta.get("retry_index", None)
+        llm_facet_candidates = self._suggest_news_facets_with_llm(
+            title=str(candidate.title or ""),
+            body=str(candidate.body or ""),
+            category=category_norm,
+            event_id=event_id,
+            run_start_minute=run_start_minute,
+        )
+        facet_context = resolve_facet_context(
+            event_id=event_id,
+            run_start_minute=run_start_minute,
+            title=str(candidate.title or ""),
+            body=str(candidate.body or ""),
+            category=category_norm,
+            source_url=source_link,
+            retry_index=retry_index,
+            llm_candidates=llm_facet_candidates,
+            state_path=self._facet_rotation_state_path,
+            stable_hash_fn=stable_hash,
+        )
+        facet_action_items = list(facet_context.action_items)
         structure_seed = stable_hash(f"{event_id}{run_start_minute}")
         structure_plan = build_structure(
             structure_seed,
@@ -619,6 +726,7 @@ class GeminiBrain:
                 "event_id": event_id,
                 "run_start_minute": run_start_minute,
                 "category": category_norm,
+                "facet": facet_context.selected_facet,
             },
         )
         rendered_structure = render_from_plan(
@@ -627,6 +735,7 @@ class GeminiBrain:
                 "event_id": event_id,
                 "run_start_minute": run_start_minute,
                 "category": category_norm,
+                "facet": facet_context.selected_facet,
             },
         )
         section_ids = [str(x or "").strip().lower() for x in (rendered_structure.get("section_ids", []) or [])]
@@ -638,6 +747,7 @@ class GeminiBrain:
                     "event_id": event_id,
                     "run_start_minute": run_start_minute,
                     "category": category_norm,
+                    "facet": facet_context.selected_facet,
                 },
             )
         section_titles = [
@@ -654,12 +764,18 @@ class GeminiBrain:
             f"{title}={paragraph_lengths[idx] if idx < len(paragraph_lengths) else 'medium'}"
             for idx, title in enumerate(section_titles)
         )
-        has_what_to_do = "what_to_do_now" in set(section_ids)
+        specific_actions = category_norm in {"security", "policy", "platform"}
         what_to_do_rule = (
-            "When the section 'What To Do Now' appears, include 3-7 bullet steps in that section.\n"
-            if has_what_to_do
-            else ""
+            "Include a 'What To Do Now' H2 section near the end, immediately before Sources.\n"
+            f"'What To Do Now' must contain exactly {facet_context.action_count} bullet steps.\n"
+            + (
+                "For security/policy/platform events, each step must be concrete and operationally specific.\n"
+                if specific_actions
+                else "Keep the action steps concise, practical, and verifiable.\n"
+            )
         )
+        perspective_hint = facet_emphasis_hint(facet_context.selected_facet)
+        plan_payload["retry_index"] = int(facet_context.retry_index_effective)
         prompt = (
             "Write a US tech news explainer article in valid HTML body fragment only.\n"
             "Language policy: US English only. Never output Korean.\n"
@@ -667,6 +783,9 @@ class GeminiBrain:
             "Tone: factual, concise, ad-safe, and attribution-first.\n"
             "No defamation. No unverified allegations.\n"
             "Use attribution phrasing for uncertain claims: reported, may, could, according to.\n"
+            "Apply perspective emphasis implicitly in section focus and sentence priority. "
+            "Never print internal planning labels.\n"
+            f"Perspective emphasis hint: {perspective_hint}\n"
             "Do not write like a template. Vary transitions and avoid repeated phrases like 'In conclusion'.\n"
             "Avoid uniform paragraph lengths; mix 1-line punches with longer analysis.\n"
             "Do not write as a troubleshooting fix guide.\n"
