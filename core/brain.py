@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import hashlib
 import random
 import re
 import time
@@ -26,6 +27,157 @@ class DraftPost:
     score: int
     source_url: str
     extracted_urls: list[str]
+
+
+NEWS_SECTION_TITLES = {
+    "quick_take": "Quick Take",
+    "what_happened": "What Happened",
+    "why_it_matters": "Why It Matters (for normal users)",
+    "what_to_do_now": "What To Do Now",
+    "key_details": "Key Details",
+    "what_to_watch_next": "What To Watch Next",
+    "background_context": "Background Context",
+    "risks": "Risks",
+    "timeline": "Timeline",
+    "sources": "Sources",
+}
+
+NEWS_OPTIONAL_SECTION_IDS = (
+    "why_it_matters",
+    "what_to_do_now",
+    "key_details",
+    "what_to_watch_next",
+    "background_context",
+    "risks",
+    "timeline",
+)
+
+NEWS_FALLBACK_SECTION_IDS = (
+    "quick_take",
+    "what_happened",
+    "why_it_matters",
+    "what_to_do_now",
+    "sources",
+)
+
+NEWS_INTRO_TEMPLATES = (
+    "Data-led opening: lead with one concrete figure, then explain what changed.",
+    "Quote-led opening: start with a short attributed quote, then provide direct context.",
+    "Question-led opening: ask one sharp question and answer it immediately.",
+    "Context-led opening: describe the current market or platform backdrop before the event details.",
+    "Impact-led opening: open with immediate user/business impact before chronology.",
+)
+
+NEWS_CONCLUSION_TEMPLATES = (
+    "Forward-looking close: summarize what to watch in the next 1-2 weeks.",
+    "Decision-oriented close: restate practical implications for readers right now.",
+    "Risk-aware close: highlight the main uncertainty and the safest next check.",
+    "Timeline close: end with the most likely near-term sequence of updates.",
+)
+
+
+def stable_hash(value: str) -> int:
+    digest = hashlib.sha256(str(value or "").encode("utf-8", errors="ignore")).hexdigest()
+    return int(digest, 16)
+
+
+def _fallback_structure_plan() -> dict[str, object]:
+    section_ids = list(NEWS_FALLBACK_SECTION_IDS)
+    return {
+        "seed": stable_hash("fallback_structure"),
+        "intro_index": 0,
+        "conclusion_index": 0,
+        "section_ids": section_ids,
+        "section_count": len(section_ids),
+    }
+
+
+def build_structure(seed, event_data) -> dict[str, object]:
+    _ = event_data
+    try:
+        seed_value = int(seed)
+    except Exception:
+        return _fallback_structure_plan()
+
+    rng = random.Random(seed_value)
+    requested_count = rng.randint(3, 6)
+    target_h2_count = max(5, requested_count)
+    optional_needed = max(0, target_h2_count - 3)
+    optional = list(NEWS_OPTIONAL_SECTION_IDS)
+    rng.shuffle(optional)
+    picked_optional = optional[:optional_needed]
+    raw_ids = ["quick_take", "what_happened", *picked_optional, "sources"]
+
+    section_ids: list[str] = []
+    seen: set[str] = set()
+    for sid in raw_ids:
+        key = str(sid or "").strip().lower()
+        if (not key) or key in seen or key not in NEWS_SECTION_TITLES:
+            continue
+        seen.add(key)
+        section_ids.append(key)
+
+    if len(section_ids) < 5:
+        return _fallback_structure_plan()
+
+    return {
+        "seed": seed_value,
+        "intro_index": rng.randint(0, len(NEWS_INTRO_TEMPLATES) - 1),
+        "conclusion_index": rng.randint(0, len(NEWS_CONCLUSION_TEMPLATES) - 1),
+        "section_ids": section_ids,
+        "section_count": len(section_ids),
+    }
+
+
+def render_from_plan(structure_plan, event_data) -> dict[str, object]:
+    _ = event_data
+    plan = dict(structure_plan or {}) if isinstance(structure_plan, dict) else _fallback_structure_plan()
+    raw_ids = plan.get("section_ids", [])
+    section_ids: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw_ids, list):
+        for sid in raw_ids:
+            key = str(sid or "").strip().lower()
+            if (not key) or key in seen or key not in NEWS_SECTION_TITLES:
+                continue
+            seen.add(key)
+            section_ids.append(key)
+    if len(section_ids) < 5:
+        fb = _fallback_structure_plan()
+        section_ids = list(fb.get("section_ids", []))
+        plan = fb
+
+    section_count = len(section_ids)
+    intro_index = int(plan.get("intro_index", 0) or 0)
+    conclusion_index = int(plan.get("conclusion_index", 0) or 0)
+    intro_index = max(0, min(intro_index, len(NEWS_INTRO_TEMPLATES) - 1))
+    conclusion_index = max(0, min(conclusion_index, len(NEWS_CONCLUSION_TEMPLATES) - 1))
+
+    try:
+        seed_value = int(plan.get("seed", 0) or 0)
+    except Exception:
+        seed_value = stable_hash("|".join(section_ids))
+    rng = random.Random(seed_value)
+    length_labels = ["short", "medium", "long"]
+    paragraph_lengths: list[str] = []
+    for sid in section_ids:
+        if sid == "sources":
+            paragraph_lengths.append("short")
+            continue
+        paragraph_lengths.append(rng.choice(length_labels))
+
+    section_titles = [NEWS_SECTION_TITLES.get(sid, sid.replace("_", " ").title()) for sid in section_ids]
+    return {
+        "seed": seed_value,
+        "intro_index": intro_index,
+        "conclusion_index": conclusion_index,
+        "section_ids": section_ids,
+        "section_titles": section_titles,
+        "section_count": section_count,
+        "intro_template": NEWS_INTRO_TEMPLATES[intro_index],
+        "conclusion_template": NEWS_CONCLUSION_TEMPLATES[conclusion_index],
+        "paragraph_lengths": paragraph_lengths,
+    }
 
 
 class GeminiBrain:
@@ -446,6 +598,68 @@ class GeminiBrain:
                     "What To Watch Next",
                 ]
             )
+        event_meta = dict(getattr(candidate, "meta", {}) or {})
+        event_id = str(
+            plan_payload.get("event_id", "")
+            or event_meta.get("event_id", "")
+            or event_meta.get("news_event_id", "")
+            or event_meta.get("news_pool_id", "")
+            or source_link
+            or candidate.title
+        ).strip()
+        run_start_minute = str(
+            plan_payload.get("run_start_minute", "")
+            or event_meta.get("run_start_minute", "")
+            or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        ).strip()
+        structure_seed = stable_hash(f"{event_id}{run_start_minute}")
+        structure_plan = build_structure(
+            structure_seed,
+            {
+                "event_id": event_id,
+                "run_start_minute": run_start_minute,
+                "category": category_norm,
+            },
+        )
+        rendered_structure = render_from_plan(
+            structure_plan,
+            {
+                "event_id": event_id,
+                "run_start_minute": run_start_minute,
+                "category": category_norm,
+            },
+        )
+        section_ids = [str(x or "").strip().lower() for x in (rendered_structure.get("section_ids", []) or [])]
+        if len(section_ids) < 5:
+            section_ids = list(NEWS_FALLBACK_SECTION_IDS)
+            rendered_structure = render_from_plan(
+                _fallback_structure_plan(),
+                {
+                    "event_id": event_id,
+                    "run_start_minute": run_start_minute,
+                    "category": category_norm,
+                },
+            )
+        section_titles = [
+            str(x or "").strip()
+            for x in (rendered_structure.get("section_titles", []) or [])
+            if str(x or "").strip()
+        ]
+        if not section_titles:
+            section_titles = [NEWS_SECTION_TITLES[x] for x in NEWS_FALLBACK_SECTION_IDS]
+        section_count = max(5, int(rendered_structure.get("section_count", len(section_titles)) or len(section_titles)))
+        section_order_text = "\n".join(section_titles)
+        paragraph_lengths = [str(x or "").strip() for x in (rendered_structure.get("paragraph_lengths", []) or [])]
+        paragraph_plan = "; ".join(
+            f"{title}={paragraph_lengths[idx] if idx < len(paragraph_lengths) else 'medium'}"
+            for idx, title in enumerate(section_titles)
+        )
+        has_what_to_do = "what_to_do_now" in set(section_ids)
+        what_to_do_rule = (
+            "When the section 'What To Do Now' appears, include 3-7 bullet steps in that section.\n"
+            if has_what_to_do
+            else ""
+        )
         prompt = (
             "Write a US tech news explainer article in valid HTML body fragment only.\n"
             "Language policy: US English only. Never output Korean.\n"
@@ -457,20 +671,20 @@ class GeminiBrain:
             "Avoid uniform paragraph lengths; mix 1-line punches with longer analysis.\n"
             "Do not write as a troubleshooting fix guide.\n"
             "Do NOT include FAQ section.\n"
-            "Required exact H2 section order:\n"
-            "Quick Take\n"
-            "What Happened\n"
-            "Why It Matters (for normal users)\n"
-            "What To Do Now\n"
-            "Key Details\n"
-            "What To Watch Next\n"
-            "Sources\n"
+            "Required core H2 sections (must appear exactly once): Quick Take, What Happened, Sources.\n"
+            f"Use exactly {section_count} H2 sections for this run (minimum H2 count: 5).\n"
+            "Do not enforce a rigid template beyond this run plan.\n"
+            "H2 section order for this run (follow exactly):\n"
+            f"{section_order_text}\n"
+            f"Intro pattern for Quick Take: {rendered_structure.get('intro_template', '')}\n"
+            f"Conclusion pattern (place as the final paragraph before Sources): {rendered_structure.get('conclusion_template', '')}\n"
+            f"Paragraph-length rhythm by section: {paragraph_plan}\n"
             "Under Quick Take, include:\n"
             "- LEDE: 2-3 short sentences\n"
             "- NUT GRAF: exactly 1 paragraph explaining why now and why it matters\n"
             "- Key Facts box as <ul> with exactly 5 short bullets covering Who/What/When/Scope/Risk.\n"
             "  If unknown, write 'Not confirmed'.\n"
-            "What To Do Now must include 3-7 bullet steps.\n"
+            f"{what_to_do_rule}"
             "The article must include at least 2 question sentences and one explicit comparison/example block.\n"
             "Target depth: roughly 900-1400 words for editorial completeness.\n"
             f"Use 6-8 diversity modules from this pool: {selected_modules}\n"
