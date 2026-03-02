@@ -235,6 +235,31 @@ class LedgerSettings:
 
 
 @dataclass
+class WorkflowSettings:
+    retry_enabled: bool = True
+    retry_max_attempts_per_event: int = 4
+    retry_debounce_seconds: list[int] = field(default_factory=lambda: [0, 30, 120, 600])
+    retry_reset_on_success: bool = True
+
+
+@dataclass
+class WatchdogSettings:
+    enabled: bool = True
+    max_same_hard_failure_streak: int = 3
+    max_event_wallclock_minutes: int = 20
+    max_event_total_attempts: int = 6
+    max_global_holds_per_hour: int = 12
+    max_provider_530_streak: int = 6
+    max_provider_429_streak: int = 4
+    backoff_on_provider_failure_minutes: dict[str, list[int]] = field(
+        default_factory=lambda: {
+            "http_530": [30, 60, 120],
+            "http_429": [5, 15, 30],
+        }
+    )
+
+
+@dataclass
 class QualitySettings:
     enabled: bool = True
     strict_mode: bool = True
@@ -551,6 +576,8 @@ class SyncSettings:
 @dataclass
 class AppSettings:
     timezone: str = "America/New_York"
+    workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
+    watchdog: WatchdogSettings = field(default_factory=WatchdogSettings)
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
     monthly_scheduler: MonthlySchedulerSettings = field(default_factory=MonthlySchedulerSettings)
     sources: SourceSettings = field(default_factory=SourceSettings)
@@ -616,6 +643,8 @@ def load_settings(path: Path) -> AppSettings:
     keyword_sources_raw = dict((keywords_raw.get("sources", {}) or {}))
     sync_raw = dict(raw.get("sync", {}) or {})
     ledger_raw = dict(raw.get("ledger", {}) or {})
+    workflow_raw = dict(raw.get("workflow", {}) or {})
+    watchdog_raw = dict(raw.get("watchdog", {}) or {})
 
     if isinstance(qa_raw, dict):
         if "qa_mode" in qa_raw:
@@ -814,6 +843,8 @@ def load_settings(path: Path) -> AppSettings:
 
     return AppSettings(
         timezone=raw.get("timezone", "America/New_York"),
+        workflow=_construct_dc(WorkflowSettings, workflow_raw),
+        watchdog=_construct_dc(WatchdogSettings, watchdog_raw),
         schedule=_construct_dc(ScheduleSettings, raw.get("schedule", {})),
         monthly_scheduler=_construct_dc(MonthlySchedulerSettings, monthly_scheduler_raw),
         sources=_construct_dc(SourceSettings, raw.get("sources", {})),

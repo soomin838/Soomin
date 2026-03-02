@@ -1,4 +1,30 @@
 timezone: America/New_York
+workflow:
+  retry_enabled: true
+  retry_max_attempts_per_event: 4
+  retry_debounce_seconds:
+  - 0
+  - 30
+  - 120
+  - 600
+  retry_reset_on_success: true
+watchdog:
+  enabled: true
+  max_same_hard_failure_streak: 3
+  max_event_wallclock_minutes: 20
+  max_event_total_attempts: 6
+  max_global_holds_per_hour: 12
+  max_provider_530_streak: 6
+  max_provider_429_streak: 4
+  backoff_on_provider_failure_minutes:
+    http_530:
+    - 30
+    - 60
+    - 120
+    http_429:
+    - 5
+    - 15
+    - 30
 schedule:
   interval_hours: 2.4
   min_interval_hours: 1.0
