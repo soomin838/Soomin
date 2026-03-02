@@ -65,6 +65,7 @@ class VisualPipeline:
         self._last_image_request_at: datetime | None = None
         self._current_run_hashes: set[str] = set()
         self._current_run_embeddings: list[np.ndarray] = []
+        self._last_reason_codes: list[str] = []
         self._mediapipe_available = bool(mp is not None)
         self._duplicate_phash_hamming_threshold = 20
         self._duplicate_embedding_cosine_threshold = 0.993
@@ -74,6 +75,7 @@ class VisualPipeline:
     def build(self, draft: DraftPost, prompt_plan: dict[str, Any] | None = None) -> list[ImageAsset]:
         self._current_run_hashes = set()
         self._current_run_embeddings = []
+        self._last_reason_codes = []
         provider = str(getattr(self.visual_settings, "image_provider", "library") or "library").strip().lower()
         target = max(1, int(self.visual_settings.target_images_per_post))
         body_slots = max(0, target - 1)
@@ -116,9 +118,20 @@ class VisualPipeline:
                 "generated_count": len(result),
                 "paths": [str(getattr(x, "path", "")) for x in result[:3]],
                 "reasons_if_missing": reasons,
+                "reason_codes": list(self._last_reason_codes),
             }
         )
         return result
+
+    def _record_reason_code(self, reason_code: str) -> None:
+        code = str(reason_code or "").strip().lower()
+        if not code:
+            return
+        if code not in self._last_reason_codes:
+            self._last_reason_codes.append(code)
+
+    def get_last_reason_codes(self) -> list[str]:
+        return list(self._last_reason_codes)
 
     def force_screenshots(self, urls: list[str], title: str) -> list[ImageAsset]:
         # Spec policy: screenshot collection disabled.
@@ -1698,65 +1711,122 @@ class VisualPipeline:
     ) -> ImageAsset | None:
         cfg = self._runtime_r2_config()
         if cfg is None:
+            reason_code = "missing_r2_config"
+            self._record_reason_code(reason_code)
             self._log_visual_event(
                 {
                     "event": "local_r2_asset_skipped",
-                    "reason": "missing_r2_config",
+                    "reason": reason_code,
+                    "reason_code": reason_code,
                     "role": str(role or "content"),
                 }
             )
             return None
 
         role_key = "thumbnail" if str(role or "").strip().lower() == "thumbnail" else "content"
-        tmp_path = (self.temp_dir / f"generated_{role_key}_{int(index):02d}.png").resolve()
-        try:
-            self._create_runtime_fallback_image(tmp_path, role="thumbnail" if role_key == "thumbnail" else "inline")
+        last_reason_code = "r2_upload_exception"
+        for attempt in range(1, 3):
+            tmp_path = (self.temp_dir / f"generated_{role_key}_{int(index):02d}_a{attempt}.png").resolve()
             try:
-                self._optimize_image_for_seo(tmp_path, role=role_key)
-            except Exception:
-                pass
-            data = tmp_path.read_bytes()
-            r2_url = r2_upload_bytes(
-                root=self.temp_dir.parent.parent,
-                cfg=cfg,
-                content=data,
-                filename_hint=f"{role_key}_{index:02d}",
-                category="thumb" if role_key == "thumbnail" else "content",
-                content_type="image/png",
-            )
-            if not self._is_valid_r2_public_url(r2_url):
+                self._create_runtime_fallback_image(tmp_path, role="thumbnail" if role_key == "thumbnail" else "inline")
+                try:
+                    self._optimize_image_for_seo(tmp_path, role=role_key)
+                except Exception:
+                    pass
+                data = tmp_path.read_bytes()
+                try:
+                    r2_url = r2_upload_bytes(
+                        root=self.temp_dir.parent.parent,
+                        cfg=cfg,
+                        content=data,
+                        filename_hint=f"{role_key}_{index:02d}_a{attempt}",
+                        category="thumb" if role_key == "thumbnail" else "content",
+                        content_type="image/png",
+                    )
+                except Exception as exc:
+                    last_reason_code = "r2_upload_exception"
+                    self._record_reason_code(last_reason_code)
+                    self._log_visual_event(
+                        {
+                            "event": "local_r2_asset_retry",
+                            "reason": str(exc)[:220],
+                            "reason_code": last_reason_code,
+                            "role": role_key,
+                            "index": int(index),
+                            "attempt": int(attempt),
+                        }
+                    )
+                    continue
+
+                if not str(r2_url or "").strip():
+                    last_reason_code = "r2_upload_empty_url"
+                    self._record_reason_code(last_reason_code)
+                    self._log_visual_event(
+                        {
+                            "event": "local_r2_asset_retry",
+                            "reason": "empty_url",
+                            "reason_code": last_reason_code,
+                            "role": role_key,
+                            "index": int(index),
+                            "attempt": int(attempt),
+                        }
+                    )
+                    continue
+                if not self._is_valid_r2_public_url(r2_url):
+                    last_reason_code = "r2_public_url_invalid"
+                    self._record_reason_code(last_reason_code)
+                    self._log_visual_event(
+                        {
+                            "event": "local_r2_asset_retry",
+                            "reason": "public_host_mismatch",
+                            "reason_code": last_reason_code,
+                            "role": role_key,
+                            "index": int(index),
+                            "attempt": int(attempt),
+                            "url": str(r2_url)[:220],
+                        }
+                    )
+                    continue
+
+                return ImageAsset(
+                    path=self._virtual_asset_path(role_key, index),
+                    alt=self._build_alt_text(keyword, "generated image"),
+                    anchor_text=str(paragraph or ""),
+                    source_kind="generated_r2",
+                    source_url=str(r2_url),
+                    license_note="Generated locally and hosted on Cloudflare R2.",
+                )
+            except Exception as exc:
+                last_reason_code = "r2_upload_exception"
+                self._record_reason_code(last_reason_code)
                 self._log_visual_event(
                     {
-                        "event": "local_r2_asset_skipped",
-                        "reason": "r2_public_url_invalid",
+                        "event": "local_r2_asset_retry",
+                        "reason": str(exc)[:220],
+                        "reason_code": last_reason_code,
                         "role": role_key,
-                        "url": str(r2_url)[:220],
+                        "index": int(index),
+                        "attempt": int(attempt),
                     }
                 )
-                return None
-            return ImageAsset(
-                path=self._virtual_asset_path(role_key, index),
-                alt=self._build_alt_text(keyword, "generated image"),
-                anchor_text=str(paragraph or ""),
-                source_kind="generated",
-                source_url=str(r2_url),
-                license_note="Generated locally and hosted on Cloudflare R2.",
-            )
-        except Exception as exc:
-            self._log_visual_event(
-                {
-                    "event": "local_r2_asset_failed",
-                    "reason": str(exc)[:220],
-                    "role": role_key,
-                    "index": int(index),
-                }
-            )
-            return None
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+                continue
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        self._record_reason_code(last_reason_code)
+        self._log_visual_event(
+            {
+                "event": "local_r2_asset_failed",
+                "reason": last_reason_code,
+                "reason_code": last_reason_code,
+                "role": role_key,
+                "index": int(index),
+            }
+        )
+        return None
 
     def _extract_image_payload(self, data: dict, method: str) -> tuple[bytes | None, str]:
         if method == "predict":

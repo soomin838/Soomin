@@ -3314,7 +3314,7 @@ class AgentWorkflow:
             if (not thumb_row) or len(inline_rows) < required_inline:
                 available_count = (1 if thumb_row else 0) + len(inline_rows)
                 if available_count < min_images_required:
-                    hold_reason = f"image_understock_min_required({available_count}/{min_images_required})"
+                    hold_reason = f"missing_images_required({available_count}/{min_images_required})"
                     self.logs.append_run(
                         RunRecord(
                             status="hold",
@@ -3359,7 +3359,7 @@ class AgentWorkflow:
                     continue
                 images.append(asset)
             if len(images) < min_images_required:
-                hold_reason = f"image_understock_min_required({len(images)}/{min_images_required})"
+                hold_reason = f"missing_images_required({len(images)}/{min_images_required})"
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -5129,7 +5129,7 @@ class AgentWorkflow:
                 global_keywords=global_keywords,
                 max_labels=6,
             )
-            policy_reason = f"image_library_shortage_min_required({len(images)}/{min_images_required})"
+            policy_reason = f"missing_images_required({len(images)}/{min_images_required})"
             working_draft_id, hold_note = self._sync_stage_draft_checkpoint(
                 current_draft_post_id=working_draft_id,
                 stage="hold",
@@ -5207,6 +5207,9 @@ class AgentWorkflow:
         draft.title = self._double_unescape(str(draft.title or "")).strip()
         gate_preview_html = ""
         preflight_thumb_src = self._preflight_thumb_src_from_images(images)
+        first_thumb_source = str(getattr(images[0], "source_url", "") or "").strip() if images else ""
+        thumbnail_src_invalid_host = bool(first_thumb_source and (not preflight_thumb_src))
+        thumbnail_recovery_attempted = False
         generation_degraded_note = self._annotate_image_pipeline_diagnostics(
             note=generation_degraded_note,
             stage="main_pre_merge",
@@ -5223,6 +5226,7 @@ class AgentWorkflow:
             try:
                 if images:
                     if not preflight_thumb_src:
+                        thumbnail_recovery_attempted = True
                         images, preflight_thumb_src = self._profile_call(
                             "thumbnail_preflight_with_recovery",
                             lambda: self._preflight_thumbnail_with_recovery(
@@ -5359,53 +5363,64 @@ class AgentWorkflow:
         published = None
         last_publish_err = ""
         if images and (not preflight_thumb_src):
-            try:
-                images, preflight_thumb_src = self._profile_call(
-                    "thumbnail_preflight_with_recovery",
-                    lambda: self._preflight_thumbnail_with_recovery(
-                        draft=draft,
-                        candidate=selected,
-                        images=images,
-                        prompt_plan=image_prompt_plan,
-                        max_attempts=3,
-                        manual_trigger=manual_trigger,
-                    ),
-                    slow_ms=8000,
+            if thumbnail_src_invalid_host and thumbnail_recovery_attempted:
+                generation_degraded_note = self._append_note(generation_degraded_note, "thumbnail_src_invalid_host")
+                self._append_workflow_perf(
+                    "thumbnail_preflight_skipped",
+                    {
+                        "reason": "already_attempted_for_invalid_host",
+                        "first_source_url": first_thumb_source[:220],
+                    },
                 )
-            except Exception as exc:
-                last_publish_err = str(exc)
-                draft_checkpoint_note = ""
+            else:
                 try:
-                    checkpoint = self.publisher.save_draft_checkpoint(
-                        title=draft.title,
-                        html_body=final_html,
-                        labels=labels,
-                        stage="hold",
-                        reason=last_publish_err,
-                        draft_post_id=(working_draft_id or None),
+                    thumbnail_recovery_attempted = True
+                    images, preflight_thumb_src = self._profile_call(
+                        "thumbnail_preflight_with_recovery",
+                        lambda: self._preflight_thumbnail_with_recovery(
+                            draft=draft,
+                            candidate=selected,
+                            images=images,
+                            prompt_plan=image_prompt_plan,
+                            max_attempts=3,
+                            manual_trigger=manual_trigger,
+                        ),
+                        slow_ms=8000,
                     )
-                    if str(getattr(checkpoint, "post_id", "")).strip():
-                        draft_checkpoint_note = f";draft_checkpoint={checkpoint.post_id}"
-                except Exception as cp_exc:
-                    draft_checkpoint_note = f";draft_checkpoint_failed={str(cp_exc)[:120]}"
-                self.logs.append_run(
-                    RunRecord(
-                        status="hold",
-                        score=0,
-                        title=draft.title,
-                        source_url=draft.source_url,
-                        published_url="",
-                        note=f"requeued_to_tail: {last_publish_err}{draft_checkpoint_note}",
+                except Exception as exc:
+                    last_publish_err = str(exc)
+                    draft_checkpoint_note = ""
+                    try:
+                        checkpoint = self.publisher.save_draft_checkpoint(
+                            title=draft.title,
+                            html_body=final_html,
+                            labels=labels,
+                            stage="hold",
+                            reason=last_publish_err,
+                            draft_post_id=(working_draft_id or None),
+                        )
+                        if str(getattr(checkpoint, "post_id", "")).strip():
+                            draft_checkpoint_note = f";draft_checkpoint={checkpoint.post_id}"
+                    except Exception as cp_exc:
+                        draft_checkpoint_note = f";draft_checkpoint_failed={str(cp_exc)[:120]}"
+                    self.logs.append_run(
+                        RunRecord(
+                            status="hold",
+                            score=0,
+                            title=draft.title,
+                            source_url=draft.source_url,
+                            published_url="",
+                            note=f"requeued_to_tail: {last_publish_err}{draft_checkpoint_note}",
+                        )
                     )
-                )
-                checkpoint_msg = ""
-                if "draft_checkpoint=" in draft_checkpoint_note:
-                    checkpoint_msg = f" | {draft_checkpoint_note.lstrip(';')}"
-                grade = self._classify_error_grade(last_publish_err)
-                hold_msg = f"requeued_to_tail[{grade}]: {last_publish_err}{checkpoint_msg}"
-                self._mark_active_slot("hold", hold_msg)
-                self._workflow_perf_finish_run("hold", hold_msg)
-                return WorkflowResult("hold", hold_msg)
+                    checkpoint_msg = ""
+                    if "draft_checkpoint=" in draft_checkpoint_note:
+                        checkpoint_msg = f" | {draft_checkpoint_note.lstrip(';')}"
+                    grade = self._classify_error_grade(last_publish_err)
+                    hold_msg = f"requeued_to_tail[{grade}]: {last_publish_err}{checkpoint_msg}"
+                    self._mark_active_slot("hold", hold_msg)
+                    self._workflow_perf_finish_run("hold", hold_msg)
+                    return WorkflowResult("hold", hold_msg)
         if bool(getattr(self.settings.publish, "thumbnail_preflight_only", False)):
             self.logs.append_run(
                 RunRecord(
@@ -6569,9 +6584,9 @@ class AgentWorkflow:
                 title=title,
                 html_body=draft.html,
                 labels=hold_labels,
-                reason=f"image_library_shortage_min_required({len(images)}/{min_images_required})",
+                reason=f"missing_images_required({len(images)}/{min_images_required})",
             )
-            hold_msg = f"image_library_shortage_min_required({len(images)}/{min_images_required})"
+            hold_msg = f"missing_images_required({len(images)}/{min_images_required})"
             if hold_note:
                 hold_msg += f" | {hold_note}"
             if updated_draft_id:
@@ -6631,7 +6646,17 @@ class AgentWorkflow:
                     hold_msg += f" | draft_checkpoint={updated_draft_id}"
                 return WorkflowResult("hold", hold_msg)
         gate_preview_html = ""
-        preflight_thumb_src = ""
+        preflight_thumb_src = self._preflight_thumb_src_from_images(images)
+        resume_first_thumb_source = str(getattr(images[0], "source_url", "") or "").strip() if images else ""
+        resume_thumb_invalid_host = bool(resume_first_thumb_source and (not preflight_thumb_src))
+        resume_thumbnail_recovery_attempted = False
+        _ = self._annotate_image_pipeline_diagnostics(
+            note="",
+            stage="resume_pre_merge",
+            images=images,
+            preflight_thumb_src=preflight_thumb_src,
+            required_images=min_images_required,
+        )
         if bool(self.settings.budget.dry_run):
             try:
                 gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
@@ -6639,9 +6664,9 @@ class AgentWorkflow:
                 raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         else:
             try:
-                preflight_thumb_src = self._preflight_thumb_src_from_images(images)
                 if images:
                     if not preflight_thumb_src:
+                        resume_thumbnail_recovery_attempted = True
                         images, preflight_thumb_src = self._profile_call(
                             "resume_thumbnail_preflight_with_recovery",
                             lambda: self._preflight_thumbnail_with_recovery(
@@ -6723,45 +6748,56 @@ class AgentWorkflow:
             html=final_html,
         )
         if images and (not preflight_thumb_src):
-            try:
-                images, preflight_thumb_src = self._profile_call(
-                    "resume_thumbnail_preflight_with_recovery",
-                    lambda: self._preflight_thumbnail_with_recovery(
-                        draft=draft,
-                        candidate=candidate,
-                        images=images,
-                        prompt_plan=image_prompt_plan,
-                        max_attempts=3,
-                        manual_trigger=manual_trigger,
-                    ),
-                    slow_ms=8000,
+            if resume_thumb_invalid_host and resume_thumbnail_recovery_attempted:
+                self._append_workflow_perf(
+                    "thumbnail_preflight_skipped",
+                    {
+                        "stage": "resume_publish",
+                        "reason": "already_attempted_for_invalid_host",
+                        "first_source_url": resume_first_thumb_source[:220],
+                    },
                 )
-            except Exception as exc:
-                hold_labels = self._normalize_resume_labels(row.get("labels", []))
-                if not hold_labels:
-                    hold_labels = self._build_public_labels(
-                        title=title,
-                        candidate=candidate,
-                        global_keywords=self.last_global_keywords,
-                        max_labels=6,
+            else:
+                try:
+                    resume_thumbnail_recovery_attempted = True
+                    images, preflight_thumb_src = self._profile_call(
+                        "resume_thumbnail_preflight_with_recovery",
+                        lambda: self._preflight_thumbnail_with_recovery(
+                            draft=draft,
+                            candidate=candidate,
+                            images=images,
+                            prompt_plan=image_prompt_plan,
+                            max_attempts=3,
+                            manual_trigger=manual_trigger,
+                        ),
+                        slow_ms=8000,
                     )
-                post_id = str(row.get("post_id", "") or "").strip()
-                updated_draft_id, hold_note = self._sync_stage_draft_checkpoint(
-                    current_draft_post_id=post_id,
-                    stage="hold",
-                    title=title,
-                    html_body=final_html,
-                    labels=hold_labels,
-                    reason=str(exc),
-                )
-                grade = self._classify_error_grade(str(exc))
-                hold_msg = f"thumbnail_preflight_failed[{grade}]: {str(exc)}"
-                if hold_note:
-                    hold_msg += f" | {hold_note}"
-                if updated_draft_id:
-                    hold_msg += f" | draft_checkpoint={updated_draft_id}"
-                self._mark_active_slot("hold", hold_msg)
-                return WorkflowResult("hold", hold_msg)
+                except Exception as exc:
+                    hold_labels = self._normalize_resume_labels(row.get("labels", []))
+                    if not hold_labels:
+                        hold_labels = self._build_public_labels(
+                            title=title,
+                            candidate=candidate,
+                            global_keywords=self.last_global_keywords,
+                            max_labels=6,
+                        )
+                    post_id = str(row.get("post_id", "") or "").strip()
+                    updated_draft_id, hold_note = self._sync_stage_draft_checkpoint(
+                        current_draft_post_id=post_id,
+                        stage="hold",
+                        title=title,
+                        html_body=final_html,
+                        labels=hold_labels,
+                        reason=str(exc),
+                    )
+                    grade = self._classify_error_grade(str(exc))
+                    hold_msg = f"thumbnail_preflight_failed[{grade}]: {str(exc)}"
+                    if hold_note:
+                        hold_msg += f" | {hold_note}"
+                    if updated_draft_id:
+                        hold_msg += f" | draft_checkpoint={updated_draft_id}"
+                    self._mark_active_slot("hold", hold_msg)
+                    return WorkflowResult("hold", hold_msg)
         if bool(getattr(self.settings.publish, "thumbnail_preflight_only", False)):
             self.logs.append_run(
                 RunRecord(
@@ -7911,31 +7947,75 @@ class AgentWorkflow:
         required_images: int,
     ) -> str:
         tokens: list[str] = []
+        r2_endpoint = ""
+        r2_bucket = ""
+        r2_access = ""
+        r2_secret = ""
+        r2_base = ""
+        r2_host = ""
+        try:
+            raw_r2 = getattr(self.settings.publish, "r2", None)
+            r2_endpoint = str(getattr(raw_r2, "endpoint_url", "") or "").strip()
+            r2_bucket = str(getattr(raw_r2, "bucket", "") or "").strip()
+            r2_access = str(getattr(raw_r2, "access_key_id", "") or "").strip()
+            r2_secret = str(getattr(raw_r2, "secret_access_key", "") or "").strip()
+            r2_base = str(getattr(raw_r2, "public_base_url", "") or "").strip()
+            r2_host = (urlparse(r2_base).netloc or "").lower()
+        except Exception:
+            pass
+
+        r2_config_missing = not bool(r2_endpoint and r2_bucket and r2_access and r2_secret and r2_base)
+        if r2_config_missing:
+            tokens.append("r2_config_missing")
+
+        source_urls = [str(getattr(img, "source_url", "") or "").strip() for img in (images or [])]
+        first_source = source_urls[0] if source_urls else ""
+        first_source_allowed = False
+        if first_source:
+            try:
+                first_source_allowed = bool(self.publisher._is_allowed_image_url(first_source, allow_data_uri=False))  # noqa: SLF001
+            except Exception:
+                first_source_allowed = False
+
         if not images:
             tokens.append("image_pipeline_empty")
+            if not r2_config_missing:
+                tokens.append("r2_upload_failed")
+        if any((not src) for src in source_urls):
+            tokens.append("image_source_url_missing")
         if images and (not preflight_thumb_src):
             tokens.append("thumbnail_src_missing")
-        if not tokens:
+            if first_source and (not first_source_allowed):
+                tokens.append("thumbnail_src_invalid_host")
+                tokens.append("r2_public_url_invalid")
+
+        dedup_tokens: list[str] = []
+        seen_tokens: set[str] = set()
+        for tok in tokens:
+            clean_tok = str(tok or "").strip()
+            if not clean_tok or clean_tok in seen_tokens:
+                continue
+            seen_tokens.add(clean_tok)
+            dedup_tokens.append(clean_tok)
+        if not dedup_tokens:
             return note
-        try:
-            raw_base = str(getattr(getattr(self.settings.publish, "r2", None), "public_base_url", "") or "").strip()
-            r2_host = (urlparse(raw_base).netloc or "").lower()
-        except Exception:
-            r2_host = ""
         self._append_workflow_perf(
             "image_pipeline_diagnostic",
             {
                 "stage": str(stage or "").strip() or "unknown",
-                "tokens": list(tokens),
+                "tokens": list(dedup_tokens),
                 "image_hosting_backend": str(getattr(self.settings.publish, "image_hosting_backend", "") or ""),
                 "required_images": int(max(0, required_images)),
                 "selected_images_count": int(len(images or [])),
                 "preflight_thumb_src_present": bool(preflight_thumb_src),
+                "first_source_url_present": bool(first_source),
+                "first_source_url_allowed": bool(first_source_allowed),
                 "r2_public_host": r2_host,
+                "r2_config_missing": bool(r2_config_missing),
             },
         )
         updated = str(note or "")
-        for token in tokens:
+        for token in dedup_tokens:
             updated = self._append_note(updated, token)
         return updated
 
