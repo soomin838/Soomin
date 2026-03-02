@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import quote_plus, urlparse
 from zoneinfo import ZoneInfo
 
-from .brain import DraftPost, GeminiBrain
+from .brain import DraftPost, GeminiBrain, stable_hash
 from .actionability_gate import ActionabilityGate, ActionabilityGateResult
 from .news_actionability_gate import NewsActionabilityGate, NewsActionabilityGateResult
 from .budget import BudgetGuard
@@ -27,6 +27,7 @@ from .index_sync import BloggerIndexSync
 from .logstore import LogStore, RunRecord
 from .news_pool import NewsPoolStore
 from .news_rss import fetch_feed_detailed
+from .news_facets import ensure_what_to_do_now_section, facet_emphasis_hint, resolve_facet_context
 from .news_score import classify_category, contains_allow_keywords, has_blocked_keywords, score_news_item
 from .news_pack_manifest import NewsPackManifest
 from .news_pack_picker import NewsPackPicker
@@ -700,7 +701,7 @@ class AgentWorkflow:
         failed = set(self._qa_failed_keys(qa_result))
         metrics = self._news_html_metrics(out)
         quality = getattr(self.settings, "quality", None)
-        min_h2 = max(1, int(getattr(quality, "min_h2", 6) or 6))
+        min_h2 = max(1, int(getattr(quality, "min_h2", 5) or 5))
         min_external_links = max(0, int(getattr(quality, "min_external_links", 1) or 1))
         min_authority_links = max(0, int(getattr(quality, "min_authority_links", 1) or 1))
 
@@ -2446,6 +2447,7 @@ class AgentWorkflow:
         selected: TopicCandidate,
         category: str,
         authority_links: list[str],
+        facet_context: dict[str, Any] | None = None,
     ) -> DraftPost:
         title = self._enforce_seo_title(
             title=str(getattr(selected, "title", "") or ""),
@@ -2456,6 +2458,16 @@ class AgentWorkflow:
         source_url = re.sub(r"\s+", " ", str(getattr(selected, "url", "") or "")).strip()
         snippet = re.sub(r"\s+", " ", str(getattr(selected, "body", "") or "")).strip()
         cat = re.sub(r"\s+", " ", str(category or "platform")).strip().lower()
+        facet_data = dict(facet_context or {})
+        selected_facet = str(facet_data.get("selected_facet", "impact") or "impact").strip().lower() or "impact"
+        perspective_hint = facet_emphasis_hint(selected_facet)
+        try:
+            fallback_seed = int(facet_data.get("facet_seed", 0) or 0)
+        except Exception:
+            fallback_seed = 0
+        if fallback_seed <= 0:
+            fallback_seed = stable_hash(f"{title}{cat}")
+        rng = random.Random(int(fallback_seed) ^ 0x4F1BBCDC)
         safe_authorities = [
             re.sub(r"\s+", " ", str(x or "").strip())
             for x in (authority_links or [])
@@ -2498,15 +2510,23 @@ class AgentWorkflow:
             "Could this affect background sync, sign-in, or notifications for your setup?",
             "What is the fastest low-risk check you can run today?",
         ]
-        random.shuffle(question_pool)
+        rng.shuffle(question_pool)
         question_lines = question_pool[:2]
-        compare_block = random.choice(
-            [
-                "Comparison: immediate rollout is faster, but staged rollout lowers rollback risk if issues spread.",
-                "Comparison: waiting 24 hours may delay benefits, but it reduces disruption for mission-critical workflows.",
-                "Comparison: broad policy push gives consistency, while pilot-first gives safer validation data.",
-            ]
-        )
+        compare_pool = [
+            "Comparison: immediate rollout is faster, but staged rollout lowers rollback risk if issues spread.",
+            "Comparison: waiting 24 hours may delay benefits, but it reduces disruption for mission-critical workflows.",
+            "Comparison: broad policy push gives consistency, while pilot-first gives safer validation data.",
+        ]
+        compare_block = compare_pool[int(rng.randrange(len(compare_pool)))]
+        emphasis_line_map = {
+            "impact": "This analysis focuses on who feels the impact first and where disruptions are most likely to surface.",
+            "timeline": "This analysis follows the update sequence so readers can align decisions with timing, not guesswork.",
+            "official": "This analysis prioritizes confirmed statements and release-note evidence over speculation.",
+            "risk": "This analysis stresses low-regret safeguards and practical checks before broader rollout.",
+            "market": "This analysis tracks ecosystem and vendor reaction where it changes real-world planning.",
+            "user_angle": "This analysis reflects everyday reader workflows and immediate usability consequences.",
+        }
+        emphasis_line = emphasis_line_map.get(selected_facet, emphasis_line_map["impact"])
         key_facts = (
             "<ul>"
             f"<li>Who: End users and IT teams tracking {escape(cat)} rollout updates.</li>"
@@ -2516,18 +2536,23 @@ class AgentWorkflow:
             "<li>Risk: Low to medium for normal users, depending on update timing and configuration.</li>"
             "</ul>"
         )
-        what_to_do = (
-            "<ul>"
-            "<li>Check the official update notes and your current app or OS version.</li>"
-            "<li>Apply the recommended setting change on one device first before full rollout.</li>"
-            "<li>Monitor the issue for 24 hours and keep a rollback path ready if behavior worsens.</li>"
-            "</ul>"
-        )
+        action_items = [
+            re.sub(r"\s+", " ", str(x or "").strip())
+            for x in (facet_data.get("action_items", []) or [])
+            if str(x or "").strip()
+        ][:6]
+        if len(action_items) < 3:
+            action_items = [
+                "Check the official update notes and your current app or OS version.",
+                "Apply one low-risk change in a controlled scope before full rollout.",
+                "Monitor impact for 24 hours and keep a rollback option available.",
+            ]
+        what_to_do = "<ul>" + "".join(f"<li>{escape(item)}</li>" for item in action_items[:6]) + "</ul>"
         html = (
             "<h2>Quick Take</h2>"
             f"<p>{escape(snippet or title)}</p>"
-            "<p>This update matters now because rollout speed is outpacing clear user-facing guidance in many teams.</p>"
-            "<p>For mainstream users, the key question is practical impact today, not speculation about long-term strategy.</p>"
+            f"<p>{escape(emphasis_line)}</p>"
+            f"<p>{escape(perspective_hint)}</p>"
             f"{key_facts}"
             "<h2>What Happened</h2>"
             f"<p>According to reports, this {escape(cat)} update affects users who rely on daily workflows.</p>"
@@ -2535,8 +2560,6 @@ class AgentWorkflow:
             "<h2>Why It Matters (for normal users)</h2>"
             "<p>If this change impacts login, sync, notifications, or background tasks, normal usage can degrade quickly.</p>"
             f"<p>{escape(question_lines[1])}</p>"
-            "<h2>What To Do Now</h2>"
-            f"{what_to_do}"
             "<h2>Key Details</h2>"
             "<ul>"
             "<li>Scope: software behavior and update impact only.</li>"
@@ -2546,9 +2569,12 @@ class AgentWorkflow:
             f"<p><strong>Example:</strong> {escape(compare_block)}</p>"
             "<h2>What To Watch Next</h2>"
             "<p>Watch official release notes, support advisories, and confirmed user impact updates.</p>"
+            "<h2>What To Do Now</h2>"
+            f"{what_to_do}"
             "<h2>Sources</h2>"
             f"<ul>{''.join(source_items) if source_items else '<li>No external source available yet.</li>'}</ul>"
         )
+        html = ensure_what_to_do_now_section(html=html, action_items=action_items)
         return DraftPost(
             title=title,
             alt_titles=[],
@@ -2653,6 +2679,7 @@ class AgentWorkflow:
                 or (selected.meta or {}).get("news_pool_id", "")
                 or claimed_id
             ).strip()
+            retry_index = (selected.meta or {}).get("retry_index", None)
             if api_ready and self._gemini_budget_remaining() > 0:
                 try:
                     draft = self.brain.generate_news_post(
@@ -2665,6 +2692,7 @@ class AgentWorkflow:
                             "news_category": category,
                             "event_id": event_id,
                             "run_start_minute": str(run_start_minute or "").strip(),
+                            "retry_index": retry_index,
                         },
                     )
                     if self.brain.call_count:
@@ -2676,7 +2704,26 @@ class AgentWorkflow:
                         self.brain.reset_run_counter()
                     degraded_note = self._append_note(degraded_note, f"news_gemini_failed={str(exc)[:120]}")
             if draft is None:
-                draft = self._build_news_post_local_fallback(selected, category, self.settings.authority_links)
+                local_facet_context = resolve_facet_context(
+                    event_id=event_id,
+                    run_start_minute=str(run_start_minute or "").strip(),
+                    title=str(selected.title or ""),
+                    body=str(selected.body or ""),
+                    category=category,
+                    source_url=str(getattr(selected, "url", "") or ""),
+                    retry_index=retry_index,
+                    llm_candidates=[],
+                    state_path=(self.root / "storage" / "state" / "facet_rotation_state.json")
+                    if not api_ready
+                    else None,
+                    stable_hash_fn=stable_hash,
+                ).as_dict()
+                draft = self._build_news_post_local_fallback(
+                    selected,
+                    category,
+                    self.settings.authority_links,
+                    facet_context=local_facet_context,
+                )
                 degraded_note = self._append_note(degraded_note, "news_local_fallback_draft")
 
             draft.title = self._enforce_seo_title(
