@@ -230,7 +230,7 @@ def scenario_refresh_pool_and_cleanup(temp_root: Path, settings) -> None:
             }
         ],
     )
-    wf._refresh_internal_links_pool()  # noqa: SLF001
+    wf._refresh_internal_links_pool(force=True)  # noqa: SLF001
     pool_path = wf._internal_links_pool_path()  # noqa: SLF001
     if not pool_path.exists():
         raise AssertionError("Scenario2 failed: pool file was not created.")
