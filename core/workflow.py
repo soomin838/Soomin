@@ -3530,6 +3530,9 @@ class AgentWorkflow:
                 except Exception:
                     degraded_note = self._append_note(degraded_note, "source_naturalization_failed")
 
+            final_html = self._inject_images_into_html(final_html, images)
+            degraded_note = self._apply_ctr_visual_density_note(degraded_note, images)
+
             entropy_settings = getattr(self.settings, "entropy_check", None)
             entropy_result: dict[str, Any] = {"ok": True, "reasons": []}
             if self._entropy_check_enabled:
@@ -3691,6 +3694,8 @@ class AgentWorkflow:
                                         degraded_note,
                                         "source_naturalization_failed",
                                     )
+                            final_html = self._inject_images_into_html(final_html, images)
+                            degraded_note = self._apply_ctr_visual_density_note(degraded_note, images)
 
                             if dry_run:
                                 gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
@@ -5204,6 +5209,8 @@ class AgentWorkflow:
                     generation_degraded_note,
                     f"local_llm_qa_issues={issue_count}",
                 )
+        final_html = self._inject_images_into_html(final_html, images)
+        generation_degraded_note = self._apply_ctr_visual_density_note(generation_degraded_note, images)
         draft.title = self._double_unescape(str(draft.title or "")).strip()
         gate_preview_html = ""
         preflight_thumb_src = self._preflight_thumb_src_from_images(images)
@@ -6645,6 +6652,7 @@ class AgentWorkflow:
                 if updated_draft_id:
                     hold_msg += f" | draft_checkpoint={updated_draft_id}"
                 return WorkflowResult("hold", hold_msg)
+        final_html = self._inject_images_into_html(final_html, images)
         gate_preview_html = ""
         preflight_thumb_src = self._preflight_thumb_src_from_images(images)
         resume_first_thumb_source = str(getattr(images[0], "source_url", "") or "").strip() if images else ""
@@ -7936,6 +7944,107 @@ class AgentWorkflow:
         if self.publisher._is_allowed_image_url(src, allow_data_uri=False):  # noqa: SLF001
             return src
         return ""
+
+    def _apply_ctr_visual_density_note(self, note: str, images: list[ImageAsset]) -> str:
+        valid_count = 0
+        for image in (images or []):
+            src = str(getattr(image, "source_url", "") or "").strip()
+            if not src:
+                continue
+            try:
+                if self.publisher._is_allowed_image_url(src, allow_data_uri=False):  # noqa: SLF001
+                    valid_count += 1
+            except Exception:
+                continue
+        if valid_count < 3:
+            return self._append_note(note, "ctr_risk_low_visual_density")
+        return note
+
+    def _injected_image_block(self, src: str, alt: str, *, kind: str) -> str:
+        safe_src = escape(str(src or "").strip(), quote=True)
+        safe_alt = escape(str(alt or "").strip() or "Supporting image", quote=True)
+        return (
+            f'<!-- RZ-CTR-IMG:START kind={kind} -->'
+            f'<p class="rz-ctr-image rz-ctr-image-{kind}">'
+            f'<img src="{safe_src}" alt="{safe_alt}" loading="lazy" referrerpolicy="no-referrer" />'
+            f"</p>"
+            f"<!-- RZ-CTR-IMG:END kind={kind} -->"
+        )
+
+    def _inject_images_into_html(self, html: str, images: list[ImageAsset]) -> str:
+        src = str(html or "")
+        if not src or not images:
+            return src
+
+        # Idempotent re-run safety: clear previously injected blocks before re-injecting.
+        out = re.sub(
+            r"<!--\s*RZ-CTR-IMG:START.*?RZ-CTR-IMG:END[^>]*-->",
+            "",
+            src,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        out = re.sub(r"\n{3,}", "\n\n", out)
+
+        entries: list[tuple[str, str]] = []
+        for image in (images or []):
+            image_src = str(getattr(image, "source_url", "") or "").strip()
+            if not image_src:
+                continue
+            try:
+                allowed = bool(self.publisher._is_allowed_image_url(image_src, allow_data_uri=False))  # noqa: SLF001
+            except Exception:
+                allowed = False
+            if not allowed:
+                continue
+            image_alt = str(getattr(image, "alt", "") or "").strip()
+            entries.append((image_src, image_alt))
+        if not entries:
+            return out
+
+        h2_matches = list(re.finditer(r"<h2\b[^>]*>", out, flags=re.IGNORECASE))
+        insertions: list[tuple[int, str]] = []
+
+        thumb_src, thumb_alt = entries[0]
+        thumb_block = self._injected_image_block(thumb_src, thumb_alt, kind="thumb")
+        if h2_matches:
+            insertions.append((h2_matches[0].start(), thumb_block))
+        else:
+            insertions.append((0, thumb_block))
+
+        inline_entries = entries[1:]
+        if inline_entries and h2_matches:
+            # Distribute inline images across sections with 2~3 H2 interval.
+            target_sections: list[int] = []
+            cursor = 1
+            interval_toggle = 0
+            while cursor < len(h2_matches) and len(target_sections) < len(inline_entries):
+                target_sections.append(cursor)
+                cursor += 2 if (interval_toggle % 2 == 0) else 3
+                interval_toggle += 1
+
+            for (inline_src, inline_alt), section_idx in zip(inline_entries, target_sections):
+                sec_start = h2_matches[section_idx].end()
+                sec_end = h2_matches[section_idx + 1].start() if (section_idx + 1) < len(h2_matches) else len(out)
+                body = out[sec_start:sec_end]
+                m_para = re.search(r"</p>", body, flags=re.IGNORECASE)
+                if m_para:
+                    insert_at = sec_start + m_para.end()
+                else:
+                    insert_at = sec_start
+                inline_block = self._injected_image_block(inline_src, inline_alt, kind="inline")
+                insertions.append((insert_at, inline_block))
+
+        for pos, block in sorted(insertions, key=lambda x: x[0], reverse=True):
+            out = out[:pos] + block + out[pos:]
+
+        # Guard against accidental consecutive injected image paragraphs.
+        out = re.sub(
+            r"(</p>\s*<!--\s*RZ-CTR-IMG:END[^>]*-->)(\s*<p class=\"rz-ctr-image rz-ctr-image-inline\">\s*<img\b[^>]*>\s*</p>\s*<!--\s*RZ-CTR-IMG:END[^>]*-->)",
+            r"\1",
+            out,
+            flags=re.IGNORECASE,
+        )
+        return out
 
     def _annotate_image_pipeline_diagnostics(
         self,
