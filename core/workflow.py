@@ -35,6 +35,7 @@ from .news_pack_picker import NewsPackPicker
 from .news_pack_seeder import NewsPackSeeder
 from .publish_ledger import PublishLedger, make_ledger_key
 from .readability import optimize_html_readability
+from .source_naturalization import apply_source_naturalization
 from .title_diversity import choose_diverse_title
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
@@ -219,6 +220,9 @@ class AgentWorkflow:
         self._watchdog_enabled = bool(getattr(getattr(self.settings, "watchdog", None), "enabled", True))
         self._title_diversity_state_path = self.root / "storage" / "state" / "title_pattern_state.json"
         self._title_diversity_enabled = bool(getattr(getattr(self.settings, "title_diversity", None), "enabled", True))
+        self._source_naturalization_enabled = bool(
+            getattr(getattr(self.settings, "source_naturalization", None), "enabled", True)
+        )
         self._last_news_pool_refresh_stats: dict[str, Any] = {}
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
         self.news_cluster_engine = NewsClusterEngine(
@@ -3433,6 +3437,17 @@ class AgentWorkflow:
                     )
                 except Exception:
                     degraded_note = self._append_note(degraded_note, "title_diversity_failed")
+
+            if self._source_naturalization_enabled:
+                try:
+                    final_html = apply_source_naturalization(
+                        html=final_html,
+                        source_url=str(draft.source_url or ""),
+                        authority_links=list(getattr(self.settings, "authority_links", []) or []),
+                        settings=getattr(self.settings, "source_naturalization", None),
+                    )
+                except Exception:
+                    degraded_note = self._append_note(degraded_note, "source_naturalization_failed")
 
             labels = self._build_public_labels(
                 title=draft.title,
