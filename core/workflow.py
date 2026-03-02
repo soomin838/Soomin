@@ -37,6 +37,7 @@ from .publish_ledger import PublishLedger, make_ledger_key
 from .readability import optimize_html_readability
 from .source_naturalization import apply_source_naturalization
 from .content_entropy import check_entropy
+from .visual_diagnostics import diagnose_visual_settings
 from .title_diversity import choose_diverse_title
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
@@ -3251,6 +3252,29 @@ class AgentWorkflow:
                 return WorkflowResult("hold", hold_reason)
 
             self._progress("visual", "뉴스 이미지/썸네일 구성", 72)
+            try:
+                visual_diag_pre = diagnose_visual_settings(self.settings, self.root)
+                self._append_workflow_perf(
+                    "visual_diagnostics",
+                    {
+                        "stage": "news_pre_images",
+                        "can_attempt_generation": bool(visual_diag_pre.get("can_attempt_generation", False)),
+                        "blockers": list(visual_diag_pre.get("blockers", []) or []),
+                        "target_images_per_post": int(visual_diag_pre.get("visual.target_images_per_post", 0) or 0),
+                        "min_images_required": int(visual_diag_pre.get("publish.min_images_required", 0) or 0),
+                        "max_images_per_post": int(visual_diag_pre.get("publish.max_images_per_post", 0) or 0),
+                        "thumbnail_preflight_only": bool(
+                            visual_diag_pre.get("publish.thumbnail_preflight_only", False)
+                        ),
+                        "provider": str(visual_diag_pre.get("visual.image_provider", "") or ""),
+                        "gemini_enabled": bool(
+                            visual_diag_pre.get("visual.enable_gemini_image_generation", False)
+                        ),
+                        "api_key_present": bool(visual_diag_pre.get("gemini.api_key_present", False)),
+                    },
+                )
+            except Exception:
+                pass
             target_images = self._image_target_max()
             min_images_required = self._image_min_required()
             required_inline = max(0, target_images - 1)
@@ -3331,6 +3355,31 @@ class AgentWorkflow:
                 return WorkflowResult("hold", hold_reason)
             if len(images) > target_images:
                 images = images[:target_images]
+
+            try:
+                visual_diag_post = diagnose_visual_settings(self.settings, self.root)
+                self._append_workflow_perf(
+                    "visual_diagnostics",
+                    {
+                        "stage": "news_post_images",
+                        "can_attempt_generation": bool(visual_diag_post.get("can_attempt_generation", False)),
+                        "blockers": list(visual_diag_post.get("blockers", []) or []),
+                        "target_images_per_post": int(visual_diag_post.get("visual.target_images_per_post", 0) or 0),
+                        "min_images_required": int(visual_diag_post.get("publish.min_images_required", 0) or 0),
+                        "max_images_per_post": int(visual_diag_post.get("publish.max_images_per_post", 0) or 0),
+                        "thumbnail_preflight_only": bool(
+                            visual_diag_post.get("publish.thumbnail_preflight_only", False)
+                        ),
+                        "provider": str(visual_diag_post.get("visual.image_provider", "") or ""),
+                        "gemini_enabled": bool(
+                            visual_diag_post.get("visual.enable_gemini_image_generation", False)
+                        ),
+                        "api_key_present": bool(visual_diag_post.get("gemini.api_key_present", False)),
+                        "selected_images_count": int(len(images)),
+                    },
+                )
+            except Exception:
+                pass
 
             dry_run = bool(getattr(self.settings.budget, "dry_run", False))
             preflight_thumb_src = ""
