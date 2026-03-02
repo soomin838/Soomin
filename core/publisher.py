@@ -329,7 +329,12 @@ class Publisher:
             return out
         entries: list[tuple[str, str]] = []
         for image in images[:target_images]:
-            src = self._file_to_data_uri(Path(getattr(image, "path", "")))
+            src = ""
+            source_url = str(getattr(image, "source_url", "") or "").strip()
+            if source_url and self._is_allowed_image_url(source_url, allow_data_uri=False):
+                src = source_url
+            if not src:
+                src = self._file_to_data_uri(Path(getattr(image, "path", "")))
             if not src:
                 continue
             entries.append((src, str(getattr(image, "alt", "") or "")))

@@ -3401,12 +3401,18 @@ class AgentWorkflow:
                 pass
 
             dry_run = bool(getattr(self.settings.budget, "dry_run", False))
-            preflight_thumb_src = ""
+            preflight_thumb_src = self._preflight_thumb_src_from_images(images)
+            degraded_note = self._annotate_image_pipeline_diagnostics(
+                note=degraded_note,
+                stage="news_pre_merge",
+                images=images,
+                preflight_thumb_src=preflight_thumb_src,
+                required_images=min_images_required,
+            )
             if dry_run:
                 gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
             else:
                 if images:
-                    preflight_thumb_src = self._preflight_thumb_src_from_images(images)
                     if not preflight_thumb_src:
                         images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
                             draft=draft,
@@ -5200,7 +5206,14 @@ class AgentWorkflow:
                 )
         draft.title = self._double_unescape(str(draft.title or "")).strip()
         gate_preview_html = ""
-        preflight_thumb_src = ""
+        preflight_thumb_src = self._preflight_thumb_src_from_images(images)
+        generation_degraded_note = self._annotate_image_pipeline_diagnostics(
+            note=generation_degraded_note,
+            stage="main_pre_merge",
+            images=images,
+            preflight_thumb_src=preflight_thumb_src,
+            required_images=min_images_required,
+        )
         if bool(self.settings.budget.dry_run):
             try:
                 gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
@@ -5208,7 +5221,6 @@ class AgentWorkflow:
                 raise RuntimeError(f"Go-live preflight merge failed: {exc}") from exc
         else:
             try:
-                preflight_thumb_src = self._preflight_thumb_src_from_images(images)
                 if images:
                     if not preflight_thumb_src:
                         images, preflight_thumb_src = self._profile_call(
@@ -7888,6 +7900,44 @@ class AgentWorkflow:
         if self.publisher._is_allowed_image_url(src, allow_data_uri=False):  # noqa: SLF001
             return src
         return ""
+
+    def _annotate_image_pipeline_diagnostics(
+        self,
+        *,
+        note: str,
+        stage: str,
+        images: list[ImageAsset],
+        preflight_thumb_src: str,
+        required_images: int,
+    ) -> str:
+        tokens: list[str] = []
+        if not images:
+            tokens.append("image_pipeline_empty")
+        if images and (not preflight_thumb_src):
+            tokens.append("thumbnail_src_missing")
+        if not tokens:
+            return note
+        try:
+            raw_base = str(getattr(getattr(self.settings.publish, "r2", None), "public_base_url", "") or "").strip()
+            r2_host = (urlparse(raw_base).netloc or "").lower()
+        except Exception:
+            r2_host = ""
+        self._append_workflow_perf(
+            "image_pipeline_diagnostic",
+            {
+                "stage": str(stage or "").strip() or "unknown",
+                "tokens": list(tokens),
+                "image_hosting_backend": str(getattr(self.settings.publish, "image_hosting_backend", "") or ""),
+                "required_images": int(max(0, required_images)),
+                "selected_images_count": int(len(images or [])),
+                "preflight_thumb_src_present": bool(preflight_thumb_src),
+                "r2_public_host": r2_host,
+            },
+        )
+        updated = str(note or "")
+        for token in tokens:
+            updated = self._append_note(updated, token)
+        return updated
 
     def _run_manual_upload_probe_session(self, max_total_seconds: int = 90) -> dict[str, Any]:
         started = time.perf_counter()

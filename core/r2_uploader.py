@@ -54,6 +54,10 @@ def _is_dry_run() -> bool:
     return str(os.getenv("R2_DRY_RUN", "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _cache_disabled() -> bool:
+    return str(os.getenv("R2_CACHE_DISABLED", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _dryrun_url(cfg: R2Config, category: str, filename_hint: str) -> str:
     prefix = (cfg.prefix or "library").strip("/")
     cat = re_sub_nonword(str(category or "generic").strip().lower()) or "generic"
@@ -76,11 +80,14 @@ def upload_file(root: Path, cfg: R2Config, file_path: Path, category: str) -> st
     if _is_dry_run():
         return _dryrun_url(cfg, category=category, filename_hint=file_path.stem)
 
-    cache = _load_cache(root)
     key_fp = _fingerprint(file_path)
-    cached = cache.get(key_fp)
-    if isinstance(cached, str) and cached.startswith("https://"):
-        return cached
+    use_cache = not _cache_disabled()
+    cache: dict = {}
+    if use_cache:
+        cache = _load_cache(root)
+        cached = cache.get(key_fp)
+        if isinstance(cached, str) and cached.startswith("https://"):
+            return cached
 
     h = hashlib.sha1(key_fp.encode("utf-8")).hexdigest()[:12]
     ext = file_path.suffix.lower() or ".bin"
@@ -105,8 +112,9 @@ def upload_file(root: Path, cfg: R2Config, file_path: Path, category: str) -> st
     s3.upload_file(str(file_path), cfg.bucket, object_key, ExtraArgs=extra)
 
     public_url = cfg.public_base_url.rstrip("/") + "/" + object_key
-    cache[key_fp] = public_url
-    _save_cache(root, cache)
+    if use_cache:
+        cache[key_fp] = public_url
+        _save_cache(root, cache)
     return public_url
 
 
