@@ -39,6 +39,7 @@ from .source_naturalization import apply_source_naturalization
 from .content_entropy import check_entropy
 from .visual_diagnostics import diagnose_visual_settings
 from .title_diversity import choose_diverse_title
+from .run_metrics import RunMetricsLogger, parse_reason_codes
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
 from .patterns import PatternEngine
@@ -182,6 +183,7 @@ class AgentWorkflow:
         self._workflow_perf_path = self.root / "storage" / "logs" / "workflow_perf.jsonl"
         self._workflow_perf_run_id = ""
         self._workflow_perf_run_started_mono = 0.0
+        self._workflow_perf_last_run_id = ""
         self._workflow_perf_current_phase = ""
         self._workflow_perf_phase_started_mono = 0.0
         self._workflow_perf_phase_last_message = ""
@@ -192,6 +194,9 @@ class AgentWorkflow:
         self._workflow_perf_heartbeat_sec = 20.0
         self._workflow_perf_phase_count = 0
         self._workflow_perf_slow_phases: list[dict[str, Any]] = []
+        self.run_metrics_logger = RunMetricsLogger(self.root)
+        self._run_metrics_context: dict[str, dict[str, Any]] = {}
+        self._run_metrics_emitted_keys: set[str] = set()
         self._manual_upload_probe_done = False
         self._news_pool_db_path = self.root / "storage" / "logs" / "news_pool.sqlite3"
         self._news_pool_state_path = self.root / "storage" / "logs" / "news_pool_state.json"
@@ -562,6 +567,7 @@ class AgentWorkflow:
             # Close any stale run from an abnormal termination path.
             self._workflow_perf_finish_run(status="aborted", message="stale_run_closed_on_next_start")
         self._workflow_perf_run_id = uuid.uuid4().hex[:12]
+        self._workflow_perf_last_run_id = str(self._workflow_perf_run_id or "")
         self._workflow_perf_run_started_mono = time.perf_counter()
         self._workflow_perf_current_phase = ""
         self._workflow_perf_phase_started_mono = 0.0
@@ -659,6 +665,7 @@ class AgentWorkflow:
     def _workflow_perf_finish_run(self, status: str, message: str = "") -> None:
         if not self._workflow_perf_run_id:
             return
+        self._workflow_perf_last_run_id = str(self._workflow_perf_run_id or "")
         now_mono = time.perf_counter()
         self._workflow_perf_close_phase(now_mono, reason="run_end")
         total_ms = int(max(0.0, now_mono - float(self._workflow_perf_run_started_mono or now_mono)) * 1000)
@@ -682,6 +689,216 @@ class AgentWorkflow:
         self._workflow_perf_last_heartbeat_mono = 0.0
         self._workflow_perf_phase_count = 0
         self._workflow_perf_slow_phases = []
+
+    def _update_run_metrics_context(self, scope: str, **kwargs: Any) -> None:
+        key = str(scope or "").strip() or "unknown"
+        cur = dict(self._run_metrics_context.get(key, {}) or {})
+        for k, v in kwargs.items():
+            if v is None:
+                continue
+            cur[str(k)] = v
+        self._run_metrics_context[key] = cur
+
+    def _latest_run_record_since(self, min_id: int) -> dict[str, Any]:
+        rows = self.logs.get_recent_runs(days=14, limit=20)
+        for row in rows:
+            try:
+                rid = int((row or {}).get("id", 0) or 0)
+            except Exception:
+                rid = 0
+            if rid > int(min_id):
+                return dict(row or {})
+        return {}
+
+    def _count_allowed_image_urls(self, images: list[ImageAsset] | None) -> int:
+        seen: set[str] = set()
+        for image in (images or []):
+            src = str(getattr(image, "source_url", "") or "").strip()
+            if not src or src in seen:
+                continue
+            allowed = False
+            try:
+                allowed = bool(self.publisher._is_allowed_image_url(src, allow_data_uri=False))  # noqa: SLF001
+            except Exception:
+                allowed = src.lower().startswith("http://") or src.lower().startswith("https://")
+            if not allowed:
+                continue
+            seen.add(src)
+        return int(len(seen))
+
+    def _count_internal_links_by_canonical_host(self, html: str) -> int:
+        src = str(html or "")
+        hrefs = re.findall(r'href=["\']([^"\']+)["\']', src, flags=re.IGNORECASE)
+        if not hrefs:
+            return 0
+        canonical = self._canonical_internal_host()
+        if not canonical:
+            counts: dict[str, int] = {}
+            for url in hrefs:
+                host = self._host_from_url(str(url or "").strip())
+                if not host:
+                    continue
+                counts[host] = int(counts.get(host, 0) or 0) + 1
+            if counts:
+                canonical = str(sorted(counts.items(), key=lambda x: x[1], reverse=True)[0][0] or "").strip().lower()
+        if not canonical:
+            return 0
+        total = 0
+        for url in hrefs:
+            if self._host_from_url(str(url or "").strip()) == canonical:
+                total += 1
+        return int(total)
+
+    def _count_related_links_in_html(self, html: str) -> int:
+        src = str(html or "")
+        m = re.search(
+            r"<!--\s*RZ-RELATED:START\s*-->(.*?)<!--\s*RZ-RELATED:END\s*-->",
+            src,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not m:
+            return 0
+        inner = str(m.group(1) or "")
+        links = re.findall(r'href=["\']([^"\']+)["\']', inner, flags=re.IGNORECASE)
+        return int(len([u for u in links if str(u or "").strip()]))
+
+    def _emit_run_metrics(
+        self,
+        *,
+        scope: str,
+        baseline_run_id: str,
+        baseline_log_id: int,
+        status_hint: str,
+        message_hint: str,
+    ) -> None:
+        ctx = dict(self._run_metrics_context.get(str(scope or ""), {}) or {})
+        run_record = self._latest_run_record_since(int(baseline_log_id or 0))
+
+        status = str((run_record.get("status") if isinstance(run_record, dict) else "") or status_hint or "failed").strip().lower()
+        if status not in {"success", "skipped", "hold", "failed"}:
+            if status in {"error", "exception"}:
+                status = "failed"
+            else:
+                status = "failed"
+
+        note = str((run_record.get("note") if isinstance(run_record, dict) else "") or "").strip()
+        reason_seed = note
+        if message_hint:
+            reason_seed = f"{reason_seed}|{str(message_hint)}" if reason_seed else str(message_hint)
+        reason_codes = parse_reason_codes(reason_seed)
+
+        title = str(
+            (run_record.get("title") if isinstance(run_record, dict) else "")
+            or ctx.get("title", "")
+            or ""
+        ).strip()
+        final_html = str(ctx.get("final_html", "") or "")
+        topic_cluster = str(ctx.get("topic_cluster", "") or "").strip().lower()
+        focus_keywords = ctx.get("focus_keywords", [])
+        if not isinstance(focus_keywords, list):
+            focus_keywords = []
+        focus_keywords = [str(x).strip().lower() for x in focus_keywords if str(x).strip()][:6]
+        if (not focus_keywords) and title:
+            inferred_topic = topic_cluster or self._infer_topic_cluster(title, [], final_html)
+            focus_keywords = self._compute_focus_keywords(title, final_html, inferred_topic)[:6]
+            if not topic_cluster:
+                topic_cluster = inferred_topic
+        if not topic_cluster:
+            topic_cluster = self._infer_topic_cluster(title, focus_keywords, final_html)
+
+        seo_slug = str(ctx.get("seo_slug", "") or "").strip().lower()
+        if not seo_slug and title:
+            seo_slug = self._compute_seo_slug(title, topic_cluster)
+
+        images_raw = ctx.get("images", [])
+        images = images_raw if isinstance(images_raw, list) else []
+        images_count = self._count_allowed_image_urls(images)
+        internal_links_count = self._count_internal_links_by_canonical_host(final_html)
+        related_links_count = self._count_related_links_in_html(final_html)
+
+        ctr_risk = any(str(x).startswith("ctr_risk_low_visual_density") for x in reason_codes)
+        entropy_ok = not any(str(x).startswith("entropy_fail") for x in reason_codes)
+        published_url = str(
+            (run_record.get("published_url") if isinstance(run_record, dict) else "")
+            or ctx.get("published_url", "")
+            or ""
+        ).strip()
+        publish_at_utc = str(ctx.get("publish_at_utc", "") or "").strip()
+
+        run_id = str(
+            ctx.get("run_id", "")
+            or self._workflow_perf_last_run_id
+            or baseline_run_id
+            or uuid.uuid4().hex[:12]
+        ).strip()
+        dedupe_key = str(run_id or "").strip()
+        if not dedupe_key:
+            dedupe_key = uuid.uuid4().hex[:12]
+        if dedupe_key in self._run_metrics_emitted_keys:
+            return
+        self._run_metrics_emitted_keys.add(dedupe_key)
+
+        payload = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "run_id": dedupe_key,
+            "status": status,
+            "reason_codes": reason_codes,
+            "topic_cluster": topic_cluster or "default",
+            "focus_keywords": focus_keywords[:6],
+            "seo_slug": seo_slug,
+            "title": title,
+            "published_url": published_url,
+            "publish_at_utc": publish_at_utc,
+            "images_count": int(images_count),
+            "internal_links_count": int(internal_links_count),
+            "related_links_count": int(related_links_count),
+            "ctr_risk_low_visual_density": bool(ctr_risk),
+            "entropy_ok": bool(entropy_ok),
+        }
+        try:
+            logger = getattr(self, "run_metrics_logger", None)
+            if logger is None:
+                logger = RunMetricsLogger(getattr(self, "root", Path(".")))
+                self.run_metrics_logger = logger
+            logger.log(payload)
+        except Exception:
+            pass
+
+    def _run_with_metrics_guard(self, scope: str, fn):
+        safe_scope = str(scope or "").strip() or "run"
+        baseline_run_id = str(self._workflow_perf_run_id or self._workflow_perf_last_run_id or "")
+        before_rows = self.logs.get_recent_runs(days=14, limit=1)
+        baseline_log_id = int(before_rows[0]["id"]) if before_rows else 0
+        self._run_metrics_context[safe_scope] = {
+            "run_id": baseline_run_id,
+            "title": "",
+            "topic_cluster": "",
+            "focus_keywords": [],
+            "seo_slug": "",
+            "publish_at_utc": "",
+            "published_url": "",
+            "final_html": "",
+            "images": [],
+        }
+        status_hint = "failed"
+        message_hint = ""
+        try:
+            result = fn()
+            status_hint = str(getattr(result, "status", "") or "success").strip().lower() or "success"
+            message_hint = str(getattr(result, "message", "") or "").strip()
+            return result
+        except Exception as exc:
+            status_hint = "failed"
+            message_hint = str(exc or "").strip()
+            raise
+        finally:
+            self._emit_run_metrics(
+                scope=safe_scope,
+                baseline_run_id=baseline_run_id,
+                baseline_log_id=baseline_log_id,
+                status_hint=status_hint,
+                message_hint=message_hint,
+            )
 
     def _profile_call(
         self,
@@ -2725,6 +2942,46 @@ class AgentWorkflow:
         news_retry_depth: int = 0,
         retry_event_id: str = "",
     ) -> WorkflowResult:
+        if int(news_retry_depth or 0) > 0:
+            return self._run_once_news_mode_impl(
+                manual_trigger=manual_trigger,
+                run_start_minute=run_start_minute,
+                queue_advisory=queue_advisory,
+                sync_note=sync_note,
+                preflight_index_note=preflight_index_note,
+                blog_snapshot=blog_snapshot,
+                today_gemini_before=today_gemini_before,
+                news_retry_depth=news_retry_depth,
+                retry_event_id=retry_event_id,
+            )
+        return self._run_with_metrics_guard(
+            "news_mode",
+            lambda: self._run_once_news_mode_impl(
+                manual_trigger=manual_trigger,
+                run_start_minute=run_start_minute,
+                queue_advisory=queue_advisory,
+                sync_note=sync_note,
+                preflight_index_note=preflight_index_note,
+                blog_snapshot=blog_snapshot,
+                today_gemini_before=today_gemini_before,
+                news_retry_depth=news_retry_depth,
+                retry_event_id=retry_event_id,
+            ),
+        )
+
+    def _run_once_news_mode_impl(
+        self,
+        *,
+        manual_trigger: bool,
+        run_start_minute: str,
+        queue_advisory: str,
+        sync_note: str,
+        preflight_index_note: str,
+        blog_snapshot: dict[str, Any],
+        today_gemini_before: int,
+        news_retry_depth: int = 0,
+        retry_event_id: str = "",
+    ) -> WorkflowResult:
         self._progress("news_pool", "뉴스 풀 갱신/클레임", 18)
         working_draft_id = ""
         claimed_item: dict[str, Any] | None = None
@@ -3779,6 +4036,14 @@ class AgentWorkflow:
             )
             seo_slug_base = self._compute_seo_slug(draft.title, seo_topic)
             seo_slug = ""
+            self._update_run_metrics_context(
+                "news_mode",
+                title=str(draft.title or ""),
+                topic_cluster=str(seo_topic or "default"),
+                focus_keywords=list(seo_focus_keywords or [])[:6],
+                final_html=str(final_html or ""),
+                images=list(images or []),
+            )
             labels = self._build_public_labels(
                 title=draft.title,
                 candidate=selected,
@@ -3915,6 +4180,15 @@ class AgentWorkflow:
                 title=str(draft.title or ""),
                 topic=str(seo_topic or "default"),
             )
+            self._update_run_metrics_context(
+                "news_mode",
+                seo_slug=str(seo_slug or ""),
+                publish_at_utc=str(
+                    publish_at.astimezone(timezone.utc).isoformat()
+                    if isinstance(publish_at, datetime)
+                    else ""
+                ),
+            )
             if ledger_payload:
                 ledger_payload["seo_slug"] = str(seo_slug or "")
             self._progress("publish", "Blogger 예약 발행 처리", 92)
@@ -3930,6 +4204,10 @@ class AgentWorkflow:
                 seo_slug=seo_slug,
                 focus_keywords=seo_focus_keywords,
                 topic_cluster=seo_topic,
+            )
+            self._update_run_metrics_context(
+                "news_mode",
+                published_url=str(getattr(published, "url", "") or ""),
             )
             published_url_value = str(getattr(published, "url", "") or "").strip()
             published_ok = bool(published and published_url_value)
@@ -4024,6 +4302,12 @@ class AgentWorkflow:
                     pass
 
     def run_once(self, manual_trigger: bool = False) -> WorkflowResult:
+        return self._run_with_metrics_guard(
+            "run_once",
+            lambda: self._run_once_impl(manual_trigger=manual_trigger),
+        )
+
+    def _run_once_impl(self, manual_trigger: bool = False) -> WorkflowResult:
         self._workflow_perf_start_run(manual_trigger=bool(manual_trigger))
         run_start_minute = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M")
         self._maintenance_tick()
@@ -5297,6 +5581,14 @@ class AgentWorkflow:
         seo_focus_keywords = self._compute_focus_keywords(draft.title, final_html, seo_topic)
         seo_slug_base = self._compute_seo_slug(draft.title, seo_topic)
         seo_slug = ""
+        self._update_run_metrics_context(
+            "run_once",
+            title=str(draft.title or ""),
+            topic_cluster=str(seo_topic or "default"),
+            focus_keywords=list(seo_focus_keywords or [])[:6],
+            final_html=str(final_html or ""),
+            images=list(images or []),
+        )
         gate_preview_html = ""
         preflight_thumb_src = self._preflight_thumb_src_from_images(images)
         first_thumb_source = str(getattr(images[0], "source_url", "") or "").strip() if images else ""
@@ -5456,6 +5748,15 @@ class AgentWorkflow:
             title=str(draft.title or ""),
             topic=str(seo_topic or "default"),
         )
+        self._update_run_metrics_context(
+            "run_once",
+            seo_slug=str(seo_slug or ""),
+            publish_at_utc=str(
+                publish_at.astimezone(timezone.utc).isoformat()
+                if isinstance(publish_at, datetime)
+                else ""
+            ),
+        )
         self._progress("publish", "Blogger 예약 발행 처리", 92)
         published = None
         last_publish_err = ""
@@ -5552,6 +5853,10 @@ class AgentWorkflow:
                     ),
                     slow_ms=8000,
                     meta={"attempt": int(publish_try)},
+                )
+                self._update_run_metrics_context(
+                    "run_once",
+                    published_url=str(getattr(published, "url", "") or ""),
                 )
                 break
             except Exception as exc:
@@ -6638,6 +6943,16 @@ class AgentWorkflow:
         return WorkflowResult("success", f"{published.url} (scheduled: {publish_at.isoformat()})")
 
     def _resume_draft_done(self, row: dict, manual_trigger: bool, queue_advisory: str = "") -> WorkflowResult:
+        return self._run_with_metrics_guard(
+            "resume_draft_done",
+            lambda: self._resume_draft_done_impl(
+                row=row,
+                manual_trigger=manual_trigger,
+                queue_advisory=queue_advisory,
+            ),
+        )
+
+    def _resume_draft_done_impl(self, row: dict, manual_trigger: bool, queue_advisory: str = "") -> WorkflowResult:
         title = self._strip_wip_title_prefix(str(row.get("title", "") or "").strip())
         base_html = self._strip_wip_checkpoint_banner(str(row.get("content", "") or ""))
         if not title or not base_html:
@@ -6768,6 +7083,14 @@ class AgentWorkflow:
         seo_focus_keywords = self._compute_focus_keywords(title, final_html, seo_topic)
         seo_slug_base = self._compute_seo_slug(title, seo_topic)
         seo_slug = ""
+        self._update_run_metrics_context(
+            "resume_draft_done",
+            title=str(title or ""),
+            topic_cluster=str(seo_topic or "default"),
+            focus_keywords=list(seo_focus_keywords or [])[:6],
+            final_html=str(final_html or ""),
+            images=list(images or []),
+        )
         gate_preview_html = ""
         preflight_thumb_src = self._preflight_thumb_src_from_images(images)
         resume_first_thumb_source = str(getattr(images[0], "source_url", "") or "").strip() if images else ""
@@ -6868,6 +7191,15 @@ class AgentWorkflow:
             title=str(title or ""),
             topic=str(seo_topic or "default"),
         )
+        self._update_run_metrics_context(
+            "resume_draft_done",
+            seo_slug=str(seo_slug or ""),
+            publish_at_utc=str(
+                publish_at.astimezone(timezone.utc).isoformat()
+                if isinstance(publish_at, datetime)
+                else ""
+            ),
+        )
 
         self._progress("publish", "중단 문서 재개: 예약 발행 처리", 92)
         meta_description = self._build_meta_description(
@@ -6955,6 +7287,10 @@ class AgentWorkflow:
                 topic_cluster=seo_topic,
             ),
             slow_ms=8000,
+        )
+        self._update_run_metrics_context(
+            "resume_draft_done",
+            published_url=str(getattr(published, "url", "") or ""),
         )
         self.logs.add_scheduled_post(
             publish_at=publish_at.isoformat(),
