@@ -282,6 +282,15 @@ class TitleDiversitySettings:
 
 
 @dataclass
+class SourceNaturalizationSettings:
+    enabled: bool = True
+    max_inline_attributions_per_article: int = 3
+    allow_raw_urls_in_body: bool = False
+    max_sources_list_items: int = 6
+    require_sources_section: bool = True
+
+
+@dataclass
 class QualitySettings:
     enabled: bool = True
     strict_mode: bool = True
@@ -611,6 +620,7 @@ class AppSettings:
     ledger: LedgerSettings = field(default_factory=LedgerSettings)
     readability: ReadabilitySettings = field(default_factory=ReadabilitySettings)
     title_diversity: TitleDiversitySettings = field(default_factory=TitleDiversitySettings)
+    source_naturalization: SourceNaturalizationSettings = field(default_factory=SourceNaturalizationSettings)
     quality: QualitySettings = field(default_factory=QualitySettings)
     actionability_gate: ActionabilityGateSettings = field(default_factory=ActionabilityGateSettings)
     generation: GenerationSettings = field(default_factory=GenerationSettings)
@@ -669,6 +679,7 @@ def load_settings(path: Path) -> AppSettings:
     ledger_raw = dict(raw.get("ledger", {}) or {})
     readability_raw = dict(raw.get("readability", {}) or {})
     title_diversity_raw = dict(raw.get("title_diversity", {}) or {})
+    source_naturalization_raw = dict(raw.get("source_naturalization", {}) or {})
     workflow_raw = dict(raw.get("workflow", {}) or {})
     watchdog_raw = dict(raw.get("watchdog", {}) or {})
 
@@ -882,6 +893,7 @@ def load_settings(path: Path) -> AppSettings:
         ledger=_construct_dc(LedgerSettings, ledger_raw),
         readability=_construct_dc(ReadabilitySettings, readability_raw),
         title_diversity=_construct_dc(TitleDiversitySettings, title_diversity_raw),
+        source_naturalization=_construct_dc(SourceNaturalizationSettings, source_naturalization_raw),
         quality=_construct_dc(QualitySettings, quality_raw),
         actionability_gate=_construct_dc(ActionabilityGateSettings, actionability_raw),
         generation=_construct_dc(GenerationSettings, generation_raw),

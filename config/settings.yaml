@@ -122,6 +122,12 @@ title_diversity:
   analysis_ratio: 0.4
   min_title_chars: 45
   max_title_chars: 70
+source_naturalization:
+  enabled: true
+  max_inline_attributions_per_article: 3
+  allow_raw_urls_in_body: false
+  max_sources_list_items: 6
+  require_sources_section: true
 quality:
   enabled: true
   strict_mode: true
