@@ -36,6 +36,7 @@ from .news_pack_seeder import NewsPackSeeder
 from .publish_ledger import PublishLedger, make_ledger_key
 from .readability import optimize_html_readability
 from .source_naturalization import apply_source_naturalization
+from .content_entropy import check_entropy
 from .title_diversity import choose_diverse_title
 from .ollama_client import OllamaClient
 from .ollama_manager import OllamaManager
@@ -222,6 +223,11 @@ class AgentWorkflow:
         self._title_diversity_enabled = bool(getattr(getattr(self.settings, "title_diversity", None), "enabled", True))
         self._source_naturalization_enabled = bool(
             getattr(getattr(self.settings, "source_naturalization", None), "enabled", True)
+        )
+        self._entropy_check_enabled = bool(getattr(getattr(self.settings, "entropy_check", None), "enabled", True))
+        self._entropy_max_rewrite_attempts = max(
+            0,
+            int(getattr(getattr(self.settings, "entropy_check", None), "max_rewrite_attempts", 1) or 1),
         )
         self._last_news_pool_refresh_stats: dict[str, Any] = {}
         self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
@@ -2701,6 +2707,7 @@ class AgentWorkflow:
         claimed_item: dict[str, Any] | None = None
         claimed_id = 0
         claim_finalized = False
+        entropy_retry_used = False
         degraded_note = self._append_note(preflight_index_note or "", sync_note)
         if queue_advisory:
             degraded_note = self._append_note(degraded_note, queue_advisory)
@@ -3448,6 +3455,199 @@ class AgentWorkflow:
                     )
                 except Exception:
                     degraded_note = self._append_note(degraded_note, "source_naturalization_failed")
+
+            entropy_settings = getattr(self.settings, "entropy_check", None)
+            entropy_result: dict[str, Any] = {"ok": True, "reasons": []}
+            if self._entropy_check_enabled:
+                entropy_result = check_entropy(final_html, entropy_settings)
+                if not bool(entropy_result.get("ok", False)):
+                    entropy_reason = ",".join(list(entropy_result.get("reasons", []) or [])[:4]) or "unknown"
+                    degraded_note = self._append_note(degraded_note, f"entropy_fail:{entropy_reason}")
+                    can_entropy_rewrite = (not entropy_retry_used) and int(self._entropy_max_rewrite_attempts) > 0
+                    if can_entropy_rewrite:
+                        entropy_retry_used = True
+                        try:
+                            base_retry_index = int(retry_index or 0)
+                        except Exception:
+                            base_retry_index = 0
+                        entropy_retry_index = max(0, int(base_retry_index) + 1)
+                        retry_index = entropy_retry_index
+                        try:
+                            selected_meta = dict(getattr(selected, "meta", {}) or {})
+                            selected_meta["retry_index"] = int(entropy_retry_index)
+                            selected_meta["entropy_retry"] = True
+                            selected.meta = selected_meta
+                        except Exception:
+                            pass
+
+                        rewritten_draft: DraftPost | None = None
+                        if api_ready and self._gemini_budget_remaining() > 0:
+                            try:
+                                rewritten_draft = self.brain.generate_news_post(
+                                    selected,
+                                    self.settings.authority_links,
+                                    reference_guidance,
+                                    category=category,
+                                    plan={
+                                        "primary_keyword": selected.title,
+                                        "news_category": category,
+                                        "event_id": event_id,
+                                        "run_start_minute": str(run_start_minute or "").strip(),
+                                        "retry_index": int(entropy_retry_index),
+                                        "cluster_id": str((selected.meta or {}).get("cluster_id", "") or ""),
+                                        "entropy_retry": True,
+                                    },
+                                )
+                                if self.brain.call_count:
+                                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                                    self.brain.reset_run_counter()
+                                degraded_note = self._append_note(degraded_note, "entropy_rewrite_gemini")
+                            except Exception as exc:
+                                if self.brain.call_count:
+                                    self.logs.increment_today_gemini_count(self.brain.call_count)
+                                    self.brain.reset_run_counter()
+                                degraded_note = self._append_note(
+                                    degraded_note,
+                                    f"entropy_rewrite_gemini_failed={str(exc)[:120]}",
+                                )
+
+                        if rewritten_draft is None:
+                            local_facet_context = resolve_facet_context(
+                                event_id=event_id,
+                                run_start_minute=str(run_start_minute or "").strip(),
+                                title=str(selected.title or ""),
+                                body=str(selected.body or ""),
+                                category=category,
+                                source_url=str(getattr(selected, "url", "") or ""),
+                                retry_index=int(entropy_retry_index),
+                                llm_candidates=[],
+                                state_path=(self.root / "storage" / "state" / "facet_rotation_state.json")
+                                if not api_ready
+                                else None,
+                                stable_hash_fn=stable_hash,
+                            ).as_dict()
+                            try:
+                                selected_meta = dict(getattr(selected, "meta", {}) or {})
+                                selected_meta["selected_facet"] = str(
+                                    local_facet_context.get("selected_facet", "impact") or "impact"
+                                )
+                                selected.meta = selected_meta
+                            except Exception:
+                                pass
+                            rewritten_draft = self._build_news_post_local_fallback(
+                                selected,
+                                category,
+                                self.settings.authority_links,
+                                facet_context=local_facet_context,
+                            )
+                            degraded_note = self._append_note(degraded_note, "entropy_rewrite_local_fallback")
+
+                        if rewritten_draft is not None:
+                            draft = rewritten_draft
+                            draft.title = self._enforce_seo_title(
+                                title=draft.title,
+                                candidate=selected,
+                                global_keywords=global_keywords,
+                                preferred_keyword=selected.title,
+                            )
+                            self._ensure_min_long_tail_keywords(
+                                candidate=selected,
+                                title=draft.title,
+                                global_keywords=global_keywords,
+                            )
+                            global_keywords = list(getattr(selected, "long_tail_keywords", []) or [])[:8]
+                            base_html = self._sanitize_publish_html(draft.html, domain=current_domain)
+                            base_html = self._canonicalize_html_payload(base_html)
+                            base_html += self._build_internal_links_block(
+                                current_title=draft.title,
+                                current_keywords=global_keywords,
+                                current_device_type="news",
+                                current_cluster_id=category,
+                            )
+                            final_html = self._sanitize_publish_html(base_html, domain=current_domain)
+                            final_html = self._canonicalize_html_payload(final_html)
+                            final_html, removed_news_links = self._strip_forbidden_news_links(final_html)
+                            if removed_news_links > 0:
+                                degraded_note = self._append_note(
+                                    degraded_note,
+                                    f"news_google_link_removed_rewrite={removed_news_links}",
+                                )
+
+                            if bool(getattr(getattr(self.settings, "readability", None), "enabled", True)):
+                                try:
+                                    final_html = optimize_html_readability(final_html, self.settings.readability)
+                                except Exception:
+                                    degraded_note = self._append_note(degraded_note, "readability_failed")
+
+                            if self._title_diversity_enabled:
+                                try:
+                                    title_mix = choose_diverse_title(
+                                        base_title=str(draft.title or ""),
+                                        cluster_id=str((selected.meta or {}).get("cluster_id", "") or ""),
+                                        facet=str((selected.meta or {}).get("selected_facet", "impact") or "impact"),
+                                        category=str(category or ""),
+                                        run_start_minute=str(run_start_minute or ""),
+                                        stable_hash_fn=stable_hash,
+                                        state_path=self._title_diversity_state_path,
+                                        settings=getattr(self.settings, "title_diversity", None),
+                                    )
+                                    diversified_title = str(title_mix.get("title", "") or "").strip()
+                                    if diversified_title:
+                                        draft.title = diversified_title
+                                    alt_titles = title_mix.get("alt_titles", [])
+                                    if isinstance(alt_titles, list):
+                                        draft.alt_titles = [str(x).strip() for x in alt_titles if str(x).strip()]
+                                    degraded_note = self._append_note(
+                                        degraded_note,
+                                        f"title_pattern={int(title_mix.get('pattern_id', -1) or -1)}",
+                                    )
+                                except Exception:
+                                    degraded_note = self._append_note(degraded_note, "title_diversity_failed")
+
+                            if self._source_naturalization_enabled:
+                                try:
+                                    final_html = apply_source_naturalization(
+                                        html=final_html,
+                                        source_url=str(draft.source_url or ""),
+                                        authority_links=list(getattr(self.settings, "authority_links", []) or []),
+                                        settings=getattr(self.settings, "source_naturalization", None),
+                                    )
+                                except Exception:
+                                    degraded_note = self._append_note(
+                                        degraded_note,
+                                        "source_naturalization_failed",
+                                    )
+
+                            if dry_run:
+                                gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
+                            else:
+                                try:
+                                    creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
+                                    gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
+                                        final_html,
+                                        images,
+                                        creds_for_gate,
+                                        preflight_thumbnail_src=preflight_thumb_src,
+                                    )
+                                except Exception:
+                                    pass
+                            entropy_result = check_entropy(final_html, entropy_settings)
+
+                if not bool(entropy_result.get("ok", False)):
+                    exhausted_reason = ",".join(list(entropy_result.get("reasons", []) or [])[:4]) or "unknown"
+                    skip_reason = f"entropy_fail_exhausted:{exhausted_reason}"
+                    self.logs.append_run(
+                        RunRecord(
+                            status="skipped",
+                            score=0,
+                            title=draft.title,
+                            source_url=draft.source_url,
+                            published_url="",
+                            note=self._append_note(skip_reason, degraded_note),
+                        )
+                    )
+                    self._workflow_perf_finish_run("skipped", skip_reason)
+                    return WorkflowResult("skipped", skip_reason)
 
             labels = self._build_public_labels(
                 title=draft.title,
