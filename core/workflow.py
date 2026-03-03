@@ -1071,8 +1071,8 @@ class AgentWorkflow:
             ext_now = [u for u in links_now if u.startswith("http://") or u.startswith("https://")]
             existing = set(ext_now)
             add_urls: list[str] = []
-            if source_url and (not self._is_forbidden_news_url(source_url)):
-                add_urls.append(source_url)
+            # Keep body/source attribution deterministic and safe:
+            # do not inject candidate/source URL into article body.
             for ref in list(getattr(self.settings, "authority_links", []) or []):
                 ref_url = str(ref or "").strip()
                 if not ref_url or self._is_forbidden_news_url(ref_url):
@@ -2843,10 +2843,6 @@ class AgentWorkflow:
                 return "Source"
             return " ".join(x.capitalize() for x in label_parts[:2]) + " Report"
         source_items: list[str] = []
-        if source_url:
-            source_items.append(
-                f'<li><a href="{escape(source_url)}" rel="nofollow noopener" target="_blank">Original report</a></li>'
-            )
         for link in safe_authorities:
             if any(bad in link.lower() for bad in ("google.com", "googleusercontent.com", "googleapis.com")):
                 continue
@@ -3850,7 +3846,7 @@ class AgentWorkflow:
                 try:
                     final_html = apply_source_naturalization(
                         html=final_html,
-                        source_url=str(draft.source_url or ""),
+                        source_url="",
                         authority_links=list(getattr(self.settings, "authority_links", []) or []),
                         settings=getattr(self.settings, "source_naturalization", None),
                     )
@@ -4034,7 +4030,7 @@ class AgentWorkflow:
                                 try:
                                     final_html = apply_source_naturalization(
                                         html=final_html,
-                                        source_url=str(draft.source_url or ""),
+                                        source_url="",
                                         authority_links=list(getattr(self.settings, "authority_links", []) or []),
                                         settings=getattr(self.settings, "source_naturalization", None),
                                     )

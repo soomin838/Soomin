@@ -18,6 +18,7 @@ _ATTR_VARIANTS = (
     "As reported by",
     "From release notes and updates from",
 )
+_FORBIDDEN_SOURCE_DOMAINS = ("google.com", "googleusercontent.com", "googleapis.com")
 
 
 def _setting(settings: dict[str, Any] | Any, key: str, default: Any) -> Any:
@@ -95,6 +96,15 @@ def extract_domain(url: str) -> str:
 def compact_source_label(url: str) -> str:
     domain = extract_domain(url)
     return domain or "official source"
+
+
+def _is_forbidden_source_domain(domain: str) -> bool:
+    low = str(domain or "").strip().lower()
+    if not low:
+        return True
+    if low in _FORBIDDEN_SOURCE_DOMAINS:
+        return True
+    return any(low.endswith("." + bad) for bad in _FORBIDDEN_SOURCE_DOMAINS)
 
 
 def normalize_inline_attribution(html: str, max_inline: int) -> str:
@@ -176,6 +186,8 @@ def normalize_sources_section(
         domain = extract_domain(url)
         if not domain:
             continue
+        if _is_forbidden_source_domain(domain):
+            continue
         if domain in seen_domains:
             continue
         seen_domains.add(domain)
@@ -238,4 +250,3 @@ def apply_source_naturalization(
         return out
     except Exception:
         return src
-
