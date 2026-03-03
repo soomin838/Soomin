@@ -143,8 +143,12 @@ class NewsPackSettings:
     emergency_fill_max_items: int = 3
     max_consecutive_failures: int = 5
     provider_order: list[str] = field(
-        default_factory=lambda: ["pollinations_auth", "pollinations_anon", "gemini"]
+        default_factory=lambda: ["airforce_imagen4", "pollinations_auth", "pollinations_anon", "gemini"]
     )
+    airforce_api_key: str = ""
+    airforce_base_url: str = "https://api.airforce"
+    airforce_image_model: str = "imagen-4"
+    airforce_timeout_sec: int = 45
     pollinations_api_key: str = ""
     pollinations_timeout_sec: int = 35
     gemini_fallback_enabled: bool = True
@@ -883,9 +887,20 @@ def load_settings(path: Path) -> AppSettings:
     publish_raw["r2"] = r2_raw
     raw["publish"] = publish_raw
     # ENV-first override for optional NewsPack provider secrets.
+    news_pack_raw["airforce_api_key"] = str(
+        os.getenv("AIRFORCE_API_KEY") or news_pack_raw.get("airforce_api_key", "")
+    ).strip()
     news_pack_raw["pollinations_api_key"] = str(
         os.getenv("POLLINATIONS_API_KEY") or news_pack_raw.get("pollinations_api_key", "")
     ).strip()
+    if not news_pack_raw["airforce_api_key"]:
+        visual_raw = dict(raw.get("visual", {}) or {})
+        legacy_key = str(visual_raw.get("pollinations_api_key", "") or "").strip()
+        if legacy_key:
+            news_pack_raw["airforce_api_key"] = legacy_key
+            settings_warnings.append(
+                "visual.pollinations_api_key is being reused as news_pack.airforce_api_key; migrate to news_pack.airforce_api_key."
+            )
     if internal_links_raw:
         raw.setdefault("publish", {})
         raw["publish"]["related_posts_min"] = int(internal_links_raw.get("related_link_count", 2))

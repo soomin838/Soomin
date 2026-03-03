@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -17,7 +18,9 @@ def optimize_for_library(src: Path, dst_no_ext: Path, *, max_width: int = 1200, 
             new_h = max(1, int(im.height * ratio))
             im = im.resize((max_width, new_h), Image.Resampling.LANCZOS)
 
-        tmp_png = Path(tempfile.mkstemp(suffix=".png")[1])
+        tmp_png_fd, tmp_png_raw = tempfile.mkstemp(suffix=".png")
+        os.close(tmp_png_fd)
+        tmp_png = Path(tmp_png_raw)
         try:
             try:
                 q = im.quantize(colors=256, method=Image.MEDIANCUT).convert("RGBA")
@@ -38,7 +41,9 @@ def optimize_for_library(src: Path, dst_no_ext: Path, *, max_width: int = 1200, 
         rgb.paste(im, mask=im.split()[-1])
 
         for quality in (82, 78, 74, 70, 66):
-            tmp_jpg = Path(tempfile.mkstemp(suffix=".jpg")[1])
+            tmp_jpg_fd, tmp_jpg_raw = tempfile.mkstemp(suffix=".jpg")
+            os.close(tmp_jpg_fd)
+            tmp_jpg = Path(tmp_jpg_raw)
             try:
                 rgb.save(tmp_jpg, format="JPEG", quality=quality, optimize=True, progressive=True)
                 if tmp_jpg.stat().st_size <= max_kb * 1024:

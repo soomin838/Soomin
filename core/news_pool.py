@@ -216,6 +216,7 @@ class NewsPoolStore:
         source_weights: dict[str, float] | None = None,
         avoid_category: str = "",
         recent_domains: list[str] | None = None,
+        exclude_ids: list[int] | None = None,
     ) -> dict[str, Any] | None:
         self._release_stale_claims()
         safe_days = max(1, int(news_pool_days))
@@ -232,21 +233,34 @@ class NewsPoolStore:
             for x in (recent_domains or [])
             if str(x or "").strip()
         ][:6]
+        exclude_list = []
+        for raw in (exclude_ids or []):
+            try:
+                val = int(raw)
+            except Exception:
+                continue
+            if val > 0:
+                exclude_list.append(val)
+        if exclude_list:
+            exclude_list = sorted(set(exclude_list))[:256]
 
         for _ in range(2):
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                rows = conn.execute(
-                    """
+                sql = """
                     SELECT id, url, title, source, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at, topic_fp
                     FROM news_items
                     WHERE status='queued'
                       AND (published_at='' OR published_at >= ?)
-                    ORDER BY score DESC, published_at DESC
-                    LIMIT ?
-                    """,
-                    (cutoff, safe_top_k),
-                ).fetchall()
+                """
+                params: list[Any] = [cutoff]
+                if exclude_list:
+                    placeholders = ",".join("?" for _ in exclude_list)
+                    sql += f" AND id NOT IN ({placeholders})"
+                    params.extend(exclude_list)
+                sql += " ORDER BY score DESC, published_at DESC LIMIT ?"
+                params.append(safe_top_k)
+                rows = conn.execute(sql, tuple(params)).fetchall()
                 if not rows:
                     conn.execute("COMMIT")
                     return None
@@ -292,6 +306,52 @@ class NewsPoolStore:
                 conn.execute("COMMIT")
                 if changed == 1:
                     return self.get_by_id(selected_id)
+        return None
+
+    def claim_by_id(
+        self,
+        item_id: int,
+        *,
+        news_pool_days: int = 7,
+    ) -> dict[str, Any] | None:
+        self._release_stale_claims()
+        target_id = int(item_id or 0)
+        if target_id <= 0:
+            return None
+        cutoff = _iso(_utc_now() - timedelta(days=max(1, int(news_pool_days))))
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT id, status, published_at
+                FROM news_items
+                WHERE id=?
+                LIMIT 1
+                """,
+                (target_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return None
+            status = str(row["status"] or "").strip().lower()
+            published_at = str(row["published_at"] or "").strip()
+            if status != "queued":
+                conn.execute("COMMIT")
+                return None
+            if published_at and published_at < cutoff:
+                conn.execute("COMMIT")
+                return None
+            changed = conn.execute(
+                """
+                UPDATE news_items
+                SET status='claimed', claimed_at=?
+                WHERE id=? AND status='queued'
+                """,
+                (_iso(), target_id),
+            ).rowcount
+            conn.execute("COMMIT")
+            if changed == 1:
+                return self.get_by_id(target_id)
         return None
 
     def rollback_claim(self, item_id: int) -> bool:

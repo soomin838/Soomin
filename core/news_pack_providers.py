@@ -85,6 +85,125 @@ class PollinationsProvider:
         )
 
 
+class AirforceImageProvider:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = "imagen-4",
+        base_url: str = "https://api.airforce",
+        timeout_sec: int = 45,
+    ) -> None:
+        self.api_key = str(api_key or "").strip()
+        self.model = str(model or "imagen-4").strip()
+        self.base_url = str(base_url or "https://api.airforce").strip().rstrip("/")
+        self.timeout_sec = max(15, int(timeout_sec or 45))
+
+    @property
+    def name(self) -> str:
+        return "airforce_imagen4"
+
+    def generate_image(self, *, prompt: str, width: int = 1280, height: int = 720, seed: int | None = None) -> ProviderResult:
+        if not self.api_key:
+            raise TemporaryProviderError("missing_airforce_key")
+        clean_prompt = re.sub(r"\s+", " ", str(prompt or "").strip())
+        if not clean_prompt:
+            raise BadResponseError("empty_prompt")
+        endpoint = f"{self.base_url}/v1/images/generations"
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "prompt": clean_prompt,
+            # api.airforce imagen endpoints are most stable with square sizes.
+            "size": "1024x1024",
+            "n": 1,
+            "response_format": "b64_json",
+        }
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "x-api-key": self.api_key,
+        }
+        try:
+            resp = requests.post(endpoint, headers=headers, json=payload, timeout=self.timeout_sec)
+        except requests.Timeout as exc:
+            raise TemporaryProviderError("airforce_timeout") from exc
+        except Exception as exc:
+            raise TemporaryProviderError(str(exc)[:180] or "airforce_request_error") from exc
+
+        try:
+            data = resp.json() or {}
+        except json.JSONDecodeError as exc:
+            data = {}
+            if resp.status_code >= 400:
+                raise BadResponseError(f"airforce_http_{resp.status_code}") from exc
+            raise BadResponseError("airforce_non_json") from exc
+
+        error_obj = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error_obj, dict):
+            code = str(error_obj.get("code", "") or "").strip().lower()
+            message = str(error_obj.get("message", "") or "").strip().lower()
+            if resp.status_code == 429 or code == "429" or "rate limit" in message:
+                raise RateLimitError("airforce_rate_limit_429")
+            if resp.status_code in {401, 403} or code in {"401", "403"} or "invalid api key" in message:
+                forced_code = 401 if "invalid api key" in message else int(resp.status_code or 401)
+                raise BadResponseError(f"airforce_http_{forced_code}")
+            if "model not found" in message:
+                raise BadResponseError("airforce_model_not_found")
+            if resp.status_code >= 500:
+                raise TemporaryProviderError(f"airforce_http_{resp.status_code}")
+            raise BadResponseError(f"airforce_api_error:{message[:120]}")
+
+        if resp.status_code == 429:
+            raise RateLimitError("airforce_rate_limit_429")
+        if resp.status_code >= 500:
+            raise TemporaryProviderError(f"airforce_http_{resp.status_code}")
+        if resp.status_code >= 400:
+            raise BadResponseError(f"airforce_http_{resp.status_code}")
+
+        rows = data.get("data", []) if isinstance(data, dict) else []
+        if not isinstance(rows, list) or not rows:
+            raise BadResponseError("airforce_empty_image_payload")
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            encoded = str(row.get("b64_json", "") or "").strip()
+            if encoded:
+                try:
+                    raw = base64.b64decode(encoded)
+                    if len(raw) >= 5 * 1024:
+                        return ProviderResult(
+                            image_bytes=raw,
+                            mime="image/jpeg",
+                            provider=self.name,
+                            meta={"status_code": int(resp.status_code), "bytes": len(raw), "model": self.model},
+                        )
+                except Exception:
+                    pass
+            image_url = str(row.get("url", "") or "").strip()
+            if image_url:
+                try:
+                    img_resp = requests.get(image_url, headers={"Accept": "image/*"}, timeout=self.timeout_sec)
+                    if img_resp.status_code >= 400:
+                        continue
+                    content_type = str(img_resp.headers.get("content-type", "") or "").lower()
+                    if "image/" not in content_type:
+                        continue
+                    raw = bytes(img_resp.content or b"")
+                    if len(raw) < 5 * 1024:
+                        continue
+                    return ProviderResult(
+                        image_bytes=raw,
+                        mime=content_type.split(";")[0].strip() or "image/png",
+                        provider=self.name,
+                        meta={"status_code": int(resp.status_code), "bytes": len(raw), "model": self.model},
+                    )
+                except Exception:
+                    continue
+
+        raise BadResponseError("airforce_empty_image_payload")
+
+
 class GeminiImageProvider:
     def __init__(self, *, api_key: str, model: str = "gemini-2.0-flash", timeout_sec: int = 45) -> None:
         self.api_key = str(api_key or "").strip()

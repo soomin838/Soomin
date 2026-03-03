@@ -14,6 +14,7 @@ from .image_optimizer import optimize_for_library
 from .news_pack_manifest import NewsPackManifest
 from .news_pack_prompt_factory import NewsPackPromptFactory
 from .news_pack_providers import (
+    AirforceImageProvider,
     BadResponseError,
     GeminiImageProvider,
     PollinationsProvider,
@@ -301,7 +302,7 @@ class NewsPackSeeder:
             if str(x or "").strip()
         ]
         if not order:
-            order = ["pollinations_auth", "pollinations_anon", "gemini"]
+            order = ["airforce_imagen4", "pollinations_auth", "pollinations_anon", "gemini"]
         # Enforce provider sequence so auth 429 always falls through to anon first.
         normalized: list[str] = []
         for name in order:
@@ -310,7 +311,7 @@ class NewsPackSeeder:
         if "pollinations_auth" in normalized and "pollinations_anon" not in normalized:
             auth_idx = normalized.index("pollinations_auth")
             normalized.insert(auth_idx + 1, "pollinations_anon")
-        canonical = ["pollinations_auth", "pollinations_anon", "gemini"]
+        canonical = ["airforce_imagen4", "pollinations_auth", "pollinations_anon", "gemini"]
         ordered: list[str] = [name for name in canonical if name in normalized]
         for name in normalized:
             if name not in ordered:
@@ -326,7 +327,28 @@ class NewsPackSeeder:
             return ""
 
         for idx, provider_name in enumerate(order):
-            if provider_name == "pollinations_auth":
+            if provider_name in {"airforce_imagen4", "airforce"}:
+                key = str(getattr(self.settings, "airforce_api_key", "") or "").strip()
+                if not key:
+                    attempts.append(
+                        {
+                            "provider": provider_name,
+                            "status": "skip",
+                            "reason": "missing_api_key",
+                            "provider_try_order": provider_try_order,
+                            "provider_failed": provider_name,
+                            "fail_reason": "missing_api_key",
+                            "next_provider": _next_provider(idx),
+                        }
+                    )
+                    continue
+                provider = AirforceImageProvider(
+                    api_key=key,
+                    model=str(getattr(self.settings, "airforce_image_model", "imagen-4") or "imagen-4"),
+                    base_url=str(getattr(self.settings, "airforce_base_url", "https://api.airforce") or "https://api.airforce"),
+                    timeout_sec=max(20, int(getattr(self.settings, "airforce_timeout_sec", 45) or 45)),
+                )
+            elif provider_name == "pollinations_auth":
                 key = str(getattr(self.settings, "pollinations_api_key", "") or "").strip()
                 if not key:
                     attempts.append(
@@ -487,6 +509,8 @@ class NewsPackSeeder:
 
     def _classify_bad_response(self, *, provider_name: str, error_text: str) -> str:
         text = str(error_text or "").strip().lower()
+        if "model_not_found" in text:
+            return "invalid_image_payload"
         if "http_401" in text:
             return "401"
         if "http_403" in text:

@@ -100,7 +100,7 @@ publish:
   thumbnail_preflight_only: false
   thumbnail_preflight_max_cycles: 6
   thumbnail_preflight_retry_delay_sec: 8
-  min_images_required: 0
+  min_images_required: 5
   max_images_per_post: 5
 internal_links:
   enabled: true
@@ -406,9 +406,14 @@ news_pack:
   emergency_fill_max_items: 3
   max_consecutive_failures: 5
   provider_order:
+  - airforce_imagen4
   - pollinations_auth
   - pollinations_anon
   - gemini
+  airforce_api_key: AIRFORCE_API_KEY
+  airforce_base_url: https://api.airforce
+  airforce_image_model: imagen-4
+  airforce_timeout_sec: 45
   pollinations_api_key: ''
   pollinations_timeout_sec: 35
   gemini_fallback_enabled: true

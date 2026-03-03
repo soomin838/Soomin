@@ -2536,7 +2536,12 @@ class AgentWorkflow:
             f"fetched={fetched_items};upserted={upserted};queued={queued}"
         )
 
-    def _claim_news_item(self, force_refresh_once: bool = True) -> dict[str, Any] | None:
+    def _claim_news_item(
+        self,
+        force_refresh_once: bool = True,
+        retry_event_id: str = "",
+        exclude_item_ids: list[int] | None = None,
+    ) -> dict[str, Any] | None:
         rotation_state = self._load_news_rotation_state()
         avoid_category = str(rotation_state.get("last_news_category", "") or "").strip().lower()
         recent_domains = [
@@ -2544,12 +2549,31 @@ class AgentWorkflow:
             for x in (rotation_state.get("last_domains_used", []) or [])
             if str(x or "").strip()
         ][:6]
+        exclude_set: set[int] = set()
+        for raw in (exclude_item_ids or []):
+            try:
+                val = int(raw)
+            except Exception:
+                continue
+            if val > 0:
+                exclude_set.add(val)
+        retry_norm = str(retry_event_id or "").strip()
+        if retry_norm.isdigit():
+            retry_id = int(retry_norm)
+            if retry_id not in exclude_set:
+                direct = self.news_pool_store.claim_by_id(
+                    retry_id,
+                    news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
+                )
+                if direct is not None:
+                    return direct
         item = self.news_pool_store.claim_one(
             news_pool_days=max(1, int(getattr(self.settings.sources, "news_pool_days", 7) or 7)),
             top_k=max(10, int(getattr(self.settings.sources, "news_pool_pick_top_k", 60) or 60)),
             source_weights=dict(getattr(self.settings.sources, "news_pool_source_weights", {}) or {}),
             avoid_category=avoid_category,
             recent_domains=recent_domains,
+            exclude_ids=sorted(exclude_set),
         )
         if item is not None:
             return item
@@ -2561,6 +2585,7 @@ class AgentWorkflow:
                 source_weights=dict(getattr(self.settings.sources, "news_pool_source_weights", {}) or {}),
                 avoid_category=avoid_category,
                 recent_domains=recent_domains,
+                exclude_ids=sorted(exclude_set),
             )
         return None
 
@@ -2944,6 +2969,7 @@ class AgentWorkflow:
         today_gemini_before: int,
         news_retry_depth: int = 0,
         retry_event_id: str = "",
+        draft_post_id: str = "",
     ) -> WorkflowResult:
         if int(news_retry_depth or 0) > 0:
             return self._run_once_news_mode_impl(
@@ -2956,6 +2982,7 @@ class AgentWorkflow:
                 today_gemini_before=today_gemini_before,
                 news_retry_depth=news_retry_depth,
                 retry_event_id=retry_event_id,
+                draft_post_id=draft_post_id,
             )
         return self._run_with_metrics_guard(
             "news_mode",
@@ -2969,6 +2996,7 @@ class AgentWorkflow:
                 today_gemini_before=today_gemini_before,
                 news_retry_depth=news_retry_depth,
                 retry_event_id=retry_event_id,
+                draft_post_id=draft_post_id,
             ),
         )
 
@@ -2984,9 +3012,10 @@ class AgentWorkflow:
         today_gemini_before: int,
         news_retry_depth: int = 0,
         retry_event_id: str = "",
+        draft_post_id: str = "",
     ) -> WorkflowResult:
         self._progress("news_pool", "뉴스 풀 갱신/클레임", 18)
-        working_draft_id = ""
+        working_draft_id = str(draft_post_id or "").strip()
         claimed_item: dict[str, Any] | None = None
         claimed_id = 0
         claim_finalized = False
@@ -3018,16 +3047,29 @@ class AgentWorkflow:
             selected: TopicCandidate | None = None
             cluster_id = ""
             cluster_skip_count = 0
+            retry_event_mismatch_count = 0
+            excluded_claim_ids: set[int] = set()
+            retry_event_filter = str(retry_event_id or "").strip()
             max_claim_attempts = 6
             for claim_try in range(1, max_claim_attempts + 1):
                 claimed_item = self._profile_call(
                     "news_pool_claim",
-                    lambda: self._claim_news_item(force_refresh_once=bool(claim_try == 1)),
+                    lambda: self._claim_news_item(
+                        force_refresh_once=bool(claim_try == 1),
+                        retry_event_id=retry_event_filter,
+                        exclude_item_ids=sorted(excluded_claim_ids),
+                    ),
                     slow_ms=1800,
                 )
                 if not claimed_item:
                     break
                 attempt_claimed_id = int((claimed_item or {}).get("id", 0) or 0)
+                if attempt_claimed_id > 0 and attempt_claimed_id in excluded_claim_ids:
+                    try:
+                        self.news_pool_store.rollback_claim(attempt_claimed_id)
+                    except Exception:
+                        pass
+                    continue
                 attempt_selected = self._news_item_to_candidate(claimed_item)
                 attempt_event_id = str(
                     (attempt_selected.meta or {}).get("event_id", "")
@@ -3035,7 +3077,10 @@ class AgentWorkflow:
                     or (attempt_selected.meta or {}).get("news_pool_id", "")
                     or attempt_claimed_id
                 ).strip()
-                if str(retry_event_id or "").strip() and attempt_event_id != str(retry_event_id or "").strip():
+                if retry_event_filter and attempt_event_id != retry_event_filter:
+                    retry_event_mismatch_count += 1
+                    if attempt_claimed_id > 0:
+                        excluded_claim_ids.add(attempt_claimed_id)
                     try:
                         self.news_pool_store.rollback_claim(attempt_claimed_id)
                     except Exception:
@@ -3055,10 +3100,19 @@ class AgentWorkflow:
                 attempt_cluster_id = str(attempt_meta.get("cluster_id", "") or "")
                 if should_skip_same_run(attempt_cluster_id, self._seen_cluster_ids_in_run):
                     cluster_skip_count += 1
+                    if attempt_claimed_id > 0:
+                        excluded_claim_ids.add(attempt_claimed_id)
                     degraded_note = self._append_note(
                         degraded_note,
                         f"cluster_skip_same_cycle={attempt_cluster_id or 'none'}",
                     )
+                    if retry_event_filter and attempt_event_id == retry_event_filter:
+                        # Retry target collided with same-run cluster guard; release filter and move on.
+                        retry_event_filter = ""
+                        degraded_note = self._append_note(
+                            degraded_note,
+                            "retry_event_filter_released_on_cluster_skip",
+                        )
                     self._append_workflow_perf(
                         "news_cluster_skip",
                         {
@@ -3082,7 +3136,11 @@ class AgentWorkflow:
                 hold_reason = (
                     f"news_cluster_skip_exhausted:{cluster_skip_count}"
                     if cluster_skip_count > 0
-                    else "news_pool_empty"
+                    else (
+                        f"news_retry_event_mismatch_exhausted:{retry_event_mismatch_count}"
+                        if str(retry_event_filter or "").strip() and retry_event_mismatch_count > 0
+                        else "news_pool_empty"
+                    )
                 )
                 global_blocked, global_reason = self._watchdog_hold_gate(hold_reason)
                 if global_blocked:
@@ -3461,6 +3519,7 @@ class AgentWorkflow:
                             today_gemini_before=today_gemini_before,
                             news_retry_depth=next_depth,
                             retry_event_id=event_id,
+                            draft_post_id=working_draft_id,
                         )
                     if abort_now:
                         hold_reason = f"{hold_reason};watchdog_abort={abort_reason}"
@@ -3514,6 +3573,7 @@ class AgentWorkflow:
                         today_gemini_before=today_gemini_before,
                         news_retry_depth=next_depth,
                         retry_event_id=event_id,
+                        draft_post_id=working_draft_id,
                     )
                 if abort_now:
                     hold_reason = f"{hold_reason};watchdog_abort={abort_reason}"
@@ -4167,6 +4227,7 @@ class AgentWorkflow:
                             today_gemini_before=today_gemini_before,
                             news_retry_depth=int(news_retry_depth) + 1,
                             retry_event_id="",
+                            draft_post_id=working_draft_id,
                         )
                     skip_reason = (
                         f"ledger_skip_watchdog_abort:{abort_reason}"
@@ -6985,7 +7046,24 @@ class AgentWorkflow:
         title = self._strip_wip_title_prefix(str(row.get("title", "") or "").strip())
         base_html = self._strip_wip_checkpoint_banner(str(row.get("content", "") or ""))
         if not title or not base_html:
-            return WorkflowResult("hold", "resume draft payload is empty")
+            post_id = str(row.get("post_id", "") or "").strip()
+            hold_labels = self._normalize_resume_labels(row.get("labels", []))
+            if not hold_labels:
+                hold_labels = ["wip", "stage-hold", "resume-corrupt-payload"]
+            hold_reason = "resume_draft_payload_empty"
+            if post_id:
+                parked_id, parked_note = self._sync_stage_draft_checkpoint(
+                    current_draft_post_id=post_id,
+                    stage="hold",
+                    title=title or "Recovered Draft",
+                    html_body="<p>Resume checkpoint payload was empty and has been parked.</p>",
+                    labels=hold_labels,
+                    reason=hold_reason,
+                )
+                hold_reason = self._append_note(hold_reason, parked_note)
+                if parked_id:
+                    hold_reason = self._append_note(hold_reason, f"draft_checkpoint={parked_id}")
+            return WorkflowResult("hold", hold_reason)
 
         summary_text = self._normalize_excerpt(base_html)[:700]
         draft = DraftPost(
