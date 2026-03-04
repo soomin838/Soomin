@@ -58,6 +58,8 @@ from .topic_growth import TopicGrower
 from .visual import ImageAsset, VisualPipeline
 from .watchdog import Watchdog
 from .r2_uploader import R2Config, upload_file as r2_upload_file
+from .services.media_manager import MediaManagerService
+from .services.metrics_tracker import MetricsTrackerService
 
 
 @dataclass
@@ -92,6 +94,8 @@ class AgentWorkflow:
             gemini_api_key=settings.gemini.api_key,
             r2_config=getattr(settings.publish, "r2", None),
         )
+        self.media_manager = MediaManagerService(self.visual)
+        self.metrics_tracker = MetricsTrackerService()
         self.publisher = Publisher(
             credentials_path=root / settings.blogger.credentials_path,
             blog_id=settings.blogger.blog_id,

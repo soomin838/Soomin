@@ -199,7 +199,7 @@ class OllamaClient:
             "section_texts": sections,
             "rules": {
                 "banner": "software troubleshooting flow diagram",
-                "inline": "software troubleshooting checklist diagram",
+                "inline": "software latest news analysis diagram",
                 "alt_suggestions": "short natural English sentences",
             },
         }

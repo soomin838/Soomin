@@ -74,39 +74,35 @@ class SourceScout:
         "new feature",
     ]
     _MAINSTREAM_TERMS = [
-        "not working",
-        "fix",
-        "troubleshoot",
-        "error",
-        "error code",
+        "breaking",
+        "update",
+        "released",
+        "launch",
+        "announced",
+        "exclusive",
+        "report",
+        "analysis",
+        "trend",
+        "future",
+        "market",
+        "impact",
+        "strategy",
         "windows",
         "mac",
         "iphone",
         "galaxy",
         "android",
-        "wifi",
-        "bluetooth",
-        "internet",
-        "audio",
-        "sound",
-        "mic",
-        "speaker",
-        "battery",
-        "charging",
-        "update",
-        "stuck",
-        "crash",
-        "slow",
-        "lag",
-        "freeze",
-        "driver",
-        "reset",
-        "reinstall",
-        "recovery",
-        "beginner",
-        "step by step",
-        "how to",
-        "checklist",
+        "ai",
+        "llm",
+        "security",
+        "policy",
+        "regulation",
+        "innovation",
+        "roadmap",
+        "leak",
+        "review",
+        "comparison",
+        "versus",
     ]
     _NERD_HEAVY_TERMS = [
         "cuda",
@@ -141,16 +137,16 @@ class SourceScout:
         "fp8",
         "quantization",
     ]
-    _FIX_INTENT_TERMS = [
-        "not working",
-        "fix",
-        "error",
-        "after update",
-        "troubleshoot",
-        "issue",
-        "stuck",
-        "crash",
-        "broken",
+    _NEWS_INTENT_TERMS = [
+        "breaking",
+        "announced",
+        "revealed",
+        "significant",
+        "major update",
+        "new feature",
+        "industry shift",
+        "market move",
+        "analysis",
     ]
     _DEVICE_TOKENS = [
         "windows",
@@ -199,7 +195,7 @@ class SourceScout:
     def collect(self) -> list[TopicCandidate]:
         candidates: list[TopicCandidate] = []
         mode = (self.settings.mode or "mixed").lower()
-        strict_mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower() == "tech_troubleshoot_only"
+        strict_mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower() == "news_interpretation_only"
         trend_candidates: list[TopicCandidate] = []
 
         if mode in {"manual_seed", "seed", "manual"}:
@@ -222,7 +218,7 @@ class SourceScout:
             candidates.extend(self._collect_seeds())
 
         if strict_mode:
-            candidates = self._apply_troubleshoot_mode_filter(candidates)
+            candidates = self._apply_news_mode_filter(candidates)
 
         candidates = self._enrich_candidates_with_longtail(candidates)
         candidates = self._filter_mass_market_candidates(candidates)
@@ -331,11 +327,11 @@ class SourceScout:
         entities = self.get_trending_entities(within_hours=24, limit=12)
         out: list[TopicCandidate] = []
         title_patterns = [
-            "{entity} issue today: 3 troubleshooting fixes to try first",
-            "How to fix common {entity} setup errors in 2026",
-            "{entity} problems this week: practical fixes for normal users",
-            "I tested 3 ways to solve recent {entity} app/device issues",
-            "{entity} not working? step-by-step fixes for beginners",
+            "{entity} Breaking News: What this major update means for users",
+            "Inside the {entity} Strategic Shift: Analysis and Outlook",
+            "Why Everyone is Talking About {entity} This Week",
+            "{entity} Future Roadmap: Leaks, Rumors, and Confirmed Features",
+            "The Real Impact of {entity}'s Latest Announcement",
         ]
         for idx, entity in enumerate(entities, start=1):
             title = title_patterns[(idx - 1) % len(title_patterns)].format(entity=entity)
@@ -344,10 +340,10 @@ class SourceScout:
                 # Drop weak/noisy trends that cannot provide enough semantic expansion.
                 continue
             body = (
-                f"{entity} has seen a fresh spike in user reports and discussion in English tech communities. "
-                "Focus this article on practical troubleshooting steps for normal users, "
-                "including what fails first, what to try next, and how to prevent repeat issues. "
-                "Avoid legal-risk framing and avoid unverified allegations."
+                f"{entity} has seen a fresh spike in industry discussion and news coverage. "
+                "Focus this article on deep analysis and interpretation for a general tech audience, "
+                "explaining why this matters, who wins, and what the future holds for this entity. "
+                "Maintain a professional editorial tone and focus on long-term implications."
             )
             out.append(
                 TopicCandidate(
@@ -355,7 +351,7 @@ class SourceScout:
                     title=title,
                     body=body,
                     score=180 - min(60, idx * 3),
-                    url=f"https://duckduckgo.com/?q={entity.replace(' ', '+')}+troubleshooting",
+                    url=f"https://duckduckgo.com/?q={entity.replace(' ', '+')}+news+analysis",
                     main_entity=entity,
                     long_tail_keywords=long_tail[:6],
                 )
@@ -364,31 +360,31 @@ class SourceScout:
 
     def _collect_global_giant_topics(self) -> list[TopicCandidate]:
         templates = [
-            ("Apple", "iPhone and macOS setup issues"),
-            ("Tesla", "mobile app pairing and update issues"),
-            ("Google", "account, sync, and app reliability issues"),
-            ("Microsoft", "Windows update and Office reliability issues"),
-            ("Amazon", "device setup and account access issues"),
-            ("OpenAI", "assistant app connectivity and workflow issues"),
-            ("Anthropic", "assistant reliability and usage errors"),
-            ("Netflix", "streaming account and playback issues"),
+            ("Apple", "future hardware ecosystem and software services"),
+            ("Tesla", "autonomous driving progress and market strategy"),
+            ("Google", "AI search evolution and ecosystem integration"),
+            ("Microsoft", "AI copilot expansion and enterprise strategy"),
+            ("Amazon", "logistics innovation and cloud service shifts"),
+            ("OpenAI", "next-gen LLM development and safety protocols"),
+            ("Anthropic", "AI alignment breakthroughs and market positioning"),
+            ("Netflix", "content strategy and interactive streaming trends"),
         ]
         out: list[TopicCandidate] = []
         title_patterns = [
-            "{company} issue guide: fixes normal users can apply today",
-            "How I solved recurring {company} app/device problems this week",
-            "{company} troubleshooting checklist for beginners",
-            "What actually fixed my {company} workflow and setup issues",
-            "{company} problems in 2026: practical fixes that save time",
+            "{company} Strategic Analysis: The long-term vision for 2026",
+            "How {company} is Redefining Tech Trends This Quarter",
+            "{company} Market Impact: Who gains and who loses?",
+            "The Unfiltered Truth About {company}'s Latest Move",
+            "Why {company} Matters More Than Ever in the Current Tech Landscape",
         ]
         for company, angle in templates:
             pick = title_patterns[(len(out)) % len(title_patterns)]
             title = pick.format(company=company)
             long_tail = self._derive_long_tail_questions(company, title)
             body = (
-                f"A practical troubleshooting article about {company} and {angle}. "
-                "Focus on symptoms, likely causes, step-by-step fixes, and prevention tips for everyday users. "
-                "Keep tone educational and avoid unverified claims."
+                f"A deep-dive analysis article about {company} and {angle}. "
+                "Focus on market implications, technological innovation, and strategic importance. "
+                "Keep tone insightful and forward-looking for a mainstream editorial audience."
             )
             out.append(
                 TopicCandidate(
@@ -435,12 +431,12 @@ class SourceScout:
         if not candidates:
             return candidates
         out: list[TopicCandidate] = []
-        strict_mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower() == "tech_troubleshoot_only"
+        strict_mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower() == "news_interpretation_only"
         for c in candidates:
             title = str(getattr(c, "title", "") or "")
             body = str(getattr(c, "body", "") or "")
             text = f"{title} {body}".lower()
-            if strict_mode and not self._passes_troubleshoot_mode(c):
+            if strict_mode and not self._passes_news_mode(c):
                 continue
             if any(term in text for term in self._DEEP_TECH_BLOCK_TERMS):
                 continue
@@ -469,15 +465,10 @@ class SourceScout:
 
         return out if out else candidates
 
-    def _apply_troubleshoot_mode_filter(self, candidates: list[TopicCandidate]) -> list[TopicCandidate]:
+    def _apply_news_mode_filter(self, candidates: list[TopicCandidate]) -> list[TopicCandidate]:
         out: list[TopicCandidate] = []
         for c in candidates or []:
-            if not self._passes_troubleshoot_mode(c):
-                continue
-            merged_text = f"{getattr(c, 'title', '')} {getattr(c, 'body', '')}"
-            feature = self._extract_feature_token(merged_text)
-            device = self._infer_device_token(merged_text)
-            if not feature or not device:
+            if not self._passes_news_mode(c):
                 continue
             cleaned_title = re.sub(r"\s+", " ", str(getattr(c, "title", "") or "")).strip(" -:")
             cleaned_title = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", cleaned_title)
@@ -490,16 +481,16 @@ class SourceScout:
             return out
         # deterministic fallback pool to avoid empty candidate set
         fallback_titles = [
-            "Windows 11 Wi-Fi keeps disconnecting after update: 5 safe fixes",
-            "Mac Bluetooth pairing error after macOS update: step-by-step fix",
-            "iPhone USB tethering not working on iOS: 5 checks to try first",
-            "Galaxy printer connection error after update: practical fix flow",
+            "How AI is Revolutionizing Personal Productivity in 2026",
+            "The Future of Computing: Why Your Next Device Might Not Have a Screen",
+            "Breaking Down the Latest Tech Regulation: What Users Need to Know",
+            "Beyond the Hype: A Realistic Look at This Year's Innovation Trends",
         ]
         return [
             TopicCandidate(
-                source="fallback_troubleshoot",
+                source="fallback_news",
                 title=t,
-                body="Practical troubleshooting guide focused on normal users and safe step-by-step fixes.",
+                body="Strategic news analysis and trend interpretation for a mainstream tech audience.",
                 score=120 - idx,
                 url=f"https://duckduckgo.com/?q={quote_plus(t)}",
                 main_entity="",
@@ -508,15 +499,15 @@ class SourceScout:
             for idx, t in enumerate(fallback_titles, start=1)
         ]
 
-    def _passes_troubleshoot_mode(self, candidate: TopicCandidate) -> bool:
+    def _passes_news_mode(self, candidate: TopicCandidate) -> bool:
         text = f"{getattr(candidate, 'title', '')} {getattr(candidate, 'body', '')}".lower()
         banned = [str(x or "").strip().lower() for x in (getattr(self.content_mode, "banned_topic_keywords", []) or []) if str(x or "").strip()]
         if any(token in text for token in banned):
             return False
-        has_device = bool(self._infer_device_token(text))
-        has_feature = bool(self._extract_feature_token(text))
-        has_fix_intent = any(token in text for token in self._FIX_INTENT_TERMS)
-        return bool(has_device and has_feature and has_fix_intent)
+        # 뉴스 모드에서는 특정 장치 토큰이 없어도 괜찮으나, 뉴스성 키워드는 있어야 함
+        has_news_intent = any(token in text for token in self._NEWS_INTENT_TERMS)
+        has_mainstream = any(token in text for token in self._MAINSTREAM_TERMS)
+        return bool(has_news_intent or has_mainstream)
 
     def _extract_feature_token(self, text: str) -> str:
         lower = re.sub(r"\s+", " ", str(text or "").strip().lower())

@@ -22,6 +22,8 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 from .brain import DraftPost
 from .r2_uploader import R2Config, upload_bytes as r2_upload_bytes
 from .settings import VisualSettings
+from .image_prompts import vector_prompt_for_category
+from . import pollinations_client
 
 try:
     import mediapipe as mp  # type: ignore
@@ -1725,10 +1727,35 @@ class VisualPipeline:
 
         role_key = "thumbnail" if str(role or "").strip().lower() == "thumbnail" else "content"
         last_reason_code = "r2_upload_exception"
-        for attempt in range(1, 3):
+        
+        # Generate contextual prompt based on keyword
+        pack = vector_prompt_for_category("generic", context_keyword=keyword)
+        
+        for attempt in range(1, 4):
             tmp_path = (self.temp_dir / f"generated_{role_key}_{int(index):02d}_a{attempt}.png").resolve()
             try:
-                self._create_runtime_fallback_image(tmp_path, role="thumbnail" if role_key == "thumbnail" else "inline")
+                # 1. Try Pollinations first to get a context-rich dynamic image
+                generated_file = None
+                if self.visual_settings.pollinations_enabled:
+                    try:
+                        generated_file = pollinations_client.generate_image(
+                            prompt=pack.prompt,
+                            negative=pack.negative,
+                            out_dir=self.temp_dir,
+                            timeout_sec=max(30, int(self.visual_settings.pollinations_timeout_sec))
+                        )
+                        if generated_file and generated_file.exists():
+                            import shutil
+                            shutil.move(str(generated_file), str(tmp_path))
+                        else:
+                            generated_file = None
+                    except Exception as e:
+                        self._record_reason_code("pollinations_failed")
+
+                # 2. If Pollinations fails or is disabled, fallback to the geometric abstraction
+                if not tmp_path.exists():
+                    self._create_runtime_fallback_image(tmp_path, role="thumbnail" if role_key == "thumbnail" else "inline")
+                    
                 try:
                     self._optimize_image_for_seo(tmp_path, role=role_key)
                 except Exception:

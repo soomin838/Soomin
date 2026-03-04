@@ -244,18 +244,17 @@ class GeminiBrain:
             for idx, item in enumerate(top)
         )
         prompt = (
-            "Pick the single best topic for a practical English troubleshooting blog post for US readers. "
+            "Pick the single best topic for a deep tech news analysis and interpretation blog post. "
             "Output language must be American English only. Never output Korean.\n"
             "Return strict JSON: {\"index\": int, \"score\": int, \"reason\": string}.\n"
             "Score must be 0-100.\n"
-            "Maximize potential CTR and practical value while staying accurate.\n"
-            "Prioritize topics that can be explained in plain language without deep engineering jargon.\n"
-            "Prefer mainstream troubleshooting intents: device not working, update issues, connectivity, audio, performance, app crashes.\n"
-            "Prefer device families: Windows, Mac, iPhone, Galaxy/Android.\n"
-            "Reject 'why everyone is talking' trend framing and generic business culture topics.\n"
+            "Maximize potential CTR and editorial depth while staying accurate.\n"
+            "Prioritize topics that involve significant industry shifts, policy changes, or technological advancements.\n"
+            "Prefer analytical lens: Why this matters, who is affected, and what happens next.\n"
+            "Prefer topics related to: AI, Platform updates, Security, or Market trends.\n"
+            "Reject simple troubleshooting guides or generic 'how-to' content.\n"
             "Prefer topics aligned with dynamic target keywords when relevant.\n"
             "Avoid topics that duplicate recent history URLs/titles unless no alternative exists.\n"
-            "If multiple topics are similar, prioritize the one that offers a fresh perspective not covered in recent history.\n"
             f"Dynamic target keywords: {(target_keywords or [])[:8]}\n"
             f"Recent URLs: {(recent_urls or [])[:12]}\n"
             f"Recent titles: {(recent_titles or [])[:12]}\n"
@@ -328,10 +327,10 @@ class GeminiBrain:
             )
         packed = "\n\n".join(lines)
         prompt = (
-            "From the candidate signals below, generate exactly 5 high-potential English keywords "
-            "for today's US troubleshooting audience. Focus on practical device and app fixes. "
+            "From the candidate signals below, generate exactly 5 high-potential tech news analysis keywords "
+            "for today's US editorial audience. Focus on industry impact and future trends. "
             "Language policy: American English only. Never output Korean.\n"
-            "Keyword intent must be troubleshooting-first: not working, fix, reset, crash, update, connectivity, sound, battery.\n"
+            "Keyword intent must be analytical: industry impact, market shift, regulatory update, future outlook, strategic move.\n"
             "Estimate keywords likely to have strong CTR and advertiser value.\n"
             "Return strict JSON only: {\"keywords\": [\"...\", \"...\", \"...\", \"...\", \"...\"]}\n"
             "Keywords must be short, natural search phrases (2-5 words), no hashtags, no duplicates.\n"
@@ -442,7 +441,7 @@ class GeminiBrain:
         authority_links: list[str],
         pattern_instruction: str,
         reference_guidance: str,
-        domain: str = "tech_troubleshoot",
+        domain: str = "news_interpretation",
         plan: dict | None = None,
     ) -> DraftPost:
         main_keyword = self._resolve_main_keyword(candidate)
@@ -454,7 +453,7 @@ class GeminiBrain:
             body=candidate.body,
         )
         effective_system_instruction = (self.settings.editor_persona or "").strip()
-        if str(domain or "").strip().lower() in {"office_experiment", "tech_troubleshoot"}:
+        if str(domain or "").strip().lower() in {"office_experiment", "news_interpretation"}:
             effective_system_instruction = (
                 effective_system_instruction
                 + "\nAudience constraint: non-technical everyday users. "
@@ -470,36 +469,25 @@ class GeminiBrain:
         plan_keyword = re.sub(r"\s+", " ", str(plan_payload.get("primary_keyword", "") or "")).strip()
         effective_main_keyword = plan_keyword or main_keyword
         prompt = (
-            "Write a 1300-1800 word troubleshooting article in valid HTML body fragment only.\n"
+            "Write a 1300-1800 word news analysis and interpretation article in valid HTML body fragment only.\n"
             "Language policy: US English only. Never output Korean.\n"
             "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
-            "Audience: non-technical US readers who want concrete fixes quickly.\n"
-            "Scope: practical software troubleshooting only.\n"
+            "Audience: US news readers who want insightful commentary on tech trends.\n"
+            "Scope: Deep-dive tech news analysis and editorial interpretation.\n"
             "Do not output internal metadata, pipeline status strings, debug tokens, or schema fragments.\n"
             "Do not mention screenshots or 'see image above'.\n"
-            "Do not describe images and do not write ALT text.\n"
-            "Avoid generic essay style and avoid trend/news framing.\n"
-            "Use short, practical paragraphs and direct imperative steps.\n"
-            "Required exact H2 section order:\n"
-            "Quick Take\n"
-            "Symptoms (How you know it's this issue)\n"
-            "Why This Happens\n"
-            "Fix 1\n"
-            "Fix 2\n"
-            "Fix 3\n"
-            "Fix 4\n"
-            "Fix 5\n"
-            "If None Worked (Safe escalation)\n"
-            "Prevention Checklist\n"
-            "For each Fix section:\n"
-            "- Provide 3-5 concise bullet steps\n"
-            "- Include at least one line starting with 'Expected result:'\n"
-            "- Include at least one line starting with 'If not:'\n"
-            "- Include one 'Time to try:' hint (example: takes 2 minutes)\n"
-            "Final checklist must contain 6-10 bullets.\n"
+            "Avoid generic essay style; use a sharp, editorial journalistic voice.\n"
+            "Use short, engaging paragraphs and insightful section headers.\n"
+            "Required H2 section flow:\n"
+            "The Front Line (Summary of the event)\n"
+            "The Core Impact (Why this matters right now)\n"
+            "Behind the Shift (Background/Analysis)\n"
+            "Looking Ahead (Projections/Future trends)\n"
+            "What This Means for You (Conclusion/Actionability)\n"
+            "Sources\n"
             "Keep legal/ad safety: no defamation, no unverified claims.\n"
             f"Main keyword: {effective_main_keyword}\n"
-            "Long-tail search questions to cover naturally (at least 3):\n"
+            "Analysis questions to cover naturally (at least 3):\n"
             + "\n".join(f"- {kw}" for kw in long_tail_keywords[:6])
             + "\n"
             "Required related LSI terms (use naturally, no stuffing):\n"
@@ -507,7 +495,7 @@ class GeminiBrain:
             + "\n"
             "Follow this selected writing pattern instruction:\n"
             f"{pattern_instruction}\n"
-            "TROUBLESHOOTING PLAN JSON (must follow exactly):\n"
+            "ANALYSIS PLAN JSON (must follow exactly):\n"
             f"{json.dumps(plan_payload, ensure_ascii=False) if plan_payload else '{}'}\n"
             "Include exactly 2 external authority links from this allow-list:\n"
             + "\n".join(authority_links[:8])
@@ -516,14 +504,14 @@ class GeminiBrain:
             f"{reference_guidance}\n"
             "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n"
             "focus_keywords must be a JSON array of short phrases.\n"
-            "Title must remain troubleshooting-first and include one of: not working, fix, error, after update.\n"
+            "Title must be analytical and provocative, avoiding 'How to fix' templates.\n"
             f"Domain routing: {domain}\n"
             f"Source platform: {candidate.source}\n"
             f"Source title: {candidate.title}\n"
             f"Source body: {candidate.body[:4000]}\n"
             f"Source URL: {candidate.url}\n"
         )
-        if str(domain or "").strip().lower() in {"office_experiment", "tech_troubleshoot"}:
+        if str(domain or "").strip().lower() in {"office_experiment", "news_interpretation"}:
             prompt += (
                 "Domain safety rule (tech troubleshooting): do not include DevOps/SRE/deployment/staging/prod/on-call/incident terminology. "
                 "Use plain end-user troubleshooting language only.\n"
@@ -1088,7 +1076,7 @@ class GeminiBrain:
             rewritten_html = str(extracted.get("content_html", "") or extracted.get("html", "") or "").strip()
         if not rewritten_html:
             rewritten_html = str(raw or "").strip()
-        rewritten_html = self._remove_ai_markers(rewritten_html, domain="tech_troubleshoot")
+        rewritten_html = self._remove_ai_markers(rewritten_html, domain="news_interpretation")
         rewritten_html = self._enforce_html_minimum(rewritten_html)
         return rewritten_html
 
@@ -2069,7 +2057,7 @@ class GeminiBrain:
         except json.JSONDecodeError:
             return {}
 
-    def _remove_ai_markers(self, html: str, domain: str = "tech_troubleshoot") -> str:
+    def _remove_ai_markers(self, html: str, domain: str = "news_interpretation") -> str:
         replacements = {
             "delve": "look closely",
             "comprehensive": "practical",
@@ -2189,7 +2177,7 @@ class GeminiBrain:
         freq = Counter(t for t in tokens if t not in stop)
 
         fixed = [
-            "troubleshooting checklist",
+            "latest news analysis",
             "root cause analysis",
             "step by step fix",
             "beginner friendly setup",

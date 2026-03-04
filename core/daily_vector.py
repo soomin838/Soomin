@@ -207,7 +207,7 @@ def _default_dynamic_prompt(category: str, titles: list[str]) -> tuple[str, str]
         "flat vector illustration, soft pastel palette, rounded shapes, minimal shading, clean modern ui-inspired design, "
         "subtle gradient background, centered composition. "
         + scene
-        + " Software troubleshooting context only."
+        + " News and editorial analysis context."
     )
     negative = (
         "no text, no letters, no numbers, no logos, no watermark, no brand names, no UI text, "

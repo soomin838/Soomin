@@ -62,7 +62,7 @@ class ContentQAGate:
         self,
         html: str,
         title: str = "",
-        domain: str = "tech_troubleshoot",
+        domain: str = "news_interpretation",
         keyword: str = "",
         include_image_integrity: bool | None = None,
         phase: str = "post_images",
@@ -89,7 +89,7 @@ class ContentQAGate:
         if qa_mode not in {"quick", "full"}:
             qa_mode = "quick"
         domain_norm = str(domain or "").strip().lower()
-        is_news_domain = domain_norm == "tech_news_explainer"
+        is_news_domain = domain_norm in {"tech_news_explainer", "news_interpretation"}
         if is_news_domain:
             qa_mode = "full"
 
@@ -160,7 +160,7 @@ class ContentQAGate:
                 f"external_links {len(ext_links)}/{min_external_links}",
                 weight=10,
             )
-            attribution_required = 0 if str(domain or "").strip().lower() == "tech_troubleshoot" else 1
+            attribution_required = 0 if str(domain or "").strip().lower() == "news_interpretation" else 1
             _add_check(
                 "source_attribution",
                 len(ext_links) >= attribution_required,
@@ -259,7 +259,7 @@ class ContentQAGate:
             lambda: self._detect_title_intent(title=title, domain=domain),
         )
         _add_check(
-            "title_troubleshoot_intent",
+            "title_news_interpretation_intent",
             not title_intent_fail,
             title_intent_detail or "title_intent_ok",
             weight=0,
@@ -402,33 +402,33 @@ class ContentQAGate:
         failed = {c.key for c in qa_result.failed}
         topic = self._infer_topic(self._to_text(out))
 
-        if "word_count" in failed and not self._has_section(out, "When This Works Best"):
+        if "word_count" in failed and not self._has_section(out, "The Strategic Outlook"):
             out += (
-                "<h2>When This Works Best</h2>"
-                f"<p>For {topic}, choose the approach that reduces confusion first, then optimize for speed. "
-                "A practical order is: clear checklist, visible progress metric, then faster execution.</p>"
-                "<p>Do not optimize what you cannot measure. If metrics are unclear, the safest decision is usually "
-                "the smallest reversible change that improves signal quality.</p>"
+                "<h2>The Strategic Outlook</h2>"
+                f"<p>Regarding {topic}, the long-term impact depends on market adoption and regulatory clarity. "
+                "Early movers will likely focus on ecosystem integration, while others wait for standardization.</p>"
+                "<p>Success in this landscape requires a balance between aggressive innovation and cautious risk management. "
+                "Observing the shift in competitive dynamics is the key next step.</p>"
             )
-        if "heading_structure" in failed and not self._has_section(out, "Where It Usually Breaks"):
+        if "heading_structure" in failed and not self._has_section(out, "Industry Challenges"):
             out += (
-                "<h2>Where It Usually Breaks</h2>"
-                "<h3>What Fails Early</h3><p>People skip the basic checklist and jump to optimization.</p>"
-                "<h3>What Fails Late</h3><p>The team has no clear rule for when to pause and correct course.</p>"
+                "<h2>Industry Challenges</h2>"
+                "<h3>Primary Roadblocks</h3><p>Integrating new technological shifts often clashes with legacy infrastructure.</p>"
+                "<h3>Secondary Risks</h3><p>Data privacy and cross-platform compatibility remain the biggest hurdles for scaled adoption.</p>"
             )
         if "actionability" in failed:
             li_count = len(re.findall(r"<li\\b", out, flags=re.IGNORECASE))
             need = max(0, self.settings.min_list_items - li_count)
             if need > 0:
                 steps = [
-                    "Pin one baseline metric before any change.",
-                    "Change one variable at a time.",
-                    "Capture before/after snapshots for traces and config.",
-                    "Define a pause-and-retry trigger with numeric threshold.",
-                    "Record one what-worked finding and one preventive action.",
-                    "Link notes to the weekly action plan.",
+                    "Monitor market reactions to the latest baseline changes.",
+                    "Analyze competitor responses in real-time.",
+                    "Review adoption metrics across diverse user segments.",
+                    "Assess regulatory compliance impact.",
+                    "Establish a long-term strategic roadmap update.",
+                    "Publish a transparency report on initial outcomes.",
                 ][:need]
-                out += "<h3>Execution Steps</h3><ul>" + "".join(f"<li>{s}</li>" for s in steps) + "</ul>"
+                out += "<h3>Strategic Action Items</h3><ul>" + "".join(f"<li>{s}</li>" for s in steps) + "</ul>"
         if "authority_links" in failed or "external_links" in failed:
             out = self.improve_with_feedback(
                 out,
@@ -436,9 +436,9 @@ class ContentQAGate:
             )
         if "burstiness" in failed and not self._burstiness_ok(self._to_text(out)):
             out += (
-                "<p>Short version: test less at once.</p>"
-                "<p>The longer version is operationally simple but culturally hard: reduce concurrent change surface, "
-                "measure first, and pause when task ownership is unclear.</p>"
+                "<p>In summary: the market shift is accelerating.</p>"
+                "<p>The broader implications are clear: adaptation is no longer optional. "
+                "Organizations must prioritize agility and data-driven insights to remain competitive.</p>"
             )
         if "no_ai_markers" in failed:
             out = self._strip_banned_markers(out)
@@ -462,46 +462,46 @@ class ContentQAGate:
         min_authority_links = max(0, int(getattr(self.settings, "min_authority_links", 0) or 0))
         min_external_links = max(0, int(getattr(self.settings, "min_external_links", 0) or 0))
 
-        if h2_count < self.settings.min_h2 and not self._has_section(out, "What Actually Works"):
+        if h2_count < self.settings.min_h2 and not self._has_section(out, "Core Implications"):
             out += (
-                "<h2>What Actually Works</h2>"
-                f"<p>For {topic}, prioritize choices that are measurable, reversible, and team-operable. "
-                "Speed matters only after clarity and repeatability are secured.</p>"
+                "<h2>Core Implications</h2>"
+                f"<p>For {topic}, the development signals a significant departure from previous trends. "
+                "Innovation here is not just incremental but foundational to the next decade of tech.</p>"
             )
             h2_count += 1
-        if h3_count < self.settings.min_h3 and not self._has_section(out, "Execution Guardrails"):
+        if h3_count < self.settings.min_h3 and not self._has_section(out, "Competitive Landscape"):
             out += (
-                "<h3>Execution Guardrails</h3>"
-                "<p>Define one owner, one pause trigger, and one success metric before execution.</p>"
+                "<h3>Competitive Landscape</h3>"
+                "<p>Major players are already positioning themselves to leverage this shift for market dominance.</p>"
             )
             h3_count += 1
 
         if li_count < self.settings.min_list_items:
             need = self.settings.min_list_items - li_count
             steps = [
-                "Establish a baseline metric and expected delta.",
-                "Apply one change per test window.",
-                "Snapshot configuration and runtime version before deploy.",
-                "Attach a pause condition to an exact threshold.",
-                "Run post-release verification with real traffic segments.",
-                "Document one lesson and one permanent preventive control.",
-                "Tag unresolved risk with an owner and due date.",
-                "Review impact after 24 hours and adjust scope.",
+                "Track primary development milestones in real-time.",
+                "Review community feedback from leading technical forums.",
+                "Verify official statements against leaked roadmaps.",
+                "Analyze the impact on cross-platform accessibility.",
+                "Benchmark performance against legacy industry standards.",
+                "Evaluate the long-term sustainability of the new model.",
+                "Identify potential regulatory friction points early.",
+                "Predict the next major shift based on current momentum.",
             ][:need]
-            out += "<h3>Action Checklist</h3><ul>" + "".join(f"<li>{s}</li>" for s in steps) + "</ul>"
+            out += "<h3>Key Technical Indicators</h3><ul>" + "".join(f"<li>{s}</li>" for s in steps) + "</ul>"
 
-        if words < self.settings.min_word_count and not self._has_section(out, "What I Learned After Testing"):
+        if words < self.settings.min_word_count and not self._has_section(out, "Deep Dive Analysis"):
             out += (
-                "<h2>What I Learned After Testing</h2>"
-                f"<p>Teams working on {topic} usually fail when assumptions are treated as facts. "
-                "A robust process separates hypothesis, evidence, and daily work decisions. "
-                "When evidence is thin, reduce blast radius first and optimize later.</p>"
-                "<p>In practice, the winning pattern is small reversible changes with dense measurement. "
-                "This reduces rework risk, shortens delay cycles, and improves team confidence. "
-                "The same principle applies to product velocity: disciplined iteration beats heroic rewrites.</p>"
-                "<p>Another overlooked factor is context parity. A demo can pass while real usage still fails "
-                "because assumptions about workload and timing were unrealistic. "
-                "Treat context validation as a first-class requirement, not an afterthought.</p>"
+                "<h2>Deep Dive Analysis</h2>"
+                f"<p>Analyzing {topic} reveals a complex intersection of engineering ambition and market reality. "
+                "While the technical breakthrough is impressive, the real story lies in its potential to disrupt "
+                "established profit models and user behaviors across the globe.</p>"
+                "<p>In the coming months, we expect to see a cascade of similar moves from competitors. "
+                "This isn't just a win for one company; it's a signal that the entire category is entering a "
+                "new phase of maturity. Watch for how this affects the broader tech supply chain as well.</p>"
+                "<p>Ultimately, the users who benefit most will be those who adapt their workflows "
+                "early to accommodate these new platform capabilities. The shift is already underway, "
+                "and its momentum shows no signs of slowing down.</p>"
             )
 
         if self.authority_links and len(allowed_links) < min_authority_links:
@@ -681,8 +681,8 @@ class ContentQAGate:
         if (not targeted or "domain_drift" in failed):
             lower_domain = str((qa_result.domain if qa_result else "") or "").strip().lower()
             disallowed_terms = (
-                self.settings.disallowed_terms_tech_troubleshoot
-                if lower_domain == "tech_troubleshoot"
+                self.settings.disallowed_terms_news_interpretation
+                if lower_domain == "news_interpretation"
                 else self.settings.disallowed_terms_office_experiment
             )
             for term in (disallowed_terms or []):
@@ -711,11 +711,11 @@ class ContentQAGate:
 
     def _link_requirements(self, domain: str) -> tuple[int, int]:
         lower_domain = str(domain or "").strip().lower()
-        if lower_domain == "tech_troubleshoot":
+        if lower_domain == "news_interpretation":
             auth_req = int(
                 getattr(
                     self.settings,
-                    "min_authority_links_tech_troubleshoot",
+                    "min_authority_links_news_interpretation",
                     min(1, int(getattr(self.settings, "min_authority_links", 0) or 0)),
                 )
                 or 0
@@ -723,7 +723,7 @@ class ContentQAGate:
             ext_req = int(
                 getattr(
                     self.settings,
-                    "min_external_links_tech_troubleshoot",
+                    "min_external_links_news_interpretation",
                     min(1, int(getattr(self.settings, "min_external_links", 0) or 0)),
                 )
                 or 0
@@ -1111,13 +1111,13 @@ class ContentQAGate:
         return out.strip()
     def _detect_domain_drift(self, text: str, domain: str) -> tuple[bool, str]:
         lower_domain = str(domain or "").strip().lower()
-        if lower_domain not in {"office_experiment", "tech_troubleshoot"}:
+        if lower_domain not in {"office_experiment", "news_interpretation"}:
             return False, ""
         lower = str(text or "").lower()
         hits: list[str] = []
         disallowed_terms = (
-            self.settings.disallowed_terms_tech_troubleshoot
-            if lower_domain == "tech_troubleshoot"
+            self.settings.disallowed_terms_news_interpretation
+            if lower_domain == "news_interpretation"
             else self.settings.disallowed_terms_office_experiment
         )
         for term in (disallowed_terms or []):
@@ -1126,13 +1126,13 @@ class ContentQAGate:
                 continue
             if t in lower:
                 hits.append(t)
-        threshold = 1 if lower_domain == "tech_troubleshoot" else 2
+        threshold = 1 if lower_domain == "news_interpretation" else 2
         if len(hits) >= threshold:
             return True, ",".join(sorted(set(hits))[:6])
         return False, ""
 
     def _detect_title_intent(self, title: str, domain: str) -> tuple[bool, str]:
-        if str(domain or "").strip().lower() != "tech_troubleshoot":
+        if str(domain or "").strip().lower() != "news_interpretation":
             return False, ""
         raw = re.sub(r"\s+", " ", str(title or "")).strip().lower()
         if not raw:
@@ -1141,16 +1141,16 @@ class ContentQAGate:
             str(x or "").strip().lower()
             for x in (getattr(self.settings, "required_title_tokens_any", []) or [])
             if str(x).strip()
-        ] or ["not working", "fix", "error", "after update"]
+        ] or ["breaking", "strategic", "analysis", "future", "market", "impact", "innovation"]
         if not any(token in raw for token in required):
-            return True, "missing_required_troubleshoot_token"
+            return True, "missing_required_news_interpretation_token"
         return False, ""
 
     def _detect_missing_story_block(self, text: str, domain: str) -> tuple[bool, str]:
         if not bool(getattr(self.settings, "require_story_block", True)):
             return False, ""
         # Apply for narrative domains.
-        if str(domain or "").strip().lower() not in {"office_experiment", "tech_troubleshoot", "ai_prompt_guide"}:
+        if str(domain or "").strip().lower() not in {"office_experiment", "news_interpretation", "ai_prompt_guide"}:
             return False, ""
         lower = str(text or "").lower()
         story_markers = [
@@ -1274,21 +1274,23 @@ class ContentQAGate:
 
         # 3) Inject grounded first-person texture if missing.
         if any(k in hard for k in ["h06_concrete_example_exists", "h31_direct_experience_present", "h44_sensory_information_present"]):
-            if not self._has_section(out, "What It Felt Like In Practice"):
+            if not self._has_section(out, "Strategic Insights from the Field"):
                 out += (
-                    "<h3>What It Felt Like In Practice</h3>"
-                    "<p>I tested this during a regular workday, not in a perfect demo setup. "
-                    "The room was noisy, the deadline was close, and the first attempt failed because I changed too much at once.</p>"
-                    "<p>After rolling back and trying one smaller step, the workflow became predictable enough to trust.</p>"
+                    "<h3>Strategic Insights from the Field</h3>"
+                    "<p>Observations from recent market shifts suggest that the real challenge isn't the technology itself, "
+                    "but the speed of adoption across different infrastructure layers. "
+                    "In our recent analysis, we noticed a sharp divergence between early innovators and standard followers.</p>"
+                    "<p>The winning move is rarely the most obvious one; it's the one that aligns most closely with long-term ecosystem stability.</p>"
                 )
 
         # 4) If list-heavy, add narrative block to rebalance rhythm.
         if any(k in hard for k in ["h08_lists_not_dominant", "h47_bullet_points_not_excessive"]):
-            if not self._has_section(out, "Short Story From One Real Run"):
+            if not self._has_section(out, "The Transformation Narrative"):
                 out += (
-                    "<h3>Short Story From One Real Run</h3>"
-                    "<p>I expected the checklist alone to solve it, but the bigger issue was decision timing. "
-                    "Once we agreed on one metric and one pause trigger, the noise dropped and progress became visible.</p>"
+                    "<h3>The Transformation Narrative</h3>"
+                    "<p>History shows that these types of shifts often feel like noise until they reach a critical mass. "
+                    "The current announcement isn't just a isolated event; it's the culmination of years of R&D "
+                    "and strategic positioning from a handful of major industry players.</p>"
                 )
 
         # 5) If too uniform, force rhythm variation.
@@ -1346,9 +1348,11 @@ class ContentQAGate:
         elif "github.com" in domain:
             note = "Primary project context, issues, and release-level evidence."
         elif "stackexchange.com" in domain:
-            note = "Community-tested edge cases and troubleshooting patterns."
+            note = "Expert community perspectives on technical edge cases."
+        elif "reuters.com" in domain or "bloomberg.com" in domain or "techcrunch.com" in domain:
+            note = "Journalistic analysis and reporting on market trends."
         else:
-            note = "Authoritative reference used for verification."
+            note = "Authoritative source for factual verification and analysis."
         return f'<a href="{url}" rel="nofollow noopener" target="_blank">{url}</a> - {note}'
 
     def _has_banned_markers(self, text: str) -> bool:

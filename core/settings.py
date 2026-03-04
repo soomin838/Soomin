@@ -321,8 +321,8 @@ class QualitySettings:
     min_list_items: int = 3
     min_external_links: int = 1
     min_authority_links: int = 1
-    min_external_links_tech_troubleshoot: int = 1
-    min_authority_links_tech_troubleshoot: int = 1
+    min_external_links_news_interpretation: int = 1
+    min_authority_links_news_interpretation: int = 1
     banned_markers: list[str] = field(
         default_factory=lambda: [
             "delve",
@@ -359,7 +359,7 @@ class QualitySettings:
             "incident severity",
         ]
     )
-    disallowed_terms_tech_troubleshoot: list[str] = field(
+    disallowed_terms_news_interpretation: list[str] = field(
         default_factory=lambda: [
             "why everyone is talking",
             "productivity breakthrough",
@@ -496,7 +496,7 @@ class ContentPolicySettings:
 
 @dataclass
 class ContentModeSettings:
-    mode: str = "tech_news_only"
+    mode: str = "news_interpretation"
     allowed_devices: list[str] = field(default_factory=lambda: ["windows", "mac", "iphone", "galaxy"])
     banned_topic_keywords: list[str] = field(
         default_factory=lambda: [
@@ -525,7 +525,7 @@ def is_news_mode(settings: "AppSettings | None") -> bool:
         mode = str(getattr(getattr(settings, "content_mode", None), "mode", "") or "").strip().lower()
     except Exception:
         return False
-    return mode == "tech_news_only"
+    return mode == "news_interpretation"
 
 
 def is_troubleshoot_mode(settings: "AppSettings | None") -> bool:
@@ -533,7 +533,7 @@ def is_troubleshoot_mode(settings: "AppSettings | None") -> bool:
         mode = str(getattr(getattr(settings, "content_mode", None), "mode", "") or "").strip().lower()
     except Exception:
         return True
-    return mode != "tech_news_only"
+    return mode != "news_interpretation"
 
 
 @dataclass
@@ -707,8 +707,8 @@ def load_settings(path: Path) -> AppSettings:
         disallowed = qa_raw.get("disallowed_terms", {}) or {}
         if isinstance(disallowed, dict) and "office_experiment" in disallowed:
             quality_raw["disallowed_terms_office_experiment"] = disallowed.get("office_experiment", [])
-        if isinstance(disallowed, dict) and "tech_troubleshoot" in disallowed:
-            quality_raw["disallowed_terms_tech_troubleshoot"] = disallowed.get("tech_troubleshoot", [])
+        if isinstance(disallowed, dict) and "news_interpretation" in disallowed:
+            quality_raw["disallowed_terms_news_interpretation"] = disallowed.get("news_interpretation", [])
         story = qa_raw.get("require_story_block", {}) or {}
         if isinstance(story, dict):
             if "enabled" in story:
@@ -746,14 +746,14 @@ def load_settings(path: Path) -> AppSettings:
         if banned_topics:
             existing = [
                 str(x).strip().lower()
-                for x in (quality_raw.get("disallowed_terms_tech_troubleshoot", []) or [])
+                for x in (quality_raw.get("disallowed_terms_news_interpretation", []) or [])
                 if str(x).strip()
             ]
             merged = existing[:]
             for token in banned_topics:
                 if token not in merged:
                     merged.append(token)
-            quality_raw["disallowed_terms_tech_troubleshoot"] = merged
+            quality_raw["disallowed_terms_news_interpretation"] = merged
 
     # Mirror spec blocks into runtime-compatible legacy settings.
     if content_raw:
