@@ -39,7 +39,6 @@ from ui.theme.theme_manager import ThemeManager
 from ui.widgets.glass_card import GlassCard
 from ui.widgets.log_panel import LogPanel
 from ui.widgets.motion_button import MotionButton
-from ui.widgets.timeline_step import TimelineStep
 from ui.widgets.top_nav import TopNav
 
 
@@ -203,151 +202,105 @@ class MainWindow(QMainWindow):
         self.content_row.setSpacing(10)
         root.addLayout(self.content_row, 5)
 
-        # Left column
+        # Left column - Hero Mascot Central
         left = QWidget()
         left.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         left_col = QVBoxLayout(left)
         left_col.setContentsMargins(0, 0, 0, 0)
-        left_col.setSpacing(10)
+        left_col.setSpacing(20)
 
         self.hero_card = GlassCard(state="active")
         self.hero_card.setObjectName("HeroCard")
         hero_layout = QVBoxLayout(self.hero_card)
-        hero_layout.setContentsMargins(14, 14, 14, 14)
-        hero_layout.setSpacing(10)
-
-        hero_head = QHBoxLayout()
-        hero_head.setSpacing(10)
+        hero_layout.setContentsMargins(30, 30, 30, 30)
+        hero_layout.setSpacing(15)
 
         self.mascot_canvas = MascotCanvas()
-        self.mascot_canvas.setMinimumSize(260, 190)
-        hero_head.addWidget(self.mascot_canvas, 1)
+        self.mascot_canvas.setMinimumSize(400, 320)
+        hero_layout.addWidget(self.mascot_canvas, 0, Qt.AlignmentFlag.AlignCenter)
 
-        right_info = QVBoxLayout()
-        right_info.setSpacing(8)
-        hero_title = QLabel("현재 작업 요약")
-        hero_title.setObjectName("Subtitle")
-        self.hero_stage = QLabel("대기")
+        self.hero_stage = QLabel("대기 중")
         self.hero_stage.setObjectName("Title")
-        self.hero_stage.setWordWrap(True)
-        self.hero_task = QLabel("작업 준비 중")
-        self.hero_task.setObjectName("ValueSmall")
+        self.hero_stage.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hero_stage.setStyleSheet("font-size: 34px; margin-top: 10px;")
+        
+        self.hero_task = QLabel("리지는 새로운 소식을 찾을 준비가 됐어요! ✨")
+        self.hero_task.setObjectName("Subtitle")
+        self.hero_task.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hero_task.setWordWrap(True)
-        self.hero_progress_value = QLabel("0%")
-        self.hero_progress_value.setObjectName("Value")
+        self.hero_task.setStyleSheet("font-size: 18px; color: #3182f6; font-weight: 600;")
+
         self.hero_progress = QProgressBar()
         self.hero_progress.setRange(0, 100)
         self.hero_progress.setValue(0)
-        self.hero_primary_btn = MotionButton("즉시 실행")
+        self.hero_progress.setFixedHeight(12)
+        
+        self.hero_primary_btn = MotionButton("지금 시작하기 🚀")
         self.hero_primary_btn.setObjectName("PrimaryBtn")
+        self.hero_primary_btn.setMinimumHeight(56)
         self.hero_primary_btn.clicked.connect(self._on_primary_action)
 
-        right_info.addWidget(hero_title)
-        right_info.addWidget(self.hero_stage)
-        right_info.addWidget(self.hero_task)
-        right_info.addWidget(self.hero_progress_value)
-        right_info.addWidget(self.hero_progress)
-        right_info.addStretch(1)
-        right_info.addWidget(self.hero_primary_btn)
-        hero_head.addLayout(right_info, 1)
-        hero_layout.addLayout(hero_head)
+        hero_layout.addWidget(self.hero_stage)
+        hero_layout.addWidget(self.hero_task)
+        hero_layout.addSpacing(10)
+        hero_layout.addWidget(self.hero_progress)
+        hero_layout.addSpacing(20)
+        hero_layout.addWidget(self.hero_primary_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        hero_layout.addStretch(1)
 
-        self.hero_card.setMinimumHeight(300)
-        left_col.addWidget(self.hero_card, 3)
+        left_col.addWidget(self.hero_card, 5)
 
+        # Timeline integration into left below hero
         self.timeline_card = GlassCard()
         timeline_layout = QVBoxLayout(self.timeline_card)
-        timeline_layout.setContentsMargins(12, 12, 12, 12)
-        timeline_layout.setSpacing(8)
-        t_title = QLabel("Workflow Timeline")
-        t_title.setObjectName("Subtitle")
+        timeline_layout.setContentsMargins(20, 20, 20, 20)
+        t_title = QLabel("현재 진행 워크플로우")
+        t_title.setObjectName("ValueSmall")
         self.pipeline_canvas = PipelineCanvas()
-        self.timeline_steps = [
-            TimelineStep("Source", "◎"),
-            TimelineStep("Draft", "✎"),
-            TimelineStep("Story", "✦"),
-            TimelineStep("SEO", "#"),
-            TimelineStep("Image", "▣"),
-            TimelineStep("HTML", "</>"),
-            TimelineStep("Publish", "✓"),
-        ]
-        self.step_grid = QGridLayout()
-        self.step_grid.setHorizontalSpacing(8)
-        self.step_grid.setVerticalSpacing(8)
-        self._timeline_columns = 4
-        for idx, step in enumerate(self.timeline_steps):
-            self.step_grid.addWidget(step, idx // self._timeline_columns, idx % self._timeline_columns)
+        self.pipeline_canvas.setMinimumHeight(100)
         timeline_layout.addWidget(t_title)
         timeline_layout.addWidget(self.pipeline_canvas)
-        timeline_layout.addLayout(self.step_grid)
-        self.timeline_card.setMinimumHeight(290)
-        left_col.addWidget(self.timeline_card, 4)
+        left_col.addWidget(self.timeline_card, 2)
 
         self.left_col_widget = left
-        self.content_row.addWidget(left, 3)
+        self.content_row.addWidget(left, 5)
 
-        # Right column
+        # Right column - Summary & Logs
         right = QWidget()
         right.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         right_col = QVBoxLayout(right)
         right_col.setContentsMargins(0, 0, 0, 0)
-        right_col.setSpacing(10)
+        right_col.setSpacing(15)
+
+        # Combined Info Panel (Usage + Schedule)
+        self.info_panel = GlassCard()
+        info_lay = QVBoxLayout(self.info_panel)
+        info_lay.setContentsMargins(20, 20, 20, 20)
+        info_title = QLabel("오늘의 리포트 📋")
+        info_title.setObjectName("ValueSmall")
+        self.usage_lines = QLabel("-")
+        self.usage_lines.setObjectName("ValueSmall")
+        self.usage_lines.setStyleSheet("color: #4e5968; font-weight: 400;")
+        info_lay.addWidget(info_title)
+        info_lay.addWidget(self.usage_lines)
+        right_col.addWidget(self.info_panel, 3)
 
         self.error_panel = GlassCard(state="warning")
         err_layout = QVBoxLayout(self.error_panel)
-        err_layout.setContentsMargins(12, 12, 12, 12)
-        err_layout.setSpacing(8)
-        err_title = QLabel("Errors & Actions")
-        err_title.setObjectName("Subtitle")
+        err_layout.setContentsMargins(20, 20, 20, 20)
+        err_title = QLabel("알림 및 이슈")
+        err_title.setObjectName("ValueSmall")
         self.error_cards_host = QWidget()
         self.error_cards_wrap = QVBoxLayout(self.error_cards_host)
-        self.error_cards_wrap.setSpacing(8)
-        self.error_cards_wrap.setContentsMargins(0, 0, 0, 0)
         self.error_scroll = QScrollArea()
         self.error_scroll.setWidgetResizable(True)
-        self.error_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.error_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.error_scroll.setWidget(self.error_cards_host)
         err_layout.addWidget(err_title)
         err_layout.addWidget(self.error_scroll, 1)
-        self.error_panel.setMinimumHeight(210)
         right_col.addWidget(self.error_panel, 4)
 
-        self.usage_panel = GlassCard()
-        usage_layout = QVBoxLayout(self.usage_panel)
-        usage_layout.setContentsMargins(12, 12, 12, 12)
-        usage_layout.setSpacing(6)
-        usage_title = QLabel("Usage / Quota")
-        usage_title.setObjectName("Subtitle")
-        self.usage_lines = QLabel("-")
-        self.usage_lines.setObjectName("ValueSmall")
-        self.usage_lines.setWordWrap(True)
-        usage_layout.addWidget(usage_title)
-        usage_layout.addWidget(self.usage_lines)
-        right_col.addWidget(self.usage_panel, 2)
-
-        self.schedule_panel = GlassCard()
-        sched_layout = QVBoxLayout(self.schedule_panel)
-        sched_layout.setContentsMargins(12, 12, 12, 12)
-        sched_layout.setSpacing(8)
-        sched_title = QLabel("Scheduled Queue (max 10)")
-        sched_title.setObjectName("Subtitle")
-        self.schedule_host = QWidget()
-        self.schedule_rows = QVBoxLayout(self.schedule_host)
-        self.schedule_rows.setSpacing(6)
-        self.schedule_rows.setContentsMargins(0, 0, 0, 0)
-        self.schedule_scroll = QScrollArea()
-        self.schedule_scroll.setWidgetResizable(True)
-        self.schedule_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.schedule_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.schedule_scroll.setWidget(self.schedule_host)
-        sched_layout.addWidget(sched_title)
-        sched_layout.addWidget(self.schedule_scroll, 1)
-        self.schedule_panel.setMinimumHeight(180)
-        right_col.addWidget(self.schedule_panel, 3)
-
         self.right_col_widget = right
-        self.content_row.addWidget(right, 2)
+        self.content_row.addWidget(right, 3)
 
         # Bottom bar
         self.bottom_bar = GlassCard()
@@ -424,24 +377,6 @@ class MainWindow(QMainWindow):
         y = max(0, self.app_root.height() - h - margin)
         self.toast_manager.setGeometry(x, y, w, h)
 
-    def _relayout_timeline_steps(self) -> None:
-        if not hasattr(self, "step_grid"):
-            return
-        width = max(1, self.timeline_card.width())
-        if width < 620:
-            target_cols = 2
-        elif width < 900:
-            target_cols = 3
-        else:
-            target_cols = 4
-        if target_cols == getattr(self, "_timeline_columns", 4):
-            return
-        self._timeline_columns = target_cols
-        while self.step_grid.count():
-            self.step_grid.takeAt(0)
-        for idx, step in enumerate(self.timeline_steps):
-            self.step_grid.addWidget(step, idx // self._timeline_columns, idx % self._timeline_columns)
-
     def _bind_top_nav(self) -> None:
         self.top_nav.refresh_clicked.connect(self._on_refresh_clicked)
         self.top_nav.settings_clicked.connect(self.open_settings)
@@ -501,22 +436,50 @@ class MainWindow(QMainWindow):
         snap["insights_snapshot"] = dict(self._insights_snapshot or {})
         self.controller._ui_insights_snapshot = dict(self._insights_snapshot or {})
 
-        self._apply_top_status(snap)
-        self._apply_hero(snap)
-        self._apply_timeline(snap)
-        now_epoch = time.time()
-        refresh_heavy = bool(force or self._force_heavy_refresh)
-        if refresh_heavy or now_epoch >= self._next_errors_panel_refresh_epoch:
-            self._apply_errors_panel(snap)
-            self._next_errors_panel_refresh_epoch = now_epoch + 8.0
-        if refresh_heavy or now_epoch >= self._next_usage_panel_refresh_epoch:
-            self._apply_usage_panel(snap)
-            self._next_usage_panel_refresh_epoch = now_epoch + 10.0
-        if refresh_heavy or now_epoch >= self._next_schedule_panel_refresh_epoch:
-            self._apply_schedule_panel(snap)
-            self._next_schedule_panel_refresh_epoch = now_epoch + 20.0
-        self._force_heavy_refresh = False
-        self._apply_recent_log_line(snap)
+        msg = str(snap.get("last_message", "") or "")
+
+        # Mascot-style messages
+        status_map = {
+            "Idle": "리지는 지금 꿀잠 자는 중... 💤",
+            "Running": "리지가 열심히 소식을 분석하고 있어요! ✎",
+            "Hold": "잠시만요! 리지가 생각을 정리하고 있어요. 🤔",
+            "Error": "앗! 리지가 넘어졌어요. 확인이 필요해요! 🤕",
+            "Success": "와아! 리지가 완벽하게 글을 완성했어요! ✨"
+        }
+        
+        display_status = status_map.get(status, f"리지는 지금 {status} 중!")
+        self.hero_stage.setText(display_status)
+        
+        rezy_talk = f"{phase}"
+        if msg and msg != "Ready":
+            rezy_talk += f" | {msg}"
+        self.hero_task.setText(rezy_talk)
+        
+        self.hero_progress.setValue(percent)
+
+        mode = "run"
+        lower = status.lower()
+        if "running" in lower:
+            mode = "pause"
+            self.hero_primary_btn.setText("잠시만 멈춰줘 ✋")
+        elif "paused" in lower:
+            mode = "resume"
+            self.hero_primary_btn.setText("다시 시작해볼까? ▶")
+        elif "hold" in lower or "error" in lower:
+            mode = "resume"
+            self.hero_primary_btn.setText("다시 해보자! ↻")
+        else:
+            self.hero_primary_btn.setText("뉴스 포스팅 시작하기 🚀")
+        self._primary_action_mode = mode
+
+        state = "active"
+        if "error" in lower:
+            state = "error"
+        elif "hold" in lower:
+            state = "warning"
+        elif "success" in lower:
+            state = "success"
+        self.hero_card.set_state(state)
 
     def _format_countdown(self) -> str:
         now = datetime.now(self.controller.tz)
@@ -534,28 +497,42 @@ class MainWindow(QMainWindow):
 
     def _apply_hero(self, snap: dict) -> None:
         status = str(snap.get("status", "Idle") or "Idle")
-        phase = str(snap.get("phase_message", "대기") or "대기")
+        phase = str(snap.get("phase_message", "대기 중") or "대기 중")
         percent = int(snap.get("phase_percent", 0) or 0)
         msg = str(snap.get("last_message", "") or "")
 
-        self.hero_stage.setText(status)
-        self.hero_task.setText(phase)
-        self.hero_progress_value.setText(f"{percent}%")
+        # Mascot-style messages
+        status_map = {
+            "Idle": "리지는 지금 꿀잠 자는 중... 💤",
+            "Running": "리지가 열심히 소식을 분석하고 있어요! ✎",
+            "Hold": "잠시만요! 리지가 생각을 정리하고 있어요. 🤔",
+            "Error": "앗! 리지가 넘어졌어요. 확인이 필요해요! 🤕",
+            "Success": "와아! 리지가 완벽하게 글을 완성했어요! ✨"
+        }
+        
+        display_status = status_map.get(status, f"리지는 지금 {status} 중!")
+        self.hero_stage.setText(display_status)
+        
+        rezy_talk = f"{phase}"
+        if msg and msg != "Ready":
+            rezy_talk += f" | {msg}"
+        self.hero_task.setText(rezy_talk)
+        
         self.hero_progress.setValue(percent)
 
         mode = "run"
         lower = status.lower()
         if "running" in lower:
             mode = "pause"
-            self.hero_primary_btn.setText("일시정지")
+            self.hero_primary_btn.setText("잠시만 멈춰줘 ✋")
         elif "paused" in lower:
             mode = "resume"
-            self.hero_primary_btn.setText("재개")
+            self.hero_primary_btn.setText("다시 시작해볼까? ▶")
         elif "hold" in lower or "error" in lower:
             mode = "resume"
-            self.hero_primary_btn.setText("재개")
+            self.hero_primary_btn.setText("다시 해보자! ↻")
         else:
-            self.hero_primary_btn.setText("즉시 실행")
+            self.hero_primary_btn.setText("뉴스 포스팅 시작하기 🚀")
         self._primary_action_mode = mode
 
         state = "active"
@@ -567,9 +544,6 @@ class MainWindow(QMainWindow):
             state = "success"
         self.hero_card.set_state(state)
 
-        if msg and msg != "Ready":
-            self.hero_task.setText(f"{phase} | {msg}")
-
     def _apply_timeline(self, snap: dict) -> None:
         status = str(snap.get("status", "idle") or "idle").lower()
         phase_key = str(snap.get("phase_key", "idle") or "idle")
@@ -577,83 +551,72 @@ class MainWindow(QMainWindow):
         self.pipeline_canvas.set_state(status, phase_key, percent, self._mascot_frame)
         self.log_panel.set_phase(phase_key)
 
-        mapping = {
-            "source": {"preflight", "collect"},
-            "draft": {"select", "draft"},
-            "story": {"headline"},
-            "seo": {"qa"},
-            "image": {"visual"},
-            "html": {"schedule"},
-            "publish": {"publish", "indexing", "done"},
-        }
-
-        for step in self.timeline_steps:
-            key = step.title.lower()
-            phases = mapping.get(key, set())
-            if phase_key in phases and "running" in status:
-                step.set_status("running", f"{phase_key} ({percent}%)")
-            elif phase_key in phases and "error" in status:
-                step.set_status("error", str(snap.get("last_message", "오류")))
-            elif "success" in status and key in {"publish", "html"}:
-                step.set_status("success", "완료")
-            elif phase_key in phases:
-                step.set_status("active", str(snap.get("phase_message", "진행")))
-            else:
-                step.set_status("pending", "-")
-
         if status != self._last_status_key or phase_key != self._last_phase_key:
             if "error" in status:
-                self._shake_widget(self.error_panel)
-                self.toast_manager.show_toast("작업 중 오류가 발생했습니다. 로그를 확인하세요.", level="error", with_logs_button=True)
-            elif "hold" in status:
-                self.toast_manager.show_toast("작업이 보류되어 재시도 큐로 이동했습니다.", level="warning")
+                self._shake_widget(self.hero_card)
+                self.toast_manager.show_toast("앗, 어딘가에서 문제가 생겼나봐요!", level="error", with_logs_button=True)
             elif "success" in status:
-                self.toast_manager.show_toast("작업이 완료되어 예약 큐에 반영되었습니다.", level="info")
+                self.toast_manager.show_toast("리지가 이번 글도 멋지게 마무리했어요!", level="info")
             self._force_heavy_refresh = True
             self._last_status_key = status
             self._last_phase_key = phase_key
 
     def _apply_errors_panel(self, snap: dict) -> None:
-        errors = list(snap.get("recent_errors", []) or [])
-        signature = "|".join(
-            f"{str((row or {}).get('status', ''))}:{str((row or {}).get('created_at', ''))}:{str((row or {}).get('note', ''))[:160]}"
-            for row in errors[:4]
-        ) or "__empty__"
+        raw_errors = list(snap.get("recent_errors", []) or [])
+        errors = [raw_errors[i] for i in range(min(len(raw_errors), 4))]
+        sig_parts = []
+        for row in errors:
+            r = dict(row or {})
+            s = str(r.get("status", ""))
+            c = str(r.get("created_at", ""))
+            n = str(r.get("note", ""))
+            n_short = n[:120] if len(n) > 120 else n
+            sig_parts.append(f"{s}:{c}:{n_short}")
+        
+        signature = "|".join(sig_parts) or "__empty__"
         if signature == self._last_errors_signature:
             return
         self._last_errors_signature = signature
         self._clear_layout(self.error_cards_wrap)
         if not errors:
-            empty = QLabel("최근 오류가 없습니다.")
+            empty = QLabel("리지가 발견한 문제가 없어요! 깔끔하네요 🌿")
             empty.setObjectName("ValueSmall")
+            empty.setStyleSheet("padding: 20px; color: #8b95a1;")
             self.error_cards_wrap.addWidget(empty)
             self.error_panel.set_state("success")
             return
 
         self.error_panel.set_state("warning")
-        for row in errors[:4]:
+        for row in errors:
             card = GlassCard(state="warning")
             lay = QVBoxLayout(card)
-            lay.setContentsMargins(8, 8, 8, 8)
-            lay.setSpacing(6)
+            lay.setContentsMargins(15, 15, 15, 15)
+            lay.setSpacing(10)
 
-            status = str((row or {}).get("status", "error") or "error").upper()
-            note = str((row or {}).get("note", "") or "")
-            ts = str((row or {}).get("created_at", "") or "")[:19].replace("T", " ")
-            head = QLabel(f"[{status}] {ts}")
+            r = dict(row or {})
+            status = str(r.get("status", "error") or "error").upper()
+            note = str(r.get("note", "") or "")
+            ts_raw = str(r.get("created_at", "") or "")
+            ts = ts_raw[:19].replace("T", " ") if len(ts_raw) >= 19 else ts_raw
+            
+            head = QLabel(f"🤕 {status} ({ts})")
             head.setObjectName("Subtitle")
-            msg = QLabel(note[:180] if note else "-")
+            head.setStyleSheet("font-weight: 700; color: #ff4d94;")
+            
+            msg_text = note[:200] if len(note) > 200 else (note if note else "알 수 없는 오류")
+            msg = QLabel(msg_text)
             msg.setWordWrap(True)
             msg.setObjectName("ValueSmall")
+            msg.setStyleSheet("color: #4e5968;")
 
             actions = QHBoxLayout()
-            btn_fix = MotionButton("자동수정")
-            btn_fix.clicked.connect(self.run_now)
-            btn_retry = MotionButton("재시도")
+            btn_retry = MotionButton("다시 해보기")
+            btn_retry.setMinimumHeight(36)
             btn_retry.clicked.connect(self.run_now)
-            btn_logs = MotionButton("로그보기")
+            btn_logs = MotionButton("로그 보기", role="secondary")
+            btn_logs.setMinimumHeight(36)
             btn_logs.clicked.connect(self.open_logs_dialog)
-            actions.addWidget(btn_fix)
+            
             actions.addWidget(btn_retry)
             actions.addWidget(btn_logs)
 
@@ -690,51 +653,69 @@ class MainWindow(QMainWindow):
         self.usage_lines.setText("\n".join(lines))
 
     def _apply_schedule_panel(self, snap: dict) -> None:
-        rows: list[dict] = list((snap.get("usage_snapshot", {}) or {}).get("today_schedule_items", []) or [])
+        usage = dict(snap.get("usage_snapshot", {}) or {})
+        raw_rows = list(usage.get("today_schedule_items", []) or [])
         try:
-            if not rows:
+            if not raw_rows:
                 snapshot = self.controller.workflow._blog_snapshot(force_refresh=False, allow_remote=False)  # noqa: SLF001
-                rows = list(snapshot.get("scheduled_items", []) or [])
+                raw_rows = list(snapshot.get("scheduled_items", []) or [])
         except Exception:
             pass
-        signature = "|".join(
-            f"{str((row or {}).get('publish_at', ''))}:{str((row or {}).get('title', ''))[:80]}:{str((row or {}).get('published_url', ''))[:80]}"
-            for row in rows[:10]
-        ) or "__empty__"
+
+        rows = [raw_rows[i] for i in range(min(len(raw_rows), 10))]
+        sig_parts = []
+        for row in rows:
+            r = dict(row or {})
+            p = str(r.get("publish_at", ""))
+            t_raw = str(r.get("title", ""))
+            t = t_raw[:60] if len(t_raw) > 60 else t_raw
+            u_raw = str(r.get("published_url", ""))
+            u = u_raw[:60] if len(u_raw) > 60 else u_raw
+            sig_parts.append(f"{p}:{t}:{u}")
+        
+        signature = "|".join(sig_parts) or "__empty__"
         if signature == self._last_schedule_signature:
             return
         self._last_schedule_signature = signature
         self._clear_layout(self.schedule_rows)
         if not rows:
-            empty = QLabel("오늘 예약 항목이 없습니다.")
+            empty = QLabel("오늘 리지가 배달할 소식이 아직 없어요! 📬")
             empty.setObjectName("ValueSmall")
+            empty.setStyleSheet("padding: 20px; color: #8b95a1;")
             self.schedule_rows.addWidget(empty)
             return
 
-        for row in rows[:10]:
+        for row in rows:
             box = GlassCard()
             lay = QHBoxLayout(box)
-            lay.setContentsMargins(8, 6, 8, 6)
-            lay.setSpacing(8)
-            title = str((row or {}).get("title", "") or "Untitled")
-            dt = str((row or {}).get("publish_at", "") or "")
-            dt_text = dt.replace("T", " ")[:16] if dt else "-"
-            status = "scheduled"
-            if str((row or {}).get("published_url", "") or "").strip():
-                status = "published"
-            txt = QLabel(f"[{status}] {dt_text} | {title[:68]}")
+            lay.setContentsMargins(12, 10, 12, 10)
+            lay.setSpacing(10)
+
+            r = dict(row or {})
+            title = str(r.get("title", "Untitled"))
+            dt_raw = str(r.get("publish_at", ""))
+            dt_text = dt_raw.replace("T", " ")[:16] if len(dt_raw) >= 16 else dt_raw
+            
+            is_pub = bool(str(r.get("published_url", "") or "").strip())
+            status_tag = "✅ 게시됨" if is_pub else "⏳ 예약됨"
+            
+            short_title = title[:60] if len(title) > 60 else title
+            txt = QLabel(f"{status_tag}\n{dt_text} | {short_title}...")
             txt.setObjectName("ValueSmall")
             txt.setWordWrap(True)
+            txt.setStyleSheet("color: #333d4b; font-weight: 500;")
             lay.addWidget(txt, 1)
 
-            url = str((row or {}).get("published_url", "") or "").strip()
+            url = str(r.get("published_url", "") or "").strip()
             if not url:
-                url = str((row or {}).get("source_url", "") or "").strip()
-            open_btn = MotionButton("열기")
-            open_btn.setEnabled(bool(url))
+                url = str(r.get("source_url", "") or "").strip()
+            
             if url:
+                open_btn = MotionButton("보기", role="secondary")
+                open_btn.setFixedWidth(60)
                 open_btn.clicked.connect(lambda _=False, u=url: QDesktopServices.openUrl(QUrl(u)))
-            lay.addWidget(open_btn)
+                lay.addWidget(open_btn)
+            
             self.schedule_rows.addWidget(box)
 
     def _apply_recent_log_line(self, snap: dict) -> None:
@@ -860,14 +841,18 @@ class MainWindow(QMainWindow):
         try:
             import yaml
 
-            data = yaml.safe_load(raw.read_text(encoding="utf-8")) or {}
-            budget = data.setdefault("budget", {})
+            txt = raw.read_text(encoding="utf-8")
+            data = dict(yaml.safe_load(txt) or {})
+            budget = dict(data.setdefault("budget", {}))
             now_flag = bool(budget.get("dry_run", False))
             budget["dry_run"] = not now_flag
+            data["budget"] = budget
+            
             raw.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
             self.controller.reload()
-            self.dry_run_btn.setText(f"드라이런: {'ON' if budget['dry_run'] else 'OFF'}")
-            self._append_console_line(f"[설정] dry_run={'ON' if budget['dry_run'] else 'OFF'}")
+            
+            status_text = "실제 포스팅 모드" if not budget["dry_run"] else "연습 모드 (Dry-run)"
+            self._append_console_line(f"[설정] 모드 변경: {status_text}")
         except Exception as exc:
             QMessageBox.warning(self, "설정 저장 실패", str(exc))
 

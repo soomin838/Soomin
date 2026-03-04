@@ -1,64 +1,85 @@
+/* Rezero Rebirth: Global Theme Style */
 QMainWindow {
-    background: {{WINDOW_BG}};
+    background: #f2f4f6;
 }
 
 QDialog {
-    background: {{WINDOW_BG}};
+    background: #ffffff;
+    border-radius: 32px;
 }
 
 QLabel {
-    color: {{TEXT_PRIMARY}};
-}
-
-QLabel[role="muted"] {
-    color: {{TEXT_MUTED}};
+    color: #191f28;
+    font-family: "Pretendard", "Segoe UI", "Malgun Gothic";
 }
 
 QLineEdit, QComboBox, QTextEdit, QSpinBox {
-    background: {{INPUT_BG}};
-    border: 1px solid {{INPUT_BORDER}};
-    border-radius: 14px;
-    padding: 6px 8px;
-    color: {{TEXT_PRIMARY}};
+    background: #ffffff;
+    border: 1px solid #e5e8eb;
+    border-radius: 16px;
+    padding: 10px 14px;
+    color: #191f28;
+    font-size: 14px;
+}
+
+QLineEdit:focus {
+    border: 1px solid #3182f6;
 }
 
 QPushButton, QToolButton {
-    background: rgba(255,255,255,0.22);
-    border: 1px solid {{GLASS_BORDER}};
-    border-radius: 24px;
-    padding: 9px 16px;
-    color: {{TEXT_PRIMARY}};
-    font-weight: 600;
+    background: #3182f6;
+    border: none;
+    border-radius: 20px;
+    padding: 12px 24px;
+    color: #ffffff;
+    font-weight: 700;
+    font-size: 15px;
 }
 
-QPushButton:hover, QToolButton:hover {
-    border: 1px solid rgba(255,255,255,0.52);
+QPushButton:hover {
+    background: #1b64da;
+}
+
+QPushButton[role="secondary"] {
+    background: #e8f3ff;
+    color: #3182f6;
 }
 
 QPushButton#PrimaryBtn {
-    background: {{ACTIVE_TINT}};
+    background: #3182f6;
+    font-size: 16px;
 }
 
 QPushButton#DangerBtn {
-    background: {{ERROR_TINT}};
+    background: #fff0f5;
+    color: #ff4d94;
 }
 
-QListWidget {
-    background: transparent;
+QProgressBar {
     border: none;
-    color: {{TEXT_PRIMARY}};
+    background: #e5e8eb;
+    height: 12px;
+    border-radius: 6px;
+    text-align: center;
 }
 
-QListWidget::item {
-    border-radius: 12px;
-    padding: 10px 12px;
-}
-
-QListWidget::item:selected {
-    background: {{ACTIVE_TINT}};
+QProgressBar::chunk {
+    background: #3182f6;
+    border-radius: 6px;
 }
 
 QScrollArea {
     background: transparent;
     border: none;
+}
+
+QScrollBar:vertical {
+    border: none;
+    background: transparent;
+    width: 6px;
+}
+
+QScrollBar::handle:vertical {
+    background: #d1d6db;
+    border-radius: 3px;
 }
