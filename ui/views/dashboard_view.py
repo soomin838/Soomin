@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSequentialAnimationGroup, QTimer, Qt, QUrl
-from PySide6.QtGui import QBrush, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QPalette, QPixmap
+from PySide6.QtGui import QBrush, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QPalette, QPixmap, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QBoxLayout,
@@ -135,6 +135,9 @@ class MainWindow(QMainWindow):
         self._bg_cache_key: tuple[str, str, int, int] | None = None
 
         self.setWindowTitle("RezeroAgent Studio")
+        icon_path = self.root / "assets" / "ui" / "icon.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1360, 900)
         self.setMinimumSize(980, 660)
         self._apply_cute_font()

@@ -3543,8 +3543,8 @@ class AgentWorkflow:
                             note=self._append_note(self._append_note(hold_reason, detail_note), degraded_note),
                         )
                     )
-                self._workflow_perf_finish_run("hold", hold_reason)
-                return WorkflowResult("hold", hold_reason)
+                    self._workflow_perf_finish_run("hold", hold_reason)
+                    return WorkflowResult("hold", hold_reason)
 
             if bool(getattr(getattr(self.settings, "readability", None), "enabled", True)):
                 try:
