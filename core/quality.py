@@ -967,9 +967,23 @@ class ContentQAGate:
             if t and t in lower:
                 return True, f"ban_phrase:{t}"
         raw_html = raw_html.lower()
-        if "www.google.com" in raw_html or "google.com/search" in raw_html:
+        if re.search(
+            r"(?:https?://|https?:\\\\/\\\\/)?(?:www\.)?google\.com(?:/[^\s\"'<>]*)?",
+            raw_html,
+            flags=re.IGNORECASE,
+        ):
             return True, "forbidden_reference_link:google.com"
-        if re.search(r"https?://(?:www\.)?google\.com/[^\s\"<]*", raw_html):
+        if re.search(
+            r"(?:https?://|https?:\\\\/\\\\/)?[^/\s\"'<>]*googleusercontent\.com(?:/[^\s\"'<>]*)?",
+            raw_html,
+            flags=re.IGNORECASE,
+        ):
+            return True, "forbidden_reference_link:google.com"
+        if re.search(
+            r"(?:https?://|https?:\\\\/\\\\/)?[^/\s\"'<>]*googleapis\.com(?:/[^\s\"'<>]*)?",
+            raw_html,
+            flags=re.IGNORECASE,
+        ):
             return True, "forbidden_reference_link:google.com"
         if "<figcaption" in raw_html:
             return True, "forbidden_markup:figcaption"

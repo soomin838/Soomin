@@ -3204,7 +3204,54 @@ class Publisher:
         if not candidates:
             return {}
         candidates.sort(key=lambda x: x[0], reverse=True)
-        return candidates[0][1]
+        latest = dict(candidates[0][1])
+        if include_content and (not str(latest.get("content", "") or "").strip()):
+            post_id = str(latest.get("post_id", "") or "").strip()
+            if post_id:
+                try:
+                    refreshed = self.fetch_wip_draft_by_id(post_id=post_id, include_content=True)
+                except Exception:
+                    refreshed = {}
+                if isinstance(refreshed, dict):
+                    for key in ("title", "content", "labels", "stage", "updated", "url"):
+                        value = refreshed.get(key, None)
+                        if value is None:
+                            continue
+                        latest[key] = value
+        return latest
+
+    def fetch_wip_draft_by_id(self, post_id: str, include_content: bool = True) -> dict:
+        post_key = str(post_id or "").strip()
+        if not post_key:
+            return {}
+        creds = self._oauth_credentials()
+        self._ensure_valid_token(creds)
+        service = build("blogger", "v3", credentials=creds)
+        try:
+            post = service.posts().get(
+                blogId=self.blog_id,
+                postId=post_key,
+                view="ADMIN",
+                fetchBody=bool(include_content),
+            ).execute()
+        except Exception:
+            return {}
+        if not isinstance(post, dict):
+            return {}
+        title = str(post.get("title", "") or "").strip()
+        labels_raw = post.get("labels", []) or []
+        labels = [str(x).strip() for x in labels_raw if str(x).strip()]
+        stage = self._infer_wip_stage(title=title, labels=labels)
+        updated_dt = self._post_sort_key(post)
+        return {
+            "post_id": post_key,
+            "title": title,
+            "content": str(post.get("content", "") or "") if include_content else "",
+            "labels": labels,
+            "stage": stage,
+            "updated": updated_dt.isoformat(),
+            "url": str(post.get("url", "") or "").strip(),
+        }
 
     def _infer_wip_stage(self, title: str, labels: list[str]) -> str:
         for label in labels or []:

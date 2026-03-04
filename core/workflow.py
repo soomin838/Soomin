@@ -3489,7 +3489,14 @@ class AgentWorkflow:
                         f"external_links={int(qa_metrics.get('external_links', 0))};"
                         f"authority_links={int(qa_metrics.get('authority_links', 0))}"
                     )
-                    hold_reason = f"qa_below_threshold:{qa_result.score}/{min_quality}"
+                    if qa_result.has_hard_failure:
+                        hard_token = ",".join(hard_keys[:2]) if hard_keys else "unknown"
+                        hold_reason = (
+                            f"qa_hard_failure:{hard_token};"
+                            f"qa_score={qa_result.score}/{min_quality}"
+                        )
+                    else:
+                        hold_reason = f"qa_below_threshold:{qa_result.score}/{min_quality}"
                     self.watchdog.register_hard_failure(event_id, hold_reason)
                     can_retry = bool(self._retry_enabled and int(news_retry_depth) < int(self._retry_max_attempts_per_event))
                     abort_now, abort_reason = self.watchdog.should_abort_event(event_id)
@@ -6820,7 +6827,18 @@ class AgentWorkflow:
         if not isinstance(row, dict) or not str(row.get("post_id", "")).strip():
             return None
 
+        row = self._refresh_resume_row_payload(row)
+
         stage = str(row.get("stage", "") or "").strip().lower()
+        if stage in {"collect_done", "draft_done", "publish_blocked", "images_done"}:
+            stage_title = self._strip_wip_title_prefix(str(row.get("title", "") or "").strip())
+            stage_html = self._strip_wip_checkpoint_banner(str(row.get("content", "") or ""))
+            if not stage_title or not stage_html:
+                self._auto_park_corrupt_resume_draft(
+                    row=row,
+                    reason_token="resume_payload_missing_before_resume",
+                )
+                return None
         if stage == "images_done":
             return self._resume_images_done(row=row, manual_trigger=manual_trigger, queue_advisory=queue_advisory)
         if stage == "draft_done":
@@ -7039,27 +7057,15 @@ class AgentWorkflow:
         )
 
     def _resume_draft_done_impl(self, row: dict, manual_trigger: bool, queue_advisory: str = "") -> WorkflowResult:
+        row = self._refresh_resume_row_payload(row)
         title = self._strip_wip_title_prefix(str(row.get("title", "") or "").strip())
         base_html = self._strip_wip_checkpoint_banner(str(row.get("content", "") or ""))
         if not title or not base_html:
-            post_id = str(row.get("post_id", "") or "").strip()
-            hold_labels = self._normalize_resume_labels(row.get("labels", []))
-            if not hold_labels:
-                hold_labels = ["wip", "stage-hold", "resume-corrupt-payload"]
-            hold_reason = "resume_draft_payload_empty"
-            if post_id:
-                parked_id, parked_note = self._sync_stage_draft_checkpoint(
-                    current_draft_post_id=post_id,
-                    stage="hold",
-                    title=title or "Recovered Draft",
-                    html_body="<p>Resume checkpoint payload was empty and has been parked.</p>",
-                    labels=hold_labels,
-                    reason=hold_reason,
-                )
-                hold_reason = self._append_note(hold_reason, parked_note)
-                if parked_id:
-                    hold_reason = self._append_note(hold_reason, f"draft_checkpoint={parked_id}")
-            return WorkflowResult("hold", hold_reason)
+            skip_reason = self._auto_park_corrupt_resume_draft(
+                row=row,
+                reason_token="resume_draft_payload_empty",
+            )
+            return WorkflowResult("skipped", skip_reason)
 
         summary_text = self._normalize_excerpt(base_html)[:700]
         draft = DraftPost(
@@ -7457,6 +7463,58 @@ class AgentWorkflow:
             flags=re.IGNORECASE,
         )
         return out.strip()
+
+    def _refresh_resume_row_payload(self, row: dict) -> dict:
+        base = dict(row or {})
+        post_id = str(base.get("post_id", "") or "").strip()
+        title = self._strip_wip_title_prefix(str(base.get("title", "") or "").strip())
+        content = self._strip_wip_checkpoint_banner(str(base.get("content", "") or ""))
+        if title and content:
+            return base
+        if not post_id:
+            return base
+        try:
+            refreshed = self.publisher.fetch_wip_draft_by_id(post_id=post_id, include_content=True)
+        except Exception:
+            refreshed = {}
+        if not isinstance(refreshed, dict):
+            return base
+        merged = dict(base)
+        for key in ("title", "content", "labels", "stage", "updated", "url"):
+            value = refreshed.get(key, None)
+            if value is None:
+                continue
+            merged[key] = value
+        return merged
+
+    def _auto_park_corrupt_resume_draft(self, row: dict, reason_token: str) -> str:
+        reason = str(reason_token or "resume_payload_missing").strip() or "resume_payload_missing"
+        post_id = str((row or {}).get("post_id", "") or "").strip()
+        title = self._strip_wip_title_prefix(str((row or {}).get("title", "") or "").strip()) or "Recovered Draft"
+        labels = ["wip", "stage-hold", "resume-corrupt-payload"]
+        if post_id:
+            parked_id, parked_note = self._sync_stage_draft_checkpoint(
+                current_draft_post_id=post_id,
+                stage="hold",
+                title=title,
+                html_body="<p>Resume checkpoint payload was empty and has been parked.</p>",
+                labels=labels,
+                reason=reason,
+            )
+            reason = self._append_note(reason, parked_note)
+            if parked_id:
+                reason = self._append_note(reason, f"draft_checkpoint={parked_id}")
+        self.logs.append_run(
+            RunRecord(
+                status="skipped",
+                score=0,
+                title=title,
+                source_url="",
+                published_url="",
+                note=reason,
+            )
+        )
+        return reason
 
     def _normalize_resume_labels(self, labels: list[str] | None) -> list[str]:
         out: list[str] = []
@@ -9287,16 +9345,31 @@ class AgentWorkflow:
         removed = 0
         out = src
         patterns = [
-            r"<a[^>]+href=[\"']https?://(?:www\.)?google\.com[^\"']*[\"'][^>]*>.*?</a>",
-            r"<a[^>]+href=[\"']https?://[^\"']*googleusercontent\.com[^\"']*[\"'][^>]*>.*?</a>",
-            r"<a[^>]+href=[\"']https?://[^\"']*googleapis\.com[^\"']*[\"'][^>]*>.*?</a>",
-            r"https?://(?:www\.)?google\.com/[^\s\"'<>]+",
-            r"https?://[^/\s\"'<>]*googleusercontent\.com[^\s\"'<>]*",
-            r"https?://[^/\s\"'<>]*googleapis\.com[^\s\"'<>]*",
+            # Strip anchored forbidden hosts (quoted or unquoted href/src).
+            r"<a[^>]+(?:href|src)\s*=\s*([\"']?)(?:https?:)?//?(?:www\.)?google\.com[^\"'\s>]*\1[^>]*>.*?</a>",
+            r"<a[^>]+(?:href|src)\s*=\s*([\"']?)(?:https?:)?//?[^\"'\s>]*googleusercontent\.com[^\"'\s>]*\1[^>]*>.*?</a>",
+            r"<a[^>]+(?:href|src)\s*=\s*([\"']?)(?:https?:)?//?[^\"'\s>]*googleapis\.com[^\"'\s>]*\1[^>]*>.*?</a>",
+            # Strip escaped URL literals often leaked from serialized payloads.
+            r"https?:\\\\/\\\\/(?:www\.)?google\.com\\\\/[^\s\"'<>]+",
+            r"https?:\\\\/\\\\/[^\\\s\"'<>]*googleusercontent\.com[^\s\"'<>]*",
+            r"https?:\\\\/\\\\/[^\\\s\"'<>]*googleapis\.com[^\s\"'<>]*",
+            # Strip regular URL literals and bare host/path forms.
+            r"(?:https?://)?(?:www\.)?google\.com(?:/[^\s\"'<>]*)?",
+            r"(?:https?://)?[^/\s\"'<>]*googleusercontent\.com(?:/[^\s\"'<>]*)?",
+            r"(?:https?://)?[^/\s\"'<>]*googleapis\.com(?:/[^\s\"'<>]*)?",
         ]
         for pat in patterns:
             out, hit = re.subn(pat, "", out, flags=re.IGNORECASE | re.DOTALL)
             removed += int(hit or 0)
+        # If href became empty after stripping, keep anchor text only.
+        out, hit = re.subn(
+            r"<a[^>]+href\s*=\s*[\"']\s*[\"'][^>]*>(.*?)</a>",
+            r"\1",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        removed += int(hit or 0)
+        out = re.sub(r"\s{2,}", " ", out)
         out = re.sub(r"\n{3,}", "\n\n", out)
         return out, int(removed)
 
