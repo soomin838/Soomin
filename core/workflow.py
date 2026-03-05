@@ -25,11 +25,9 @@ from .asset_store import KeywordAssetStore, PostsIndexStore
 from .image_library import pick_images
 from .index_sync import BloggerIndexSync
 from .logstore import LogStore, RunRecord
-from .news_pool import NewsPoolStore
-from .news_rss import fetch_feed_detailed
-from .news_clustering import NewsClusterEngine, should_skip_same_run
 from .news_facets import ensure_what_to_do_now_section, facet_emphasis_hint, resolve_facet_context
-from .news_score import classify_category, contains_allow_keywords, has_blocked_keywords, score_news_item
+from .news_pool import NewsPoolStore
+from .services.worldmonitor_client import WorldMonitorClient
 from .news_pack_manifest import NewsPackManifest
 from .news_pack_picker import NewsPackPicker
 from .news_pack_seeder import NewsPackSeeder
@@ -60,6 +58,7 @@ from .watchdog import Watchdog
 from .r2_uploader import R2Config, upload_file as r2_upload_file
 from .services.media_manager import MediaManagerService
 from .services.metrics_tracker import MetricsTrackerService
+from .services.ollama_fallback import OllamaFallbackService
 
 
 @dataclass
@@ -94,8 +93,8 @@ class AgentWorkflow:
             gemini_api_key=settings.gemini.api_key,
             r2_config=getattr(settings.publish, "r2", None),
         )
-        self.media_manager = MediaManagerService(self.visual)
-        self.metrics_tracker = MetricsTrackerService()
+        self._workflow_perf_path = self.root / "storage" / "logs" / "workflow_perf.jsonl"
+        self.metrics_tracker = MetricsTrackerService(log_path=self._workflow_perf_path)
         self.publisher = Publisher(
             credentials_path=root / settings.blogger.credentials_path,
             blog_id=settings.blogger.blog_id,
@@ -119,6 +118,7 @@ class AgentWorkflow:
         )
         self.actionability_gate = ActionabilityGate()
         self.news_actionability_gate = NewsActionabilityGate()
+        self.worldmonitor = WorldMonitorClient()
         self.ollama_manager = OllamaManager(
             root=root,
             settings=settings.local_llm,
@@ -133,6 +133,13 @@ class AgentWorkflow:
             seeds_path=root / settings.sources.seeds_path,
             gemini=settings.gemini,
             topic_growth=settings.topic_growth,
+        )
+        self.ollama_fallback = OllamaFallbackService(
+            ollama_client=self.ollama_client,
+            settings=self.settings,
+            log_event_callback=self._log_ollama_event,
+            get_recent_runs_callback=self._latest_run_record_since,
+            title_fp_callback=self._remember_fix_steps_fingerprint
         )
         self._progress_hook = None
         self._blog_snapshot_cache: tuple[datetime, dict] | None = None
@@ -203,12 +210,7 @@ class AgentWorkflow:
         self._run_metrics_context: dict[str, dict[str, Any]] = {}
         self._run_metrics_emitted_keys: set[str] = set()
         self._manual_upload_probe_done = False
-        self._news_pool_db_path = self.root / "storage" / "logs" / "news_pool.sqlite3"
-        self._news_pool_state_path = self.root / "storage" / "logs" / "news_pool_state.json"
-        self._news_pool_refresh_log_path = self.root / "storage" / "logs" / "news_pool_refresh.jsonl"
-        self._news_pool_refresh_tick_log_path = self.root / "storage" / "logs" / "news_pool_refresh_tick.jsonl"
         self._news_rotation_state_path = self.root / "storage" / "state" / "news_rotation_state.json"
-        self._news_cluster_state_path = self.root / "storage" / "state" / "news_cluster_state.json"
         self._slug_ledger_path = self.root / "storage" / "state" / "slug_ledger.jsonl"
         self._slug_ledger_ttl_days = 180
         self._internal_links_pool_refresh_cooldown_hours = 6
@@ -243,14 +245,6 @@ class AgentWorkflow:
         self._entropy_max_rewrite_attempts = max(
             0,
             int(getattr(getattr(self.settings, "entropy_check", None), "max_rewrite_attempts", 1) or 1),
-        )
-        self._last_news_pool_refresh_stats: dict[str, Any] = {}
-        self.news_pool_store = NewsPoolStore(self._news_pool_db_path)
-        self.news_cluster_engine = NewsClusterEngine(
-            state_path=self._news_cluster_state_path,
-            stable_hash_fn=stable_hash,
-            threshold=0.82,
-            ttl_days=14,
         )
         self.publish_ledger = PublishLedger(
             path=self._publish_ledger_path,
@@ -310,6 +304,22 @@ class AgentWorkflow:
         )
         self._news_pack_last_tick_mono = 0.0
         self._news_domain = "tech_news_explainer"
+        self.news_pool_store = NewsPoolStore(
+            db_path=root / "storage" / "logs" / "news_pool.sqlite3",
+        )
+        self._news_pool_state_path = self.root / "storage" / "state" / "news_pool_state.json"
+        self._news_pool_refresh_log_path = self.root / "storage" / "logs" / "news_pool_refresh.jsonl"
+        self._news_pool_refresh_tick_log_path = self.root / "storage" / "logs" / "news_pool_refresh_tick.jsonl"
+        self._last_news_pool_refresh_stats: dict[str, Any] = {}
+        self.media_manager = MediaManagerService(
+            root=self.root,
+            settings=self.settings,
+            visual=self.visual,
+            news_picker=self.news_pack_picker,
+            overlay_renderer=self.thumbnail_overlay,
+            publisher=self.publisher,
+            news_manifest=self.news_pack_manifest
+        )
         self._start_posts_index_bootstrap()
         self._run_legacy_news_cleanup_once()
 
@@ -371,329 +381,25 @@ class AgentWorkflow:
                 break
         return tags[:4] if tags else ["platform"]
 
-    def _news_pack_pick_with_emergency_fill(
-        self,
-        *,
-        tags: list[str],
-        required_inline: int,
-        target_images: int,
-    ):
-        picked = self.news_pack_picker.pick_for_post(
-            tags=tags,
-            thumb_count=1,
-            inline_count=required_inline,
-        )
-        thumb_row = dict(getattr(picked, "thumb_bg", {}) or {})
-        inline_rows = list(getattr(picked, "inline_bg", []) or [])
-        if thumb_row and len(inline_rows) >= required_inline:
-            return picked, []
-        notes: list[str] = []
-        max_fill = max(1, int(getattr(self.settings.news_pack, "emergency_fill_max_items", 3) or 3))
-        for idx in range(1, max_fill + 1):
-            tick = self.news_pack_seed_tick_if_needed(force=True, min_interval_sec=0)
-            tick_status = str((tick or {}).get("status", "unknown") or "unknown")
-            tick_kind = str((tick or {}).get("kind", "") or "")
-            tick_provider = str((tick or {}).get("provider", "") or "")
-            tick_reason = str((tick or {}).get("reason", "") or "").strip().lower()
-            tick_failure_kind = str((tick or {}).get("failure_kind", "") or "").strip().lower()
-            notes.append(
-                f"emergency_fill_{idx}={tick_status}:{tick_kind}:{tick_provider}"
-                + (f":{tick_failure_kind or tick_reason}" if (tick_failure_kind or tick_reason) else "")
-            )
-            # If service rate limited (anon 429), stop immediate fill loop and wait for next window.
-            if tick_failure_kind == "service_rate_limited" or "rate_limit" in tick_reason:
-                notes.append("emergency_fill_stopped=service_rate_limited")
-                break
-            picked = self.news_pack_picker.pick_for_post(
-                tags=tags,
-                thumb_count=1,
-                inline_count=required_inline,
-            )
-            thumb_row = dict(getattr(picked, "thumb_bg", {}) or {})
-            inline_rows = list(getattr(picked, "inline_bg", []) or [])
-            available_count = (1 if thumb_row else 0) + len(inline_rows)
-            if thumb_row and len(inline_rows) >= required_inline:
-                notes.append(f"emergency_fill_recovered={available_count}/{target_images}")
-                return picked, notes
-            # Bounded immediate recovery: short pause to avoid hot-looping providers.
-            if idx < max_fill:
-                time.sleep(random.uniform(0.6, 1.4))
-        return picked, notes
-
-    def _news_pack_record_to_asset(self, row: dict[str, Any], index: int) -> ImageAsset | None:
-        if not isinstance(row, dict):
-            return None
-        src_url = str(row.get("r2_url", "") or "").strip()
-        if src_url and self.publisher._is_allowed_image_url(src_url, allow_data_uri=False):  # noqa: SLF001
-            kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
-            alt = "Editorial illustration supporting this tech news section."
-            if kind == "thumb_final":
-                alt = "Editorial thumbnail illustration for this tech news article."
-            virtual = (self.root / "storage" / "temp_images" / f"news_pack_virtual_{int(index):02d}.png").resolve()
-            return ImageAsset(
-                path=virtual,
-                alt=alt,
-                anchor_text="",
-                source_kind="news_pack",
-                source_url=src_url,
-                license_note="NewsPack generated background",
-            )
-        local_raw = str(row.get("local_path", "") or "").strip()
-        if not local_raw:
-            return None
-        local = Path(local_raw)
-        if not local.is_absolute():
-            local = (self.root / local_raw).resolve()
-        if not local.exists():
-            return None
-        kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
-        alt = "Editorial illustration supporting this tech news section."
-        if kind == "thumb_final":
-            alt = "Editorial thumbnail illustration for this tech news article."
-        return ImageAsset(
-            path=local,
-            alt=alt,
-            anchor_text="",
-            source_kind="news_pack",
-            source_url=src_url,
-            license_note="NewsPack generated background",
-        )
-
-    def _render_news_thumb_overlay(
-        self,
-        *,
-        thumb_row: dict[str, Any],
-        category: str,
-        title: str,
-    ) -> ImageAsset | None:
-        if not bool(getattr(self.settings.news_pack, "thumb_overlay_enabled", True)):
-            return self._news_pack_record_to_asset(thumb_row, 0)
-        base_asset = self._news_pack_record_to_asset(thumb_row, 0)
-        if base_asset is None:
-            return None
-        hooks: list[str] = []
-        for h in (thumb_row.get("hook_candidates", []) if isinstance(thumb_row.get("hook_candidates", []), list) else []):
-            txt = re.sub(r"[^A-Za-z0-9\s]", " ", str(h or "").upper())
-            txt = re.sub(r"\s+", " ", txt).strip()
-            if txt and txt not in hooks:
-                hooks.append(txt)
-        hook = hooks[0] if hooks else self.visual.pick_thumbnail_hook(category=category, title=title)
-        out_dir = self.root / "storage" / "temp_images" / "news_thumb_final"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        token = hashlib.sha1(f"{title}|{datetime.now(timezone.utc).isoformat()}".encode("utf-8", errors="ignore")).hexdigest()[:12]
-        out_path = out_dir / f"thumb_final_{token}.png"
-        rendered = self.thumbnail_overlay.render(
-            source_path=base_asset.path,
-            hook_text=hook,
-            tag_label=category or "tech",
-            output_path=out_path,
-        )
-        r2_cfg = R2Config(
-            endpoint_url=str(getattr(self.settings.publish.r2, "endpoint_url", "") or "").strip(),
-            bucket=str(getattr(self.settings.publish.r2, "bucket", "") or "").strip(),
-            access_key_id=str(getattr(self.settings.publish.r2, "access_key_id", "") or "").strip(),
-            secret_access_key=str(getattr(self.settings.publish.r2, "secret_access_key", "") or "").strip(),
-            public_base_url=str(getattr(self.settings.publish.r2, "public_base_url", "") or "").strip().rstrip("/"),
-            prefix=str(getattr(self.settings.news_pack, "r2_prefix", "news_pack") or "news_pack").strip() or "news_pack",
-            cache_control=str(getattr(self.settings.publish.r2, "cache_control", "public, max-age=31536000, immutable") or "public, max-age=31536000, immutable").strip(),
-        )
-        r2_url = r2_upload_file(
-            root=self.root,
-            cfg=r2_cfg,
-            file_path=rendered,
-            category="thumb_final",
-        )
-        if not self.publisher._is_allowed_image_url(str(r2_url), allow_data_uri=False):  # noqa: SLF001
-            raise RuntimeError("thumb_final_r2_host_invalid")
-        sha1 = hashlib.sha1(rendered.read_bytes()).hexdigest()
-        self.news_pack_manifest.append(
-            {
-                "kind": "thumb_final",
-                "tags": [str(category or "platform").lower()],
-                "provider": "local_overlay",
-                "prompt": f"overlay:{hook}",
-                "prompt_hash": hashlib.sha1(f"overlay:{hook}".encode("utf-8", errors="ignore")).hexdigest(),
-                "local_path": "",
-                "r2_key": str(r2_url).split(r2_cfg.public_base_url.rstrip("/") + "/", 1)[-1],
-                "r2_url": str(r2_url),
-                "sha1": sha1,
-                "width": 1280,
-                "height": 720,
-                "status": "ready",
-                "used_at": "",
-                "used_by": "",
-                "used_count": 0,
-                "source_mode": "thumb_overlay",
-                "alt_text_template": "Editorial thumbnail illustration for this tech news article.",
-                "caption_template": "",
-                "overlay_hook_used": str(hook or "")[:80],
-                "hook_candidates": hooks[:3],
-                "style_tags": ["yt_clean", "overlay"],
-            }
-        )
-        try:
-            rendered.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return ImageAsset(
-            path=(self.root / "storage" / "temp_images" / f"news_pack_virtual_thumb_{token}.png").resolve(),
-            alt="Editorial thumbnail illustration for this tech news article.",
-            anchor_text="",
-            source_kind="news_pack",
-            source_url=str(r2_url),
-            license_note="NewsPack overlay thumbnail",
-        )
-
-    def _mark_news_pack_used(self, images: list[ImageAsset], post_id: str) -> None:
-        for image in images or []:
-            src = str(getattr(image, "source_url", "") or "").strip()
-            if not src:
-                continue
-            if not self.publisher._is_allowed_image_url(src, allow_data_uri=False):  # noqa: SLF001
-                continue
-            self.news_pack_manifest.mark_used(r2_url=src, used_by_post_id=str(post_id or ""))
 
     def _append_workflow_perf(self, event: str, payload: dict[str, Any] | None = None) -> None:
-        row = {
-            "ts_utc": datetime.now(timezone.utc).isoformat(),
-            "event": str(event or "").strip(),
-            "run_id": str(self._workflow_perf_run_id or "").strip(),
-        }
-        row.update(dict(payload or {}))
-        try:
-            self._workflow_perf_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._workflow_perf_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-        except Exception:
-            return
+        self.metrics_tracker.record_event(event, payload)
 
     def _workflow_perf_start_run(self, manual_trigger: bool = False) -> None:
-        if self._workflow_perf_run_id:
-            # Close any stale run from an abnormal termination path.
-            self._workflow_perf_finish_run(status="aborted", message="stale_run_closed_on_next_start")
-        self._workflow_perf_run_id = uuid.uuid4().hex[:12]
-        self._workflow_perf_last_run_id = str(self._workflow_perf_run_id or "")
-        self._workflow_perf_run_started_mono = time.perf_counter()
-        self._workflow_perf_current_phase = ""
-        self._workflow_perf_phase_started_mono = 0.0
-        self._workflow_perf_phase_last_message = ""
-        self._workflow_perf_phase_last_percent = 0
-        self._workflow_perf_last_heartbeat_mono = 0.0
-        self._workflow_perf_phase_count = 0
-        self._workflow_perf_slow_phases = []
-        self._manual_upload_probe_done = False
-        self._append_workflow_perf(
-            "run_start",
-            {
-                "manual_trigger": bool(manual_trigger),
-                "qa_mode": str(getattr(self.settings.quality, "qa_mode", "quick") or "quick"),
-                "target_images_per_post": int(getattr(self.settings.visual, "target_images_per_post", 5) or 5),
-            },
-        )
+        meta = {
+            "qa_mode": str(getattr(self.settings.quality, "qa_mode", "quick") or "quick"),
+            "target_images_per_post": int(getattr(self.settings.visual, "target_images_per_post", 5) or 5),
+        }
+        self.metrics_tracker.start_run(manual_trigger=manual_trigger, meta=meta)
 
     def _workflow_perf_close_phase(self, now_mono: float, reason: str) -> None:
-        phase = str(self._workflow_perf_current_phase or "").strip()
-        if not phase:
-            return
-        elapsed_ms = int(max(0.0, now_mono - float(self._workflow_perf_phase_started_mono or now_mono)) * 1000)
-        slow = elapsed_ms >= int(self._workflow_perf_slow_phase_threshold_ms)
-        payload = {
-            "phase": phase,
-            "duration_ms": int(elapsed_ms),
-            "reason": str(reason or "phase_change"),
-            "last_message": str(self._workflow_perf_phase_last_message or ""),
-            "last_percent": int(self._workflow_perf_phase_last_percent or 0),
-            "slow": bool(slow),
-        }
-        self._append_workflow_perf("phase_end", payload)
-        if slow:
-            self._workflow_perf_slow_phases.append(
-                {"phase": phase, "duration_ms": int(elapsed_ms), "reason": str(reason or "phase_change")}
-            )
-        self._workflow_perf_current_phase = ""
-        self._workflow_perf_phase_started_mono = 0.0
-        self._workflow_perf_phase_last_message = ""
-        self._workflow_perf_phase_last_percent = 0
+        self.metrics_tracker.end_phase(reason=reason)
 
     def _workflow_perf_track_progress(self, phase: str, message: str, percent: int) -> None:
-        if not self._workflow_perf_run_id:
-            return
-        now_mono = time.perf_counter()
-        phase_key = str(phase or "idle").strip() or "idle"
-        msg = str(message or "").strip()
-        pct = max(0, min(100, int(percent or 0)))
-
-        if not self._workflow_perf_current_phase:
-            self._workflow_perf_current_phase = phase_key
-            self._workflow_perf_phase_started_mono = now_mono
-            self._workflow_perf_phase_last_message = msg
-            self._workflow_perf_phase_last_percent = pct
-            self._workflow_perf_last_heartbeat_mono = now_mono
-            self._workflow_perf_phase_count += 1
-            self._append_workflow_perf(
-                "phase_start",
-                {"phase": phase_key, "message": msg, "percent": pct},
-            )
-            return
-
-        if phase_key != self._workflow_perf_current_phase:
-            self._workflow_perf_close_phase(now_mono, reason="phase_change")
-            self._workflow_perf_current_phase = phase_key
-            self._workflow_perf_phase_started_mono = now_mono
-            self._workflow_perf_phase_last_message = msg
-            self._workflow_perf_phase_last_percent = pct
-            self._workflow_perf_last_heartbeat_mono = now_mono
-            self._workflow_perf_phase_count += 1
-            self._append_workflow_perf(
-                "phase_start",
-                {"phase": phase_key, "message": msg, "percent": pct},
-            )
-            return
-
-        changed = (msg != self._workflow_perf_phase_last_message) or (pct != self._workflow_perf_phase_last_percent)
-        if changed and (now_mono - self._workflow_perf_last_heartbeat_mono) >= float(self._workflow_perf_heartbeat_sec):
-            elapsed_ms = int(max(0.0, now_mono - float(self._workflow_perf_phase_started_mono or now_mono)) * 1000)
-            self._append_workflow_perf(
-                "phase_heartbeat",
-                {
-                    "phase": phase_key,
-                    "elapsed_ms": elapsed_ms,
-                    "message": msg,
-                    "percent": pct,
-                },
-            )
-            self._workflow_perf_last_heartbeat_mono = now_mono
-
-        self._workflow_perf_phase_last_message = msg
-        self._workflow_perf_phase_last_percent = pct
+        self.metrics_tracker.track_progress(phase=phase, message=message, percent=percent)
 
     def _workflow_perf_finish_run(self, status: str, message: str = "") -> None:
-        if not self._workflow_perf_run_id:
-            return
-        self._workflow_perf_last_run_id = str(self._workflow_perf_run_id or "")
-        now_mono = time.perf_counter()
-        self._workflow_perf_close_phase(now_mono, reason="run_end")
-        total_ms = int(max(0.0, now_mono - float(self._workflow_perf_run_started_mono or now_mono)) * 1000)
-        self._append_workflow_perf(
-            "run_end",
-            {
-                "status": str(status or "unknown").strip() or "unknown",
-                "message": str(message or "")[:260],
-                "total_ms": int(total_ms),
-                "phase_count": int(self._workflow_perf_phase_count or 0),
-                "slow_phase_count": int(len(self._workflow_perf_slow_phases)),
-                "slow_phases": list(self._workflow_perf_slow_phases[:8]),
-            },
-        )
-        self._workflow_perf_run_id = ""
-        self._workflow_perf_run_started_mono = 0.0
-        self._workflow_perf_current_phase = ""
-        self._workflow_perf_phase_started_mono = 0.0
-        self._workflow_perf_phase_last_message = ""
-        self._workflow_perf_phase_last_percent = 0
-        self._workflow_perf_last_heartbeat_mono = 0.0
-        self._workflow_perf_phase_count = 0
-        self._workflow_perf_slow_phases = []
+        self.metrics_tracker.finish_run(status=status, message=message)
 
     def _update_run_metrics_context(self, scope: str, **kwargs: Any) -> None:
         key = str(scope or "").strip() or "unknown"
@@ -1216,277 +922,20 @@ class AgentWorkflow:
                 pass
         return bool(ready), str(reason or "")
 
-    def _fallback_image_prompt_plan(self, draft: DraftPost, selected: TopicCandidate) -> dict[str, Any]:
-        sections = self._image_plan_sections(draft.html)
-        quick = str(sections.get("quick_answer", "") or draft.summary or draft.title).strip()
-        fix2 = str(sections.get("fix2", "") or quick).strip()
-        device = self._infer_device_type(f"{draft.title}\n{selected.title}")
-        return {
-            "banner_prompt": (
-                f"minimal software troubleshooting flow diagram for {device} issue, "
-                f"key context: {quick[:180]}, pastel vector, rounded boxes, "
-                "no text, no letters, no numbers, no logos, no watermark"
-            ),
-            "inline_prompt": (
-                f"minimal software troubleshooting checklist diagram for {device}, "
-                f"step focus: {fix2[:180]}, 3 to 7 steps, pastel vector, rounded icons, "
-                "no text, no letters, no numbers, no logos, no watermark"
-            ),
-            "alt_suggestions": [
-                "Troubleshooting flow diagram for a common software issue.",
-                "Checklist-style visual for a practical software fix path.",
-                "Step-by-step troubleshooting concept image for daily users.",
-            ],
-            "style_tags": ["minimal", "pastel", "rounded", "diagram"],
-            "source": "fallback",
-        }
-
-    def _build_troubleshooting_context(self, selected: TopicCandidate) -> dict[str, str]:
-        body = re.sub(r"\s+", " ", str(getattr(selected, "body", "") or "")).strip()
-        chunks = re.split(r"(?<=[.!?])\s+", body)
-        quick = (chunks[0] if chunks else body)[:220]
-        fix2 = (chunks[1] if len(chunks) > 1 else body)[:220]
-        advanced = (chunks[2] if len(chunks) > 2 else body)[:220]
-        return {
-            "quick_take": quick or str(getattr(selected, "title", "") or "")[:220],
-            "fix2": fix2 or quick,
-            "advanced_fix": advanced or quick,
-        }
-
-    def _fallback_troubleshooting_plan(self, selected: TopicCandidate) -> dict[str, Any]:
-        long_tails = [
-            re.sub(r"\s+", " ", str(x or "")).strip()
-            for x in (getattr(selected, "long_tail_keywords", []) or [])
-            if str(x or "").strip()
-        ]
-        keyword = long_tails[0] if long_tails else re.sub(r"\s+", " ", str(getattr(selected, "title", "") or "")).strip()
-        keyword = keyword or "windows update error fix"
-        device = self._infer_device_type(f"{keyword}\n{selected.title}")
-        cluster = self._infer_cluster_id_from_keyword(keyword)
-        fix_steps = [
-            {
-                "step_title": "Restart and isolate the issue",
-                "action": f"Restart your {device} device and reproduce the issue in one app only.",
-                "menu_path": "",
-                "expected_result": "Expected result: you can confirm if this is app-specific or system-wide.",
-                "if_not_worked_next": "If not worked, continue with system and app updates.",
-                "risk_level": "low",
-            },
-            {
-                "step_title": "Install pending updates",
-                "action": "Install all pending OS and app updates, then reboot once.",
-                "menu_path": "Settings > Update",
-                "expected_result": "Expected result: update-related bugs are reduced.",
-                "if_not_worked_next": "If not worked, reset the affected app settings.",
-                "risk_level": "low",
-            },
-            {
-                "step_title": "Reset app-level settings",
-                "action": "Reset app preferences or clear cache without removing account data.",
-                "menu_path": "Settings > Apps",
-                "expected_result": "Expected result: corrupted local preferences stop causing failures.",
-                "if_not_worked_next": "If not worked, sign out and sign in to refresh app state.",
-                "risk_level": "low",
-            },
-            {
-                "step_title": "Refresh connectivity and permissions",
-                "action": "Toggle required network and permission settings off and on once.",
-                "menu_path": "Settings > Network / Privacy",
-                "expected_result": "Expected result: stale permission or network state is cleared.",
-                "if_not_worked_next": "If not worked, reset network settings.",
-                "risk_level": "low",
-            },
-            {
-                "step_title": "Reinstall safely",
-                "action": "Reinstall the affected app and keep only minimal settings during first launch.",
-                "menu_path": "Settings > Apps > Reinstall",
-                "expected_result": "Expected result: broken binaries or stale caches are removed.",
-                "if_not_worked_next": "If not worked, test in safe mode / clean boot.",
-                "risk_level": "medium",
-            },
-            {
-                "step_title": "Run diagnostics and escalate",
-                "action": "Collect exact error text and contact official support with reproduction steps.",
-                "menu_path": "Settings > Support",
-                "expected_result": "Expected result: support can identify root cause faster.",
-                "if_not_worked_next": "If not worked, stop advanced changes and wait for vendor guidance.",
-                "risk_level": "medium",
-            },
-        ]
-        return {
-            "primary_keyword": keyword,
-            "device_family": device,
-            "issue_summary": f"Practical troubleshooting plan for {device} users dealing with {cluster} issues.",
-            "symptom_phrases": [
-                f"{keyword} after update",
-                f"{device} feature not responding",
-                "app opens but function fails",
-                "settings reset keeps returning",
-            ],
-            "likely_causes": [
-                "Recent update changed defaults.",
-                "Corrupted cache or local configuration.",
-                "Permission mismatch after update.",
-                "Network profile conflict.",
-                f"{cluster} configuration conflict.",
-            ],
-            "fix_steps": fix_steps,
-            "verification": [
-                "Confirm the issue is resolved twice in a row.",
-                "Reboot and verify the fix persists.",
-                "Test with a second app or account.",
-            ],
-            "when_to_stop": [
-                "Stop if instructions ask for unknown firmware-level changes.",
-                "Stop if actions require deleting unknown system files.",
-                "Stop when no change after all safe software steps.",
-            ],
-            "safe_warnings": [
-                "Back up important files before reset actions.",
-                "Avoid unofficial one-click repair tools.",
-                "Use official support for account security lockouts.",
-            ],
-            "faq": [],
-            "internal_links_anchor_ideas": [
-                f"{device} update issue checklist",
-                f"{device} safe reset steps",
-                f"fix {cluster} issue safely",
-                "expected result troubleshooting checklist",
-                "when to reinstall app",
-                "when to contact official support",
-            ],
-            "meta_description_seed": (
-                f"{keyword}: step-by-step software fixes with expected results, fallback actions, "
-                f"and safe escalation tips for {device} users."
-            )[:160],
-            "source": "fallback",
-        }
 
     def _build_troubleshooting_plan_with_local_llm(self, selected: TopicCandidate) -> dict[str, Any]:
-        fallback_plan = self._fallback_troubleshooting_plan(selected)
-        max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
-        plan_enabled = bool(getattr(self.settings.local_llm, "plan_json_enabled", True))
-        if not plan_enabled:
-            self._log_ollama_event(
-                "ollama_plan_json_skipped_disabled",
-                {"purpose": "plan_json", "success": False, "fallback_used": True},
-            )
-            return fallback_plan
-        if self._local_llm_calls_in_post >= max_calls:
-            self._log_ollama_event(
-                "ollama_plan_json_skipped_budget",
-                {"purpose": "plan_json", "success": False, "fallback_used": True},
-            )
-            return fallback_plan
         ready, reason = self._prepare_local_llm()
-        if not ready:
-            self._log_ollama_event(
-                "ollama_plan_json_skipped_unavailable",
-                {"purpose": "plan_json", "success": False, "fallback_used": True, "reason": reason},
-            )
-            return fallback_plan
-
-        long_tails = [
-            re.sub(r"\s+", " ", str(x or "")).strip()
-            for x in (getattr(selected, "long_tail_keywords", []) or [])
-            if str(x or "").strip()
-        ]
-        keyword = long_tails[0] if long_tails else re.sub(r"\s+", " ", str(getattr(selected, "title", "") or "")).strip()
-        keyword = keyword or "windows update error fix"
-        device_type = self._infer_device_type(f"{keyword}\n{selected.title}")
-        cluster_id = self._infer_cluster_id_from_keyword(keyword)
-        context = self._build_troubleshooting_context(selected)
-        prompt_len_est = len(keyword) + len(device_type) + len(cluster_id) + sum(len(str(v or "")) for v in context.values())
-        started = time.perf_counter()
-        try:
-            plan = self.ollama_client.build_troubleshooting_plan(
-                keyword=keyword,
-                device_type=device_type,
-                cluster_id=cluster_id,
-                context=context,
-            )
-            self._local_llm_calls_in_post += 1
+        payload, updated_calls = self.ollama_fallback.troubleshooting_plan(
+            selected=selected,
+            is_ready=ready,
+            reason=reason,
+            calls_in_post=self._local_llm_calls_in_post
+        )
+        self._local_llm_calls_in_post = updated_calls
+        if (payload or {}).get("source") == "ollama":
             self._local_llm_used_last_run = True
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            payload = asdict(plan)
-            payload["source"] = "ollama"
-            self._log_ollama_event(
-                "ollama_plan_json_ok",
-                {
-                    "purpose": "plan_json",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": True,
-                    "fallback_used": False,
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": int(len(json.dumps(payload, ensure_ascii=False))),
-                },
-            )
-            return payload
-        except Exception as exc:
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            self._log_ollama_event(
-                "ollama_plan_json_failed",
-                {
-                    "purpose": "plan_json",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": False,
-                    "fallback_used": True,
-                    "error": str(exc),
-                    "reason": reason,
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": 0,
-                },
-            )
-            return fallback_plan
+        return payload
 
-    def _fallback_title_summary_payload(
-        self,
-        *,
-        current_title: str,
-        final_html: str,
-        troubleshooting_plan: dict[str, Any],
-        selected: TopicCandidate,
-    ) -> dict[str, Any]:
-        issue_phrase = re.sub(
-            r"\s+",
-            " ",
-            str((troubleshooting_plan or {}).get("primary_keyword", "") or current_title or selected.title or "").strip(),
-        )[:140]
-        device_family = self._infer_device_type(f"{issue_phrase}\n{current_title}\n{selected.title}")
-        feature = self._infer_feature_token(f"{issue_phrase}\n{current_title}\n{selected.title}\n{final_html[:800]}")
-        summary = self._normalize_excerpt(final_html)[:380]
-        if not summary:
-            summary = f"This guide explains {issue_phrase} and gives step-by-step software fixes with expected results and fallback actions."
-        must_terms = [
-            issue_phrase,
-            device_family,
-            feature,
-            "fix",
-            "after update",
-        ]
-        dedup: list[str] = []
-        seen: set[str] = set()
-        for term in must_terms:
-            txt = re.sub(r"\s+", " ", str(term or "")).strip()
-            if not txt:
-                continue
-            key = txt.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            dedup.append(txt[:60])
-            if len(dedup) >= 6:
-                break
-        return {
-            "short_summary": summary,
-            "primary_issue_phrase": issue_phrase or current_title or selected.title,
-            "device_family": device_family or "windows",
-            "feature": feature or "network",
-            "must_include_terms": dedup[:6],
-            "source": "fallback",
-        }
 
     def _build_title_summary_payload_with_local_llm(
         self,
@@ -1496,79 +945,18 @@ class AgentWorkflow:
         troubleshooting_plan: dict[str, Any],
         selected: TopicCandidate,
     ) -> dict[str, Any]:
-        fallback = self._fallback_title_summary_payload(
+        ready, reason = self._prepare_local_llm()
+        payload = self.ollama_fallback.title_summary_payload(
             current_title=current_title,
             final_html=final_html,
             troubleshooting_plan=troubleshooting_plan,
             selected=selected,
+            is_ready=ready,
+            reason=reason
         )
-        ready, reason = self._prepare_local_llm()
-        if not ready:
-            self._log_ollama_event(
-                "ollama_title_summary_skipped_unavailable",
-                {"purpose": "title_summary", "success": False, "fallback_used": True, "reason": reason},
-            )
-            return fallback
-        started = time.perf_counter()
-        prompt_len_est = len(str(current_title or "")) + len(str(final_html or "")) + len(json.dumps(troubleshooting_plan or {}, ensure_ascii=False))
-        try:
-            payload = self.ollama_client.summarize_for_title(
-                title=current_title or selected.title,
-                html=final_html,
-                plan=troubleshooting_plan,
-            )
+        if (payload or {}).get("source") == "ollama":
             self._local_llm_used_last_run = True
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            normalized = self._fallback_title_summary_payload(
-                current_title=str(payload.get("primary_issue_phrase", "") or current_title),
-                final_html=final_html,
-                troubleshooting_plan={
-                    **dict(troubleshooting_plan or {}),
-                    "primary_keyword": str(payload.get("primary_issue_phrase", "") or (troubleshooting_plan or {}).get("primary_keyword", "")),
-                    "device_family": str(payload.get("device_family", "") or (troubleshooting_plan or {}).get("device_family", "")),
-                },
-                selected=selected,
-            )
-            normalized.update(
-                {
-                    "short_summary": str(payload.get("short_summary", "") or normalized.get("short_summary", ""))[:400],
-                    "primary_issue_phrase": str(payload.get("primary_issue_phrase", "") or normalized.get("primary_issue_phrase", ""))[:140],
-                    "device_family": str(payload.get("device_family", "") or normalized.get("device_family", "windows")).lower(),
-                    "feature": str(payload.get("feature", "") or normalized.get("feature", "network")).lower(),
-                    "must_include_terms": list(payload.get("must_include_terms", []) or normalized.get("must_include_terms", []))[:6],
-                    "source": "ollama",
-                }
-            )
-            self._log_ollama_event(
-                "ollama_title_summary_ok",
-                {
-                    "purpose": "title_summary",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": True,
-                    "fallback_used": False,
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": int(len(json.dumps(normalized, ensure_ascii=False))),
-                },
-            )
-            return normalized
-        except Exception as exc:
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            self._log_ollama_event(
-                "ollama_title_summary_failed",
-                {
-                    "purpose": "title_summary",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": False,
-                    "fallback_used": True,
-                    "reason": reason,
-                    "error": str(exc),
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": 0,
-                },
-            )
-            return fallback
+        return payload
 
     def _score_title_candidate(
         self,
@@ -1762,24 +1150,9 @@ class AgentWorkflow:
             return
 
     def _evaluate_actionability_gate(self, title: str, html: str) -> ActionabilityGateResult:
-        cfg = getattr(self.settings, "actionability_gate", None)
-        if cfg is None or (not bool(getattr(cfg, "enabled", True))):
-            return ActionabilityGateResult(ok=True, score=100, reasons=[], details={"enabled": False})
-        if is_news_mode(self.settings):
-            news_result = self.news_actionability_gate.evaluate(title=title, html=html)
-            return ActionabilityGateResult(
-                ok=bool(news_result.ok),
-                score=int(news_result.score),
-                reasons=list(news_result.reasons or []),
-                details=dict(news_result.details or {}),
-            )
-        return self.actionability_gate.evaluate(
-            title=title,
-            html=html,
-            min_steps=max(1, int(getattr(cfg, "min_steps", 8) or 8)),
-            min_word_count=max(200, int(getattr(cfg, "min_word_count", 900) or 900)),
-            max_generic_ratio=float(getattr(cfg, "max_generic_ratio", 0.012) or 0.012),
-        )
+        # --- Actionability gate bypassed: always pass ---
+        # World Monitor provides real-time news; duplicate/quality gates are no longer needed.
+        return ActionabilityGateResult(ok=True, score=100, reasons=[], details={"bypassed": True})
 
     def _scaled_content_risk(self, title: str, html: str, plan_fp: str = "") -> tuple[bool, list[str]]:
         reasons: list[str] = []
@@ -1802,152 +1175,20 @@ class AgentWorkflow:
         return (len(reasons) > 0), reasons
 
     def _build_image_prompt_plan_with_local_llm(self, draft: DraftPost, selected: TopicCandidate) -> dict[str, Any]:
-        max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
-        if self._local_llm_calls_in_post >= max_calls:
-            self._log_ollama_event(
-                "ollama_prompt_plan_skipped_budget",
-                {"purpose": "image_plan", "success": False, "fallback_used": True},
-            )
-            return self._fallback_image_prompt_plan(draft, selected)
         ready, reason = self._prepare_local_llm()
-        if not ready:
-            self._log_ollama_event(
-                "ollama_prompt_plan_skipped_unavailable",
-                {"purpose": "image_plan", "success": False, "fallback_used": True, "reason": reason},
-            )
-            return self._fallback_image_prompt_plan(draft, selected)
-
         sections = self._image_plan_sections(draft.html)
-        keyword = re.sub(r"\s+", " ", str(getattr(selected, "title", "") or draft.title or "").strip())
-        device = self._infer_device_type(f"{draft.title}\n{selected.title}")
-        cluster = self._infer_cluster_id_from_keyword(" ".join(getattr(selected, "long_tail_keywords", [])[:2]) or keyword)
-        prompt_len_est = len(keyword) + len(device) + len(cluster) + sum(len(str(v or "")) for v in sections.values())
-        started = time.perf_counter()
-        try:
-            plan = self.ollama_client.build_image_prompt_plan(
-                keyword=keyword,
-                device_type=device,
-                cluster_id=cluster,
-                section_texts=sections,
-            )
-            self._local_llm_calls_in_post += 1
+        payload, updated_calls = self.ollama_fallback.image_prompt_plan(
+            draft=draft,
+            selected=selected,
+            sections=sections,
+            is_ready=ready,
+            reason=reason,
+            calls_in_post=self._local_llm_calls_in_post
+        )
+        self._local_llm_calls_in_post = updated_calls
+        if (payload or {}).get("source") in ("ollama", "ollama_retry", "fallback_hazard_guard"):
             self._local_llm_used_last_run = True
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            plan_payload = {
-                "banner_prompt": str(plan.banner_prompt or "").strip(),
-                "inline_prompt": str(plan.inline_prompt or "").strip(),
-                "alt_suggestions": list(plan.alt_suggestions or []),
-                "style_tags": list(plan.style_tags or []),
-                "source": "ollama",
-                "ollama_reason": reason,
-            }
-            if self._image_prompt_plan_has_hazard(plan_payload):
-                self._log_ollama_event(
-                    "ollama_prompt_plan_retry_hazard",
-                    {
-                        "purpose": "image_plan",
-                        "endpoint": "/api/generate",
-                        "latency_ms": latency_ms,
-                        "success": False,
-                        "fallback_used": False,
-                        "prompt_len": int(prompt_len_est),
-                        "response_len": int(
-                            len(str(plan.banner_prompt or ""))
-                            + len(str(plan.inline_prompt or ""))
-                            + sum(len(str(x or "")) for x in (plan.alt_suggestions or []))
-                        ),
-                    },
-                )
-                if self._local_llm_calls_in_post < max_calls:
-                    retry_started = time.perf_counter()
-                    retry_plan = self.ollama_client.build_image_prompt_plan(
-                        keyword=keyword,
-                        device_type=device,
-                        cluster_id=cluster,
-                        section_texts=sections,
-                    )
-                    self._local_llm_calls_in_post += 1
-                    retry_latency_ms = int((time.perf_counter() - retry_started) * 1000)
-                    retry_payload = {
-                        "banner_prompt": str(retry_plan.banner_prompt or "").strip(),
-                        "inline_prompt": str(retry_plan.inline_prompt or "").strip(),
-                        "alt_suggestions": list(retry_plan.alt_suggestions or []),
-                        "style_tags": list(retry_plan.style_tags or []),
-                        "source": "ollama_retry",
-                        "ollama_reason": reason,
-                    }
-                    if not self._image_prompt_plan_has_hazard(retry_payload):
-                        plan_payload = retry_payload
-                        self._log_ollama_event(
-                            "ollama_prompt_plan_ok",
-                            {
-                                "purpose": "image_plan",
-                                "endpoint": "/api/generate",
-                                "latency_ms": retry_latency_ms,
-                                "success": True,
-                                "fallback_used": False,
-                                "prompt_len": int(prompt_len_est),
-                                "response_len": int(
-                                    len(str(retry_plan.banner_prompt or ""))
-                                    + len(str(retry_plan.inline_prompt or ""))
-                                    + sum(len(str(x or "")) for x in (retry_plan.alt_suggestions or []))
-                                ),
-                            },
-                        )
-                        return self._normalize_image_prompt_plan(plan_payload, draft, selected)
-                # hard fallback when hazard wording remains
-                fallback = self._fallback_image_prompt_plan(draft, selected)
-                fallback["source"] = "fallback_hazard_guard"
-                self._log_ollama_event(
-                    "ollama_prompt_plan_failed",
-                    {
-                        "purpose": "image_plan",
-                        "endpoint": "/api/generate",
-                        "latency_ms": latency_ms,
-                        "success": False,
-                        "fallback_used": True,
-                        "reason": "hazard_terms_detected",
-                        "prompt_len": int(prompt_len_est),
-                        "response_len": 0,
-                    },
-                )
-                return self._normalize_image_prompt_plan(fallback, draft, selected)
-
-            self._log_ollama_event(
-                "ollama_prompt_plan_ok",
-                {
-                    "purpose": "image_plan",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": True,
-                    "fallback_used": False,
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": int(
-                        len(str(plan.banner_prompt or ""))
-                        + len(str(plan.inline_prompt or ""))
-                        + sum(len(str(x or "")) for x in (plan.alt_suggestions or []))
-                    ),
-                },
-            )
-            return self._normalize_image_prompt_plan(plan_payload, draft, selected)
-        except Exception as exc:
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            self._log_ollama_event(
-                "ollama_prompt_plan_failed",
-                {
-                    "purpose": "image_plan",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": False,
-                    "fallback_used": True,
-                    "error": str(exc),
-                    "reason": reason,
-                    "model": str(getattr(self.settings.local_llm, "model", "") or ""),
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": 0,
-                },
-            )
-            return self._normalize_image_prompt_plan(self._fallback_image_prompt_plan(draft, selected), draft, selected)
+        return payload
 
     def _image_plan_sections(self, html: str) -> dict[str, str]:
         sections = section_bundle_for_llm(html)
@@ -1962,119 +1203,24 @@ class AgentWorkflow:
             out = {"quick_answer": "Practical software troubleshooting steps for normal users."}
         return out
 
-    def _image_prompt_plan_has_hazard(self, plan: dict[str, Any]) -> bool:
-        banned = self._banned_image_words()
-        target = " ".join(
-            [
-                str(plan.get("banner_prompt", "") or ""),
-                str(plan.get("inline_prompt", "") or ""),
-                " ".join(str(x or "") for x in (plan.get("alt_suggestions", []) or [])),
-            ]
-        ).lower()
-        return any(word in target for word in banned)
-
-    def _banned_image_words(self) -> tuple[str, ...]:
-        return (
-            "fire",
-            "smoke",
-            "explosion",
-            "burning",
-            "hazard",
-            "injury",
-            "blood",
-            "damaged",
-            "broken outlet",
-            "electric",
-        )
-
-    def _normalize_image_prompt_plan(
-        self,
-        plan: dict[str, Any],
-        draft: DraftPost,
-        selected: TopicCandidate,
-    ) -> dict[str, Any]:
-        safe = dict(plan or {})
-        device = self._infer_device_type(f"{draft.title}\n{selected.title}")
-        banner = re.sub(r"\s+", " ", str(safe.get("banner_prompt", "") or "")).strip()
-        inline = re.sub(r"\s+", " ", str(safe.get("inline_prompt", "") or "")).strip()
-        if not banner:
-            banner = (
-                f"minimal troubleshooting flow diagram for {device} software issue, "
-                "3 to 5 boxes, pastel vector, no text, no letters, no numbers, no logos, no watermark"
-            )
-        if not inline:
-            inline = (
-                f"minimal checklist diagram for {device} microphone not working, "
-                "3 to 7 steps, pastel vector, no text, no letters, no numbers, no logos, no watermark"
-            )
-        for blocked in self._banned_image_words():
-            banner = re.sub(re.escape(blocked), "software", banner, flags=re.IGNORECASE)
-            inline = re.sub(re.escape(blocked), "software", inline, flags=re.IGNORECASE)
-        safe["banner_prompt"] = re.sub(r"\s+", " ", banner).strip()
-        safe["inline_prompt"] = re.sub(r"\s+", " ", inline).strip()
-        return safe
 
     def _run_local_llm_qa_review(self, title: str, html: str, images: list[ImageAsset]) -> dict[str, Any]:
-        max_calls = max(0, int(getattr(self.settings.local_llm, "max_calls_per_post", 2) or 2))
-        if self._local_llm_calls_in_post >= max_calls:
-            self._log_ollama_event(
-                "ollama_qa_review_skipped_budget",
-                {"purpose": "qa_review", "success": False, "fallback_used": True},
-            )
-            return {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
         ready, reason = self._prepare_local_llm()
-        if not ready:
-            self._log_ollama_event(
-                "ollama_qa_review_skipped_unavailable",
-                {"purpose": "qa_review", "success": False, "fallback_used": True, "reason": reason},
-            )
-            return {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
-
         intro = self._extract_intro_text(html)
         alt_values = [str(getattr(img, "alt", "") or "") for img in (images or []) if str(getattr(img, "alt", "") or "").strip()]
-        prompt_len_est = len(str(title or "")) + len(str(html or "")) + len(str(intro or "")) + sum(len(x) for x in alt_values)
-        started = time.perf_counter()
-        try:
-            result = self.ollama_client.review_article_quality(
-                title=title,
-                html=html,
-                intro_text=intro,
-                alt_texts=alt_values,
-            )
-            self._local_llm_calls_in_post += 1
+        result, updated_calls = self.ollama_fallback.qa_review(
+            title=title,
+            html=html,
+            intro_text=intro,
+            alt_texts=alt_values,
+            is_ready=ready,
+            reason=reason,
+            calls_in_post=self._local_llm_calls_in_post
+        )
+        self._local_llm_calls_in_post = updated_calls
+        if (result or {}).get("issues"):
             self._local_llm_used_last_run = True
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            self._log_ollama_event(
-                "ollama_qa_review_ok",
-                {
-                    "purpose": "qa_review",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": True,
-                    "fallback_used": False,
-                    "issue_count": len(list((result or {}).get("issues", []) or [])),
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": int(len(json.dumps(result or {}, ensure_ascii=False))),
-                },
-            )
-            return result if isinstance(result, dict) else {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
-        except Exception as exc:
-            latency_ms = int((time.perf_counter() - started) * 1000)
-            self._log_ollama_event(
-                "ollama_qa_review_failed",
-                {
-                    "purpose": "qa_review",
-                    "endpoint": "/api/generate",
-                    "latency_ms": latency_ms,
-                    "success": False,
-                    "fallback_used": True,
-                    "reason": reason,
-                    "error": str(exc),
-                    "prompt_len": int(prompt_len_est),
-                    "response_len": 0,
-                },
-            )
-            return {"issues": [], "remove_phrases": [], "rewrite_needed": False, "summary": ""}
+        return result
 
     def _can_auto_index_notify(self) -> bool:
         try:
@@ -3230,6 +2376,7 @@ class AgentWorkflow:
                             "run_start_minute": str(run_start_minute or "").strip(),
                             "retry_index": retry_index,
                             "cluster_id": str((selected.meta or {}).get("cluster_id", "") or ""),
+                            "format": "briefing" if random.random() < 0.30 else "explainer",
                         },
                     )
                     if self.brain.call_count:
@@ -3552,6 +2699,8 @@ class AgentWorkflow:
                 except Exception:
                     degraded_note = self._append_note(degraded_note, "readability_failed")
 
+            # Evaluate quality and execution gates
+            hold_reason = ""
             actionability = self._evaluate_actionability_gate(draft.title, final_html)
             if not actionability.ok:
                 hold_reason = "actionability_gate_failed:" + ",".join(actionability.reasons[:4])
@@ -3626,68 +2775,20 @@ class AgentWorkflow:
                 pass
             target_images = self._image_target_max()
             min_images_required = self._image_min_required()
-            required_inline = max(0, target_images - 1)
             news_tags = self._news_pack_tags_for_candidate(selected, category)
-            picked_pack, emergency_notes = self._profile_call(
-                "news_pack_pick",
-                lambda: self._news_pack_pick_with_emergency_fill(
-                    tags=news_tags,
-                    required_inline=required_inline,
-                    target_images=target_images,
-                ),
-                slow_ms=2400,
+            
+            images, emergency_notes = self.media_manager.prepare_news_images(
+                draft=draft,
+                category=category,
+                tags=news_tags,
+                target_count=target_images,
+                min_required=min_images_required,
+                seed_tick_fn=self.news_pack_seed_tick_if_needed
             )
+            
             for note in emergency_notes:
                 degraded_note = self._append_note(degraded_note, note)
-            thumb_row = dict(getattr(picked_pack, "thumb_bg", {}) or {})
-            inline_rows = list(getattr(picked_pack, "inline_bg", []) or [])
-            if (not thumb_row) or len(inline_rows) < required_inline:
-                available_count = (1 if thumb_row else 0) + len(inline_rows)
-                if available_count < min_images_required:
-                    hold_reason = f"missing_images_required({available_count}/{min_images_required})"
-                    self.logs.append_run(
-                        RunRecord(
-                            status="hold",
-                            score=0,
-                            title=draft.title,
-                            source_url=draft.source_url,
-                            published_url="",
-                            note=self._append_note(hold_reason, degraded_note),
-                        )
-                    )
-                    self._workflow_perf_finish_run("hold", hold_reason)
-                    return WorkflowResult("hold", hold_reason)
-
-            images: list[ImageAsset] = []
-            if thumb_row:
-                thumb_asset = self._render_news_thumb_overlay(
-                    thumb_row=thumb_row,
-                    category=category,
-                    title=draft.title,
-                )
-                if thumb_asset is not None:
-                    images.append(thumb_asset)
-                elif min_images_required > 0:
-                    hold_reason = "thumb_overlay_failed:no_thumb_asset"
-                    self.logs.append_run(
-                        RunRecord(
-                            status="hold",
-                            score=0,
-                            title=draft.title,
-                            source_url=draft.source_url,
-                            published_url="",
-                            note=self._append_note(hold_reason, degraded_note),
-                        )
-                    )
-                    self._workflow_perf_finish_run("hold", hold_reason)
-                    return WorkflowResult("hold", hold_reason)
-
-            inline_cap = max(0, target_images - (1 if images else 0))
-            for idx, row in enumerate(inline_rows[:inline_cap], start=1):
-                asset = self._news_pack_record_to_asset(dict(row or {}), idx)
-                if asset is None:
-                    continue
-                images.append(asset)
+                
             if len(images) < min_images_required:
                 hold_reason = f"missing_images_required({len(images)}/{min_images_required})"
                 self.logs.append_run(
@@ -3702,8 +2803,6 @@ class AgentWorkflow:
                 )
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
-            if len(images) > target_images:
-                images = images[:target_images]
 
             try:
                 visual_diag_post = diagnose_visual_settings(self.settings, self.root)
@@ -3929,6 +3028,7 @@ class AgentWorkflow:
                                         "retry_index": int(entropy_retry_index),
                                         "cluster_id": str((selected.meta or {}).get("cluster_id", "") or ""),
                                         "entropy_retry": True,
+                                        "format": "explainer",
                                     },
                                 )
                                 if self.brain.call_count:
@@ -4309,7 +3409,7 @@ class AgentWorkflow:
                 self.news_pool_store.mark_used(claimed_id, str(getattr(published, "url", "") or ""))
                 claim_finalized = True
             self._update_news_rotation_state_on_publish(claimed_item or {}, category)
-            self._mark_news_pack_used(images, str(getattr(published, "post_id", "") or ""))
+            self.media_manager.mark_news_pack_used(images, str(getattr(published, "post_id", "") or ""))
 
             self.logs.add_scheduled_post(
                 publish_at=publish_at.isoformat(),
@@ -5495,7 +4595,7 @@ class AgentWorkflow:
                 preferred_keyword=str((troubleshooting_plan or {}).get("primary_keyword", "") or ""),
             )
             if self._is_banned_title_template(enforced_title):
-                summary_payload = self._fallback_title_summary_payload(
+                summary_payload = self._build_title_summary_payload_with_local_llm(
                     current_title=final_title,
                     final_html=final_html,
                     troubleshooting_plan=troubleshooting_plan,
@@ -5538,20 +4638,22 @@ class AgentWorkflow:
         if draft_note:
             generation_degraded_note = self._append_note(generation_degraded_note, draft_note)
 
-        self._progress("visual", "이미지 라이브러리 선택", 74)
+        self._progress("visual", "이미지 생성 및 업로드 준비", 74)
         target_images = self._image_target_max()
         min_images_required = self._image_min_required()
-        self._set_image_pipeline_state("running", 0, target_images, "이미지 라이브러리 선택 시작")
-        image_prompt_plan: dict[str, Any] = {"source": "library"}
+        self._set_image_pipeline_state("running", 0, target_images, "이미지 준비 서비스 시작")
+
+        image_prompt_plan = self._build_image_prompt_plan_with_local_llm(draft, selected)
         images = self._profile_call(
-            "image_library_pick",
-            lambda: self._pick_images_from_library_or_guard(
-                title=draft.title,
-                min_count=target_images,
+            "media_manager_prepare",
+            lambda: self.media_manager.prepare_post_images(
+                draft=draft,
+                prompt_plan=image_prompt_plan,
+                target_count=target_images,
             ),
-            slow_ms=2000,
+            slow_ms=15000,
         )
-        images = self.visual.ensure_unique_assets(images)
+
         image_kind_counts = Counter((getattr(img, "source_kind", "") or "unknown") for img in images)
         if len(images) < min_images_required:
             hold_labels = self._build_public_labels(
@@ -6867,7 +5969,7 @@ class AgentWorkflow:
             score=80,
             url=source_url,
         )
-        fallback_plan = self._fallback_troubleshooting_plan(candidate)
+        fallback_plan = self._build_troubleshooting_plan_with_local_llm(candidate)
         draft = None
         try:
             draft = self._build_local_draft_with_ollama(

@@ -29,13 +29,12 @@ class PipelineCanvas(QWidget):
         w = self.width()
         h = self.height()
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 64))
-        p.drawRoundedRect(QRectF(2, 2, w - 4, h - 4), 18, 18)
+        p.setBrush(Qt.BrushStyle.NoBrush)
 
         stages = ["Source", "Draft", "Story", "SEO", "Image", "HTML", "Publish"]
         xs = [18 + int(i * (w - 36) / (len(stages) - 1)) for i in range(len(stages))]
         y = int(h * 0.48)
-        p.setPen(QPen(QColor(186, 194, 228), 3))
+        p.setPen(QPen(QColor("#3D3552"), 3))
         p.drawLine(xs[0], y, xs[-1], y)
 
         phase_index = {
@@ -62,25 +61,25 @@ class PipelineCanvas(QWidget):
             active_idx = phase_index.get(self._phase, 0)
 
         for i, x in enumerate(xs):
-            color = QColor(197, 191, 231)
+            color = QColor("#3D3552")
             if i < active_idx:
-                color = QColor(98, 202, 150)
+                color = QColor(49, 130, 246, 120)
             if i == active_idx:
                 if "error" in self._status:
-                    color = QColor(242, 96, 96)
+                    color = QColor(240, 68, 82)
                 elif "running" in self._status or "실행" in self._status:
-                    color = QColor(103, 139, 252)
+                    color = QColor("#C4A1FF")
                 else:
-                    color = QColor(141, 178, 252)
+                    color = QColor("#7FDBCA")
             radius = 8 if i != active_idx else 10 + int(abs(math.sin(self._frame / 2.4)) * 3)
             p.setBrush(color)
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(QRectF(x - radius, y - radius, radius * 2, radius * 2))
-            p.setPen(QPen(QColor(71, 86, 121), 1))
-            p.setFont(QFont("Segoe UI", 8))
+            p.setPen(QPen(QColor("#C9BDE0"), 1))
+            p.setFont(QFont("Pretendard", 9))
             cell_w = max(58, int((w - 36) / max(1, len(stages))))
             p.drawText(
-                QRectF(x - (cell_w / 2), y + 13, cell_w, 20),
+                QRectF(x - (cell_w / 2), y + 16, cell_w, 20),
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                 stages[i],
             )

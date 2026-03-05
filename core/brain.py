@@ -469,22 +469,23 @@ class GeminiBrain:
         plan_keyword = re.sub(r"\s+", " ", str(plan_payload.get("primary_keyword", "") or "")).strip()
         effective_main_keyword = plan_keyword or main_keyword
         prompt = (
-            "Write a 1300-1800 word news analysis and interpretation article in valid HTML body fragment only.\n"
+            "Write a highly engaging, viral, 1000-1500 word tech news article in valid HTML body fragment only.\n"
             "Language policy: US English only. Never output Korean.\n"
             "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
-            "Audience: US news readers who want insightful commentary on tech trends.\n"
-            "Scope: Deep-dive tech news analysis and editorial interpretation.\n"
+            "Audience: Mass market internet users looking for an entertaining, scroll-stopping summary of tech news.\n"
+            "Tone: Viral, breathtaking, slightly sarcastic, and highly conversational. Use rhetorical questions and short, punchy paragraphs.\n"
+            "AI EVASION MANDATE: Your text must have extreme variability in perplexity and burstiness. "
+            "Mix very short sentences with long, rambling ones. Use slang or colloquialisms (e.g. 'Wait, what?', 'Wild times') where natural. "
+            "Never sound like a robot summarizing text. Drop the corporate essay style entirely.\n"
             "Do not output internal metadata, pipeline status strings, debug tokens, or schema fragments.\n"
             "Do not mention screenshots or 'see image above'.\n"
-            "Avoid generic essay style; use a sharp, editorial journalistic voice.\n"
-            "Use short, engaging paragraphs and insightful section headers.\n"
-            "Required H2 section flow:\n"
-            "The Front Line (Summary of the event)\n"
-            "The Core Impact (Why this matters right now)\n"
-            "Behind the Shift (Background/Analysis)\n"
-            "Looking Ahead (Projections/Future trends)\n"
-            "What This Means for You (Conclusion/Actionability)\n"
-            "Sources\n"
+            "Use aggressive formatting: bold the most shocking claims, and use blockquotes for impact.\n"
+            "Required H2 section flow (make the headers catchy and clickbaity):\n"
+            "Wait, What Just Happened? (The hook/summary)\n"
+            "Why This Changes Everything (The impact)\n"
+            "The Messy Details (Background)\n"
+            "The Bottom Line (Conclusion/What's next)\n"
+            "Receipts (Sources)\n"
             "Keep legal/ad safety: no defamation, no unverified claims.\n"
             f"Main keyword: {effective_main_keyword}\n"
             "Analysis questions to cover naturally (at least 3):\n"
@@ -770,6 +771,62 @@ class GeminiBrain:
         )
         perspective_hint = facet_emphasis_hint(facet_context.selected_facet)
         plan_payload["retry_index"] = int(facet_context.retry_index_effective)
+        # ── 뉴스 브리핑 형식 분기 (짧은 다이제스트) ──
+        if str(plan_payload.get("format", "")).strip().lower() == "briefing":
+            briefing_prompt = (
+                "Write a concise US tech news briefing digest in valid HTML body fragment only.\n"
+                "Language policy: US English only. Never output Korean.\n"
+                "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
+                "Tone: fast-paced, high-signal, zero filler.\n"
+                "Target length: 500-700 words.\n"
+                "Required structure:\n"
+                "H2: TL;DR (2-3 sentence executive summary)\n"
+                "H2: Key Developments (5-8 bullet points with bold lead phrases)\n"
+                "H2: Why It Matters (3-4 short paragraphs with impact analysis)\n"
+                "H2: What To Watch (3-4 forward-looking bullet points)\n"
+                "H2: Sources (labeled links)\n"
+                "Do NOT include FAQ section.\n"
+                "Sources must include the original source URL exactly once and 1-2 authority links.\n"
+                "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n"
+                "focus_keywords must be a JSON array.\n"
+                f"News category: {category_norm}\n"
+                f"Primary topic phrase: {primary_topic}\n"
+                f"Original source URL: {source_link}\n"
+                f"Authority links allow-list: {safe_authorities}\n"
+                f"Plan JSON: {json.dumps(plan_payload, ensure_ascii=False)}\n"
+                f"Source title: {candidate.title}\n"
+                f"Source body: {candidate.body[:3000]}\n"
+            )
+            briefing_payload = self._extract_json(
+                self._generate_text(
+                    briefing_prompt,
+                    system_instruction=(
+                        "You are a rapid-fire tech news briefing editor. "
+                        "Deliver maximum information density in minimum words."
+                    ),
+                )
+            )
+            html = _render_news_html(briefing_payload)
+            _focus_keywords = briefing_payload.get("focus_keywords", [])
+            if not isinstance(_focus_keywords, list):
+                _focus_keywords = []
+            urls = briefing_payload.get("extracted_urls", [])
+            if not isinstance(urls, list):
+                urls = []
+            out_title = str(briefing_payload.get("title_draft", briefing_payload.get("title", candidate.title))).strip() or candidate.title
+            if not out_title.startswith("[Briefing]"):
+                out_title = f"[Briefing] {out_title}"
+            self._save_news_module_rotation(selected_modules)
+            return DraftPost(
+                title=out_title[:110],
+                alt_titles=[],
+                summary=str(briefing_payload.get("summary", "")).strip()[:500],
+                html=html,
+                score=100,
+                source_url=source_link,
+                extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
+            )
+
         prompt = (
             "Write a US tech news explainer article in valid HTML body fragment only.\n"
             "Language policy: US English only. Never output Korean.\n"

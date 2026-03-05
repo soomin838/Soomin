@@ -1,0 +1,263 @@
+/* ═══════════════════════════════════════════════════
+   Rezy Cute Dark — Warm Dark + Cream Text + Lavender
+   키치 × 심플 × 가독성
+   ═══════════════════════════════════════════════════ */
+
+/* ── Global ── */
+QWidget {
+    color: #F0ECF8;
+    font-family: "Pretendard", "Segoe UI", "Malgun Gothic", "맑은 고딕", "Inter", sans-serif;
+    font-size: 14px;
+}
+
+QMainWindow {
+    background-color: #141218;
+}
+
+/* ── Command Center Cards ── */
+QFrame#CommandCenter {
+    background-color: rgba(28, 24, 37, 0.88);
+    border: 1px solid rgba(196, 161, 255, 0.15);
+    border-radius: 14px;
+}
+
+/* ── Labels ── */
+QLabel {
+    color: #E0D8EF;
+}
+
+QLabel.HeroTitle {
+    color: #FFFFFF;
+    font-size: 26px;
+    font-weight: 800;
+    letter-spacing: -0.3px;
+}
+
+QLabel.StatusLabel {
+    color: #C4A1FF;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+QLabel#Title {
+    font-size: 22px;
+    font-weight: 800;
+    color: #F0ECF8;
+}
+
+QLabel#Subtitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: #B8AECF;
+}
+
+QLabel#Value {
+    font-size: 24px;
+    font-weight: 800;
+    color: #F0ECF8;
+}
+
+QLabel#ValueSmall {
+    font-size: 13px;
+    color: #C9BDE0;
+}
+
+QLabel#StatusChip {
+    background: rgba(196, 161, 255, 0.22);
+    border: 1px solid rgba(196, 161, 255, 0.45);
+    color: #E8DEFF;
+    border-radius: 12px;
+    padding: 4px 10px;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+/* ── Buttons ── */
+QPushButton {
+    background-color: rgba(28, 24, 37, 0.90);
+    border: 1px solid rgba(196, 161, 255, 0.20);
+    color: #F0ECF8;
+    border-radius: 12px;
+    padding: 10px 18px;
+    font-weight: 700;
+    font-size: 13px;
+}
+
+QPushButton:hover {
+    background-color: rgba(196, 161, 255, 0.15);
+    border-color: rgba(196, 161, 255, 0.50);
+}
+
+QPushButton.PrimaryAction {
+    background-color: rgba(196, 161, 255, 0.18);
+    border: 1px solid #C4A1FF;
+    color: #E8DEFF;
+}
+
+QPushButton.PrimaryAction:hover {
+    background-color: rgba(196, 161, 255, 0.30);
+}
+
+QPushButton#PrimaryBtn {
+    background: #C4A1FF;
+    color: #141218;
+    border: 1px solid #C4A1FF;
+    font-weight: 800;
+}
+
+QPushButton#PrimaryBtn:hover {
+    background: #D4B8FF;
+}
+
+QPushButton#DangerBtn {
+    background: rgba(239, 68, 68, 0.15);
+    color: #FF8A8A;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+/* ── Inputs ── */
+QLineEdit, QComboBox, QTextEdit, QSpinBox, QPlainTextEdit {
+    background: rgba(20, 18, 24, 0.85);
+    border: 1px solid rgba(196, 161, 255, 0.18);
+    border-radius: 10px;
+    padding: 8px 10px;
+    color: #F0ECF8;
+    font-size: 13px;
+}
+
+QLineEdit:focus, QTextEdit:focus {
+    border: 1px solid #C4A1FF;
+}
+
+/* ── Log Viewer ── */
+QTextEdit#LogViewer {
+    background-color: #0E0C12;
+    color: #99EDCC;
+    border: 1px solid rgba(196, 161, 255, 0.12);
+    border-radius: 10px;
+    font-family: "Cascadia Code", "Consolas", "D2Coding", monospace;
+    font-size: 12px;
+    padding: 10px;
+}
+
+/* ── Progress Bar ── */
+QProgressBar {
+    background-color: rgba(28, 24, 37, 0.60);
+    border: 1px solid rgba(196, 161, 255, 0.12);
+    border-radius: 5px;
+    text-align: center;
+    color: transparent;
+    height: 8px;
+}
+
+QProgressBar::chunk {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #C4A1FF, stop:0.5 #7FDBCA, stop:1 #FF8AC4);
+    border-radius: 4px;
+}
+
+/* ── Scroll ── */
+QScrollArea {
+    border: none;
+    background: transparent;
+}
+
+QScrollBar:vertical {
+    border: none;
+    background: transparent;
+    width: 5px;
+}
+
+QScrollBar::handle:vertical {
+    background: rgba(196, 161, 255, 0.30);
+    border-radius: 2px;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+/* ── Lists ── */
+QListWidget {
+    background: transparent;
+    border: none;
+}
+
+/* ── Timeline Dots ── */
+QLabel#TimelineDot {
+    border-radius: 12px;
+    padding: 3px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    background: rgba(196, 161, 255, 0.10);
+    color: #C9BDE0;
+}
+
+QLabel#TimelineDot[stepState="active"] {
+    background: rgba(196, 161, 255, 0.28);
+    color: #F0ECF8;
+    border: 1px solid rgba(196, 161, 255, 0.55);
+}
+
+QLabel#TimelineDot[stepState="done"] {
+    background: rgba(127, 219, 202, 0.22);
+    color: #99EDCC;
+}
+
+/* ── CheckBox ── */
+QCheckBox {
+    color: #C9BDE0;
+    font-size: 12px;
+}
+
+/* ── ToolButton ── */
+QToolButton {
+    background: rgba(28, 24, 37, 0.80);
+    border: 1px solid rgba(196, 161, 255, 0.15);
+    border-radius: 10px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #E0D8EF;
+}
+
+QToolButton:hover {
+    border-color: rgba(196, 161, 255, 0.50);
+    background: rgba(196, 161, 255, 0.15);
+}
+
+/* ── Glass Card (widget) ── */
+QFrame#GlassCard {
+    background: rgba(28, 24, 37, 0.78);
+    border: 1px solid rgba(196, 161, 255, 0.12);
+    border-radius: 14px;
+}
+
+QFrame#GlassCard[state="success"] {
+    background: rgba(127, 219, 202, 0.15);
+}
+
+QFrame#GlassCard[state="warning"] {
+    background: rgba(255, 204, 0, 0.12);
+}
+
+QFrame#GlassCard[state="error"] {
+    background: rgba(255, 100, 100, 0.15);
+}
+
+QFrame#GlassCard[state="active"] {
+    background: rgba(196, 161, 255, 0.20);
+}
+
+/* ── Hero Card ── */
+QFrame#HeroCard {
+    background: rgba(28, 24, 37, 0.80);
+    border: 1px solid rgba(196, 161, 255, 0.14);
+    border-radius: 18px;
+}
+
+/* ── Dialog ── */
+QDialog {
+    background-color: #1A1625;
+    border-radius: 16px;
+}

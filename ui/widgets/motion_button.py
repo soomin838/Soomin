@@ -9,20 +9,20 @@ class MotionButton(QPushButton):
     def __init__(self, text: str = "", parent=None) -> None:
         super().__init__(text, parent)
         self._shadow = QGraphicsDropShadowEffect(self)
-        self._shadow.setBlurRadius(18)
-        self._shadow.setOffset(0, 5)
-        self._shadow.setColor(QColor(0, 0, 0, 62))
+        self._shadow.setBlurRadius(20)
+        self._shadow.setOffset(0, 3)
+        self._shadow.setColor(QColor(0, 0, 0, 25))
         self.setGraphicsEffect(self._shadow)
         self._anim_refs: list[QSequentialAnimationGroup] = []
 
     def enterEvent(self, event) -> None:
         self._shadow.setBlurRadius(24)
-        self._shadow.setOffset(0, 6)
+        self._shadow.setOffset(0, 4)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
-        self._shadow.setBlurRadius(18)
-        self._shadow.setOffset(0, 5)
+        self._shadow.setBlurRadius(20)
+        self._shadow.setOffset(0, 3)
         super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:

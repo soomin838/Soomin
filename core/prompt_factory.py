@@ -17,6 +17,75 @@ class PromptPack:
     ban_tokens: list[str]
     temperature: float
     top_p: float
+    persona_id: str = ""
+
+
+# ── Persona Pool (5개 로테이션) ───────────────────────
+_PERSONA_POOL = [
+    {
+        "id": "analyst",
+        "label": "Tech Analyst",
+        "system": (
+            "You are a sharp, no-nonsense senior tech analyst writing for a high-traffic blog. "
+            "Break down complex topics into digestible insights with data-backed arguments. "
+            "Use precise language, cite numbers/benchmarks, and include a clear 'bottom line' takeaway. "
+            "Avoid fluff—every sentence must add value."
+        ),
+        "temperature": 0.80,
+    },
+    {
+        "id": "storyteller",
+        "label": "Viral Storyteller",
+        "system": (
+            "You are a brilliant tech storyteller who makes readers feel like they're watching a thriller unfold. "
+            "Use vivid metaphors, dramatic pacing, and cliffhanger transitions. "
+            "Turn dry tech news into gripping narratives. Short paragraphs, rapid-fire sentences, "
+            "occasional one-liners for emphasis. Make it impossible to stop scrolling."
+        ),
+        "temperature": 0.92,
+    },
+    {
+        "id": "educator",
+        "label": "Friendly Educator",
+        "system": (
+            "You are a patient, approachable tech educator writing for curious minds. "
+            "Explain concepts as if talking to a bright friend over coffee. "
+            "Use analogies, step-by-step breakdowns, and 'Why should I care?' sections. "
+            "Sprinkle in humor to keep things light. Make complex topics feel simple and actionable."
+        ),
+        "temperature": 0.85,
+    },
+    {
+        "id": "contrarian",
+        "label": "Devil's Advocate",
+        "system": (
+            "You are a provocative tech commentator who challenges mainstream narratives. "
+            "Start with a bold, counter-intuitive claim and back it up with evidence. "
+            "Use rhetorical questions, strategic sarcasm, and 'unpopular opinion' angles. "
+            "Your goal is to make readers think differently, not just consume passively."
+        ),
+        "temperature": 0.90,
+    },
+    {
+        "id": "practitioner",
+        "label": "Hands-On Practitioner",
+        "system": (
+            "You are a battle-tested developer/engineer sharing real-world experience. "
+            "Focus on practical code snippets, config examples, and 'what I actually did' narratives. "
+            "Use casual dev-speak ('Let me show you the trick...', 'Here's the gotcha...'). "
+            "Include troubleshooting tips and edge cases that only experience reveals."
+        ),
+        "temperature": 0.82,
+    },
+]
+
+
+# ── Ban tokens (AI 감지 회피) ─────────────────────────
+_GLOBAL_BAN_TOKENS = [
+    "in conclusion", "furthermore", "delve", "testament",
+    "tapestry", "seamlessly", "as an AI", "overall", "in summary",
+    "it is important to note", "it's worth noting",
+]
 
 
 class PromptFactory:
@@ -36,7 +105,8 @@ class PromptFactory:
                 pass
 
         style_variant_id = self._style_variant_id(purpose_key, seed)
-        pack = self._build_default_pack(purpose_key, style_variant_id)
+        persona = self._select_persona(purpose_key, seed)
+        pack = self._build_default_pack(purpose_key, style_variant_id, persona)
         try:
             pack_path.parent.mkdir(parents=True, exist_ok=True)
             pack_path.write_text(
@@ -52,26 +122,42 @@ class PromptFactory:
         idx = int(hashlib.sha1(src).hexdigest(), 16) % 12
         return f"v{idx + 1}"
 
-    def _build_default_pack(self, purpose: str, style_variant_id: str) -> PromptPack:
-        system = "Write practical US-English troubleshooting content with deterministic structure."
-        user = "Follow search intent and actionable steps."
-        must_include = ["Expected result:", "If not:", "Time to try:"]
-        ban_tokens = ["as an AI", "in conclusion", "overall", "delve"]
-        temperature = 0.35
-        top_p = 0.9
+    def _select_persona(self, purpose: str, seed: str) -> dict:
+        """날짜+seed 해시 기반으로 5개 페르소나 중 하나를 자동 선택."""
+        src = f"persona:{datetime.now(timezone.utc).date().isoformat()}:{purpose}:{seed}".encode("utf-8")
+        idx = int(hashlib.sha256(src).hexdigest(), 16) % len(_PERSONA_POOL)
+        return _PERSONA_POOL[idx]
 
-        if purpose == "headline":
-            user = "Generate a troubleshooting-first headline with concrete user intent."
-            must_include = ["fix", "not working"]
+    def _build_default_pack(self, purpose: str, style_variant_id: str, persona: dict) -> PromptPack:
+        system = str(persona.get("system", ""))
+        user = "Deliver maximum engagement and click-through-rate value."
+        must_include: list[str] = []
+        ban_tokens = list(_GLOBAL_BAN_TOKENS)
+        temperature = float(persona.get("temperature", 0.85))
+        top_p = 0.95
+        persona_id = str(persona.get("id", ""))
+
+        if purpose in {"headline", "choose_best"}:
+            system = (
+                "You are an expert YouTube thumbnail creator and viral BuzzFeed editor. "
+                "Your goal is to write the most clickable, shocking, and irresistible headlines possible. "
+                "Use curiosity gaps, numbers, and emotional triggers (Fear, Greed, Shock, Anger)."
+            )
+            user = "Generate a clickbait headline for tech news that makes it physically impossible not to click."
+            must_include = []
+            temperature = 0.95
         elif purpose == "rewrite_to_actionable":
-            user = "Rewrite into step-by-step fixes with clear branch handling."
-            temperature = 0.25
+            user = (
+                "Rewrite the source material into an addictive, scrolling-friendly article. "
+                "Use very short paragraphs (1-2 sentences max). Add humorous or sarcastic commentary. "
+                "Drop in a few conversational idioms (e.g. 'mind-blowing', 'train wreck', 'absolute game-changer'). "
+                "Ensure the perplexity and burstiness are extremely high to fool AI detectors."
+            )
+            temperature = 0.88
         elif purpose == "extract_keywords":
-            user = "Extract long-tail troubleshooting keywords with OS + trigger terms."
-            must_include = ["after update", "error", "not working"]
-        elif purpose == "choose_best":
-            user = "Prioritize non-duplicate, high-intent troubleshooting candidates."
-            temperature = 0.2
+            system = "You are an AdSense SEO expert specializing in viral trends."
+            user = "Extract high-CPC, viral, trending long-tail keywords that people are desperately searching for right now."
+            temperature = 0.5
 
         return PromptPack(
             purpose=purpose,
@@ -82,5 +168,5 @@ class PromptFactory:
             ban_tokens=ban_tokens,
             temperature=temperature,
             top_p=top_p,
+            persona_id=persona_id,
         )
-

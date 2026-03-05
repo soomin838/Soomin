@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 from .r2_uploader import R2Config, upload_file as r2_upload_file
 from .visual import ImageAsset
+from .services.html_normalizer import HtmlNormalizer
 
 
 @dataclass
@@ -540,35 +541,16 @@ class Publisher:
         raise RuntimeError("Unsupported credentials path for Blogger OAuth")
 
     def _normalize_text_entities(self, text: str) -> str:
-        out = str(text or "")
-        for _ in range(2):
-            dec = html_lib.unescape(out)
-            if dec == out:
-                break
-            out = dec
-        return out
+        return HtmlNormalizer.normalize_text_entities(text)
 
     def _normalize_html_entities(self, html: str) -> str:
-        out = str(html or "")
-        for _ in range(2):
-            dec = html_lib.unescape(out)
-            if dec == out:
-                break
-            out = dec
-        return out
+        return HtmlNormalizer.normalize_html_entities(html)
 
     def _normalize_meta_description(self, description: str | None) -> str:
-        raw = str(description or "").strip()
-        if not raw:
-            return ""
-        out = self._normalize_text_entities(raw)
-        out = re.sub(r"\s+", " ", out).strip()
-        if len(out) > 160:
-            out = out[:157].rstrip(" ,.;:") + "..."
-        return out
+        return HtmlNormalizer.normalize_meta_description(description)
 
     def _contains_hangul(self, text: str) -> bool:
-        return bool(re.search(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", str(text or "")))
+        return HtmlNormalizer.contains_hangul(text)
 
     def _assert_english_only_payload(
         self,
@@ -577,53 +559,10 @@ class Publisher:
         labels: list[str],
         meta_description: str,
     ) -> None:
-        chunks = [
-            ("title", str(title or "")),
-            ("html", str(html or "")),
-            ("labels", " ".join(str(x or "") for x in (labels or []))),
-            ("meta_description", str(meta_description or "")),
-        ]
-        for key, value in chunks:
-            if not value:
-                continue
-            if self._contains_hangul(value):
-                raise RuntimeError(f"english_only_gate_failed:{key}:hangul_detected")
+        HtmlNormalizer.assert_english_only_payload(title, html, labels, meta_description)
 
     def _clean_html_tags(self, html: str) -> str:
-        out = str(html or "")
-        # Remove active tags and obvious placeholder leak text before publish.
-        out = re.sub(r"<script\\b[^>]*>.*?</script>", "", out, flags=re.IGNORECASE | re.DOTALL)
-        out = re.sub(r"<style\\b[^>]*>.*?</style>", "", out, flags=re.IGNORECASE | re.DOTALL)
-        # Keep body markup semantic and lightweight: remove inline styles and JS handlers.
-        out = re.sub(r"\sstyle=\"[^\"]*\"", "", out, flags=re.IGNORECASE)
-        out = re.sub(r"\sstyle='[^']*'", "", out, flags=re.IGNORECASE)
-        out = re.sub(r"\son[a-z]+\s*=\s*\"[^\"]*\"", "", out, flags=re.IGNORECASE)
-        out = re.sub(r"\son[a-z]+\s*=\s*'[^']*'", "", out, flags=re.IGNORECASE)
-        out = re.sub(
-            r"(section context visual|concept visual|supporting chart|focused screenshot)",
-            "",
-            out,
-            flags=re.IGNORECASE,
-        )
-        out = re.sub(
-            r"<p[^>]*>\s*illustration\s+showing[^<]*</p>",
-            "",
-            out,
-            flags=re.IGNORECASE,
-        )
-        out = re.sub(
-            r"https?://(?:www\.)?google\.com/[^\s\"<]*",
-            "",
-            out,
-            flags=re.IGNORECASE,
-        )
-        out = re.sub(
-            r"(?m)^\s*#{1,6}\s+(.+)$",
-            "",
-            out,
-        )
-        out = re.sub(r"\n{3,}", "\n\n", out)
-        return out.strip()
+        return HtmlNormalizer.clean_html_tags(html)
 
     def _merge_images(
         self,

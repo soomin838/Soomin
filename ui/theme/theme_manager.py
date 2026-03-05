@@ -12,7 +12,7 @@ from ui.resources.pathing import resolve_qss, resolve_theme_qss
 
 @dataclass
 class ThemeState:
-    mode: str = "auto"
+    mode: str = "dark"
     animation_intensity: str = "high"
 
 
@@ -31,11 +31,11 @@ class ThemeManager:
 
     def load_preferences(self) -> None:
         if not self.pref_path.exists():
-            self.state = ThemeState(mode="auto", animation_intensity="high")
+            self.state = ThemeState(mode="dark", animation_intensity="high")
             return
         try:
             payload = json.loads(self.pref_path.read_text(encoding="utf-8"))
-            mode = str((payload or {}).get("theme_mode", "auto") or "auto").strip().lower()
+            mode = str((payload or {}).get("theme_mode", "dark") or "dark").strip().lower()
             if mode not in {"auto", "light", "dark"}:
                 mode = "auto"
             intensity = str((payload or {}).get("animation_intensity", "high") or "high").strip().lower()
@@ -43,7 +43,7 @@ class ThemeManager:
                 intensity = "high"
             self.state = ThemeState(mode=mode, animation_intensity=intensity)
         except Exception:
-            self.state = ThemeState(mode="auto", animation_intensity="high")
+            self.state = ThemeState(mode="dark", animation_intensity="high")
 
     def save_preferences(self) -> None:
         payload = {}
@@ -73,8 +73,8 @@ class ThemeManager:
         return self.state.mode
 
     def set_mode(self, mode: str) -> None:
-        clean = str(mode or "auto").strip().lower()
-        self.state.mode = clean if clean in {"auto", "light", "dark"} else "auto"
+        clean = str(mode or "dark").strip().lower()
+        self.state.mode = clean if clean in {"auto", "light", "dark"} else "dark"
         self.save_preferences()
         self.apply()
 
@@ -89,13 +89,23 @@ class ThemeManager:
         return self.state.animation_intensity
 
     def _load_qss(self) -> str:
-        preferred = resolve_theme_qss(self.resolved_mode())
-        if preferred.exists():
-            return preferred.read_text(encoding="utf-8")
+        parts: list[str] = []
+
+        # Always load neon_theme.qss as the base layer
+        base_qss = resolve_qss("neon_theme.qss")
+        if base_qss.exists():
+            parts.append(base_qss.read_text(encoding="utf-8"))
+
+        # Overlay mode-specific QSS on top
+        mode_qss = resolve_theme_qss(self.resolved_mode())
+        if mode_qss.exists():
+            parts.append(mode_qss.read_text(encoding="utf-8"))
+
+        if parts:
+            return "\n".join(parts)
 
         # Backward compatibility fallback
         files = [resolve_qss("theme.qss"), resolve_qss("glass.qss")]
-        parts: list[str] = []
         for path in files:
             if path.exists():
                 parts.append(path.read_text(encoding="utf-8"))
@@ -106,3 +116,4 @@ class ThemeManager:
         if not raw:
             return
         self.app.setStyleSheet(raw)
+

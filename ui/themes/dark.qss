@@ -1,131 +1,137 @@
-﻿QMainWindow, QDialog {
-    background-color: #0B0F1A;
+﻿/* ═══════════════════════════════════════
+   Rezy Cute Dark — dark.qss (통일 톤)
+   ═══════════════════════════════════════ */
+
+QMainWindow, QDialog {
+    background-color: #141218;
 }
 
 QWidget {
-    color: #EAF0FF;
-    font-family: "Segoe UI", "Malgun Gothic", "맑은 고딕", "Inter", sans-serif;
+    color: #F0ECF8;
+    font-family: "Pretendard", "Segoe UI", "Malgun Gothic", "맑은 고딕", "Inter", sans-serif;
     font-size: 14px;
 }
 
 QLabel#Title {
     font-size: 22px;
     font-weight: 800;
-    color: #EAF0FF;
+    color: #F0ECF8;
 }
 
 QLabel#Subtitle {
     font-size: 13px;
     font-weight: 600;
-    color: #B7C3D6;
+    color: #B8AECF;
 }
 
 QLabel#Value {
     font-size: 24px;
     font-weight: 800;
-    color: #EAF0FF;
+    color: #F0ECF8;
 }
 
 QLabel#ValueSmall {
     font-size: 13px;
-    color: #B7C3D6;
+    color: #C9BDE0;
 }
 
 #TopNav {
-    background: rgba(18,24,38,0.66);
-    border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 20px;
+    background: rgba(28, 24, 37, 0.72);
+    border: 1px solid rgba(196, 161, 255, 0.10);
+    border-radius: 18px;
 }
 
 QFrame#GlassCard {
-    background: rgba(18,24,38,0.66);
-    border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 16px;
+    background: rgba(28, 24, 37, 0.78);
+    border: 1px solid rgba(196, 161, 255, 0.12);
+    border-radius: 14px;
 }
 
 QFrame#GlassCard[state="success"] {
-    background: rgba(34,197,94,0.18);
+    background: rgba(127, 219, 202, 0.15);
 }
 
 QFrame#GlassCard[state="warning"] {
-    background: rgba(245,158,11,0.20);
+    background: rgba(255, 204, 0, 0.14);
 }
 
 QFrame#GlassCard[state="error"] {
-    background: rgba(239,68,68,0.20);
+    background: rgba(255, 100, 100, 0.15);
 }
 
 QFrame#GlassCard[state="active"] {
-    background: rgba(156,134,255,0.24);
+    background: rgba(196, 161, 255, 0.20);
 }
 
 QFrame#HeroCard {
-    background: rgba(18,24,38,0.72);
-    border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 20px;
+    background: rgba(28, 24, 37, 0.80);
+    border: 1px solid rgba(196, 161, 255, 0.14);
+    border-radius: 18px;
 }
 
 QLabel#StatusChip {
-    background: rgba(156,134,255,0.26);
-    border: 1px solid rgba(156,134,255,0.46);
+    background: rgba(196, 161, 255, 0.22);
+    border: 1px solid rgba(196, 161, 255, 0.45);
     border-radius: 12px;
     padding: 4px 10px;
     font-size: 12px;
     font-weight: 700;
+    color: #E8DEFF;
 }
 
 QLabel#TimelineDot {
     border-radius: 12px;
     padding: 3px 8px;
     font-size: 12px;
-    background: rgba(124,138,166,0.20);
-    color: #B7C3D6;
+    font-weight: 600;
+    background: rgba(196, 161, 255, 0.10);
+    color: #C9BDE0;
 }
 
 QLabel#TimelineDot[stepState="active"] {
-    background: rgba(59,130,246,0.28);
-    color: #EAF0FF;
-    border: 1px solid rgba(59,130,246,0.56);
+    background: rgba(196, 161, 255, 0.28);
+    color: #F0ECF8;
+    border: 1px solid rgba(196, 161, 255, 0.55);
 }
 
 QLabel#TimelineDot[stepState="done"] {
-    background: rgba(34,197,94,0.26);
-    color: #EAF0FF;
+    background: rgba(127, 219, 202, 0.22);
+    color: #99EDCC;
 }
 
 QPushButton, QToolButton {
-    background: rgba(18,24,38,0.78);
-    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(28, 24, 37, 0.85);
+    border: 1px solid rgba(196, 161, 255, 0.18);
     border-radius: 12px;
     padding: 8px 14px;
     font-size: 13px;
     font-weight: 700;
-    color: #EAF0FF;
+    color: #F0ECF8;
 }
 
 QPushButton:hover, QToolButton:hover {
-    border: 1px solid rgba(156,134,255,0.72);
-    background: rgba(156,134,255,0.20);
+    border: 1px solid rgba(196, 161, 255, 0.55);
+    background: rgba(196, 161, 255, 0.15);
 }
 
 QPushButton#PrimaryBtn {
-    background: #9C86FF;
-    color: #0B0F1A;
-    border: 1px solid #9C86FF;
+    background: #C4A1FF;
+    color: #141218;
+    border: 1px solid #C4A1FF;
 }
 
 QPushButton#DangerBtn {
-    background: #EF4444;
-    color: white;
-    border: 1px solid #EF4444;
+    background: rgba(239, 68, 68, 0.15);
+    color: #FF8A8A;
+    border: 1px solid rgba(239, 68, 68, 0.35);
 }
 
 QLineEdit, QComboBox, QTextEdit, QSpinBox, QPlainTextEdit {
-    background: rgba(18,24,38,0.70);
-    border: 1px solid rgba(255,255,255,0.20);
-    border-radius: 12px;
+    background: rgba(20, 18, 24, 0.80);
+    border: 1px solid rgba(196, 161, 255, 0.18);
+    border-radius: 10px;
     padding: 6px 8px;
-    color: #EAF0FF;
+    color: #F0ECF8;
 }
 
 QListWidget {
@@ -134,18 +140,18 @@ QListWidget {
 }
 
 QProgressBar {
-    background: rgba(124,138,166,0.22);
-    border-radius: 10px;
-    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(196, 161, 255, 0.10);
+    border-radius: 9px;
+    border: 1px solid rgba(196, 161, 255, 0.10);
     text-align: center;
-    color: #EAF0FF;
-    height: 18px;
+    color: #F0ECF8;
+    height: 16px;
 }
 
 QProgressBar::chunk {
-    border-radius: 9px;
+    border-radius: 8px;
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #9C86FF, stop:0.5 #2DD4BF, stop:1 #FF5DA2);
+        stop:0 #C4A1FF, stop:0.5 #7FDBCA, stop:1 #FF8AC4);
 }
 
 QScrollArea {
@@ -154,5 +160,5 @@ QScrollArea {
 }
 
 QCheckBox {
-    color: #B7C3D6;
+    color: #C9BDE0;
 }

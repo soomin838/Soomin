@@ -100,11 +100,18 @@ class VisualPipeline:
             idx = len(assets) + 1
             context = seed_contexts[cursor % len(seed_contexts)] if seed_contexts else (draft.summary or draft.title)
             cursor += 1
+            
+            # Use specific prompt from plan if available
+            specific_prompt = None
+            if prompt_plan and "inline_prompt" in prompt_plan:
+                # Add some variation per index
+                specific_prompt = f"{prompt_plan['inline_prompt']} (variation {idx})"
+                
             generated = self._build_local_generated_asset(
                 role="content",
                 index=idx,
                 paragraph=str(context or ""),
-                keyword=draft.title,
+                keyword=draft.title if not specific_prompt else specific_prompt,
             )
             if generated is None:
                 break
