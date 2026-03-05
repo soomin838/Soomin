@@ -51,6 +51,7 @@ $pyInstallerArgs = @(
   "--onefile",
   "--windowed",
   "--name", "RezeroAgent",
+  "--icon", "ui\assets\rezero_icon.ico",
   "--hidden-import", "tzdata",
   "--hidden-import", "numpy",
   "--collect-data", "tzdata",

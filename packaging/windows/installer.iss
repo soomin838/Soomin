@@ -14,10 +14,13 @@ ArchitecturesInstallIn64BitMode=arm64 x64compatible
 CloseApplications=yes
 CloseApplicationsFilter=RezeroAgent.exe
 RestartApplications=no
+SetupIconFile=..\..\ui\assets\rezero_icon.ico
+UninstallDisplayIcon={app}\RezeroAgent.exe
 
 [Files]
 Source: "..\..\dist\RezeroAgent.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\dist\version.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\ui\assets\rezero_icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; Keep a desktop executable in sync for users who launch directly from Desktop.
 Source: "..\..\dist\RezeroAgent.exe"; DestDir: "{autodesktop}"; DestName: "RezeroAgent.exe"; Flags: ignoreversion
 
@@ -28,10 +31,10 @@ Type: files; Name: "{group}\RezeroAgent.lnk"
 Type: files; Name: "{autodesktop}\RezeroAgent.exe"
 
 [Icons]
-Name: "{group}\RezeroAgent"; Filename: "{app}\RezeroAgent.exe"
+Name: "{group}\RezeroAgent"; Filename: "{app}\RezeroAgent.exe"; IconFilename: "{app}\rezero_icon.ico"
 Name: "{group}\Uninstall RezeroAgent"; Filename: "{uninstallexe}"
 ; Always create a desktop shortcut in active install context.
-Name: "{autodesktop}\RezeroAgent"; Filename: "{app}\RezeroAgent.exe"
+Name: "{autodesktop}\RezeroAgent"; Filename: "{app}\RezeroAgent.exe"; IconFilename: "{app}\rezero_icon.ico"
 
 [Run]
 Filename: "{app}\RezeroAgent.exe"; Description: "Launch RezeroAgent"; Flags: nowait postinstall skipifsilent
