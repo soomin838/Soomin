@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -13,11 +13,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.publisher import Publisher  # noqa: E402
-from core.run_metrics import RunMetricsLogger, parse_reason_codes  # noqa: E402
-from core.settings import load_settings  # noqa: E402
-from core.visual import ImageAsset  # noqa: E402
-from core.workflow import AgentWorkflow  # noqa: E402
+from re_core.publisher import Publisher  # noqa: E402
+from re_core.run_metrics import RunMetricsLogger, parse_reason_codes  # noqa: E402
+from re_core.settings import load_settings  # noqa: E402
+from re_core.visual import ImageAsset  # noqa: E402
+from re_core.workflow import AgentWorkflow  # noqa: E402
 
 
 def _write_settings(temp_root: Path) -> Path:

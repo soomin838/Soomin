@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import random
 from pathlib import Path
@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.settings import load_settings
-from core.visual import VisualPipeline
+from re_core.settings import load_settings
+from re_core.visual import VisualPipeline
 
 
 def main() -> int:

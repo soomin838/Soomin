@@ -103,19 +103,30 @@ class VisualSettings:
     target_images_per_post: int = 5
     max_banner_images: int = 1
     max_inline_images: int = 4
-    image_provider: str = "library"
+    image_provider: str = "generated"
     screenshot_priority_keywords: list[str] = field(default_factory=list)
-    enable_gemini_image_generation: bool = False
+    enable_gemini_image_generation: bool = True
     gemini_image_model: str = "models/imagen-3.0-generate-001"
     gemini_prompt_model: str = "gemini-2.0-flash"
     allow_chart_fallback: bool = False
     image_request_interval_seconds: int = 20
+    provider_order: list[str] = field(
+        default_factory=lambda: ["airforce_imagen4", "gemini", "pollinations_auth", "pollinations_anon"]
+    )
+    airforce_enabled: bool = True
+    airforce_api_key: str = ""
+    airforce_base_url: str = "https://api.airforce"
+    airforce_image_model: str = "imagen-4"
+    airforce_timeout_sec: int = 45
     pollinations_enabled: bool = False
     pollinations_api_key: str = ""
     pollinations_base_url: str = ""
     pollinations_thumbnail_model: str = ""
     pollinations_content_model: str = ""
     pollinations_timeout_sec: int = 0
+    allow_library_fallback: bool = False
+    allow_rendered_fallback: bool = False
+    generated_r2_prefix: str = "generated"
     thumbnail_ocr_verify: bool = False
     cache_dir: str = "storage/image_cache"
     fallback_banner: str = "assets/fallback/banner.png"
@@ -123,7 +134,7 @@ class VisualSettings:
     prompt_suffix: str = "no text, no letters, no numbers, no logos, no watermark"
     thumbnail_text_overlay_enabled: bool = True
     thumbnail_text_style: str = "yt_clean"
-    thumbnail_text_max_words: int = 3
+    thumbnail_text_max_words: int = 4
 
 
 @dataclass
@@ -158,7 +169,7 @@ class NewsPackSettings:
     r2_prefix: str = "news_pack"
     manifest_path: str = "storage/state/news_pack_manifest.jsonl"
     state_path: str = "storage/state/news_pack_state.json"
-    thumb_hook_max_words: int = 3
+    thumb_hook_max_words: int = 4
     thumb_overlay_enabled: bool = True
     thumb_overlay_style: str = "yt_clean"
     thumb_overlay_font_paths: list[str] = field(
@@ -314,8 +325,8 @@ class QualitySettings:
     humanity_weight_percent: int = 20
     humanity_min_soft_score: int = 70
     humanity_hard_fail_block: bool = True
-    min_word_count: int = 900
-    max_word_count: int = 1400
+    min_word_count: int = 1800
+    max_word_count: int = 2200
     min_h2: int = 5
     min_h3: int = 0
     min_list_items: int = 3
@@ -424,7 +435,7 @@ class QualitySettings:
 class ActionabilityGateSettings:
     enabled: bool = True
     min_steps: int = 8
-    min_word_count: int = 900
+    min_word_count: int = 1400
     max_generic_ratio: float = 0.012
 
 
@@ -757,8 +768,8 @@ def load_settings(path: Path) -> AppSettings:
 
     # Mirror spec blocks into runtime-compatible legacy settings.
     if content_raw:
-        quality_raw["min_word_count"] = int(content_raw.get("min_words", quality_raw.get("min_word_count", 1400)))
-        quality_raw["max_word_count"] = int(content_raw.get("max_words", quality_raw.get("max_word_count", 1900)))
+        quality_raw["min_word_count"] = int(content_raw.get("min_words", quality_raw.get("min_word_count", 1800)))
+        quality_raw["max_word_count"] = int(content_raw.get("max_words", quality_raw.get("max_word_count", 2200)))
     if llm_raw:
         raw.setdefault("gemini", {})
         raw["gemini"]["max_calls_per_run"] = int(llm_raw.get("max_calls_per_post", raw["gemini"].get("max_calls_per_run", 3)))
@@ -771,11 +782,7 @@ def load_settings(path: Path) -> AppSettings:
                 )
             else:
                 raw.setdefault("visual", {})
-                if bool(llm_raw.get("enable_image_generation")):
-                    settings_warnings.append(
-                        "llm.enable_image_generation=true is ignored by Stage-13 policy (gemini image generation disabled)."
-                    )
-                raw["visual"]["enable_gemini_image_generation"] = False
+                raw["visual"]["enable_gemini_image_generation"] = bool(llm_raw.get("enable_image_generation"))
     if images_raw:
         visual_raw_existing = raw.get("visual", {})
         has_visual_explicit = isinstance(visual_raw_existing, dict) and bool(visual_raw_existing)
@@ -800,22 +807,30 @@ def load_settings(path: Path) -> AppSettings:
                 "prompt_suffix",
                 str(images_raw.get("prompt_suffix", "no text, no letters, no numbers, no logos, no watermark")),
             )
-            src_provider = str(images_raw.get("provider", "library") or "library").strip().lower()
-            if src_provider not in {"library", "gemini"}:
+            src_provider = str(images_raw.get("provider", "generated") or "generated").strip().lower()
+            if src_provider not in {"library", "gemini", "generated", "airforce", "pollinations"}:
                 settings_warnings.append(
-                    f"images.provider={src_provider} is unsupported; defaulting visual.image_provider=library."
+                    f"images.provider={src_provider} is unsupported; defaulting visual.image_provider=generated."
                 )
-                src_provider = "library"
-            if src_provider == "gemini":
-                settings_warnings.append(
-                    "images.provider=gemini is ignored by Stage-13 policy; forcing visual.image_provider=library."
-                )
-                raw["visual"]["image_provider"] = "library"
-                raw["visual"]["enable_gemini_image_generation"] = False
-            else:
+                src_provider = "generated"
+            if src_provider == "library":
                 raw["visual"]["image_provider"] = "library"
                 raw["visual"].setdefault("enable_gemini_image_generation", False)
+            else:
+                raw["visual"]["image_provider"] = src_provider
+                raw["visual"]["enable_gemini_image_generation"] = True
             raw["visual"].setdefault("pollinations_enabled", False)
+    raw.setdefault("visual", {})
+    raw["visual"].setdefault("provider_order", list(news_pack_raw.get("provider_order", []) or ["airforce_imagen4", "gemini"]))
+    raw["visual"].setdefault("airforce_enabled", True)
+    raw["visual"].setdefault("airforce_api_key", str(news_pack_raw.get("airforce_api_key", "") or ""))
+    raw["visual"].setdefault("airforce_base_url", str(news_pack_raw.get("airforce_base_url", "https://api.airforce") or "https://api.airforce"))
+    raw["visual"].setdefault("airforce_image_model", str(news_pack_raw.get("airforce_image_model", "imagen-4") or "imagen-4"))
+    raw["visual"].setdefault("airforce_timeout_sec", int(news_pack_raw.get("airforce_timeout_sec", 45) or 45))
+    raw["visual"].setdefault("pollinations_api_key", str(news_pack_raw.get("pollinations_api_key", "") or raw["visual"].get("pollinations_api_key", "")))
+    raw["visual"].setdefault("allow_library_fallback", False)
+    raw["visual"].setdefault("allow_rendered_fallback", False)
+    raw["visual"].setdefault("generated_r2_prefix", "generated")
     if publishing_raw:
         raw.setdefault("budget", {})
         raw.setdefault("publish", {})

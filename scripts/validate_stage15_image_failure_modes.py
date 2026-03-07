@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import tempfile
@@ -13,12 +13,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.brain import DraftPost  # noqa: E402
-from core.publisher import Publisher  # noqa: E402
-from core.settings import load_settings  # noqa: E402
-from core.visual import ImageAsset, VisualPipeline  # noqa: E402
-from core.workflow import AgentWorkflow  # noqa: E402
-import core.visual as visual_module  # noqa: E402
+from re_core.brain import DraftPost  # noqa: E402
+from re_core.publisher import Publisher  # noqa: E402
+from re_core.settings import load_settings  # noqa: E402
+from re_core.visual import ImageAsset, VisualPipeline  # noqa: E402
+from re_core.workflow import AgentWorkflow  # noqa: E402
+import re_core.visual as visual_module  # noqa: E402
 
 
 def _write_settings(temp_root: Path, public_base_url: str) -> Path:

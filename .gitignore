@@ -18,6 +18,7 @@ dist/
 
 # Runtime/generated app data
 storage/logs/
+storage/ledger/
 storage/sessions/
 storage/temp_images/
 storage/ui/
@@ -39,3 +40,12 @@ config/*.secrets.json
 Thumbs.db
 .idea/
 .vscode/
+
+# Local debug / temp artifacts
+tmp/
+debug_exec*.log
+assets/library_legacy_archive/
+VERSION
+test_apple.jpg
+test_imports.py
+test_media.py

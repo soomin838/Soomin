@@ -29,7 +29,7 @@ def resolve_asset(*parts: str) -> Path:
 
 
 def resolve_theme_qss(mode: str) -> Path:
-    clean = str(mode or "light").strip().lower()
+    clean = str(mode or "dark").strip().lower()
     if clean not in {"light", "dark"}:
-        clean = "light"
+        clean = "dark"
     return resolve_resource("ui", "themes", f"{clean}.qss")

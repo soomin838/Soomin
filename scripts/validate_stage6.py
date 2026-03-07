@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from pathlib import Path
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.readability import optimize_html_readability, split_sentences, strip_tags_keep_h2  # noqa: E402
+from re_core.readability import optimize_html_readability, split_sentences, strip_tags_keep_h2  # noqa: E402
 
 
 READABILITY_SETTINGS = {

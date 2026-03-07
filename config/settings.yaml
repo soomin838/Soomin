@@ -150,8 +150,8 @@ quality:
   humanity_weight_percent: 20
   humanity_min_soft_score: 70
   humanity_hard_fail_block: true
-  min_word_count: 900
-  max_word_count: 1400
+  min_word_count: 1800
+  max_word_count: 2200
   min_h2: 5
   min_h3: 0
   min_list_items: 3
@@ -372,9 +372,22 @@ visual:
   target_images_per_post: 5
   max_banner_images: 1
   max_inline_images: 4
-  image_provider: library
-  enable_gemini_image_generation: false
+  image_provider: generated
+  enable_gemini_image_generation: true
   allow_chart_fallback: false
+  provider_order:
+  - airforce_imagen4
+  - gemini
+  - pollinations_auth
+  - pollinations_anon
+  airforce_enabled: true
+  airforce_api_key: AIRFORCE_API_KEY
+  airforce_base_url: https://api.airforce
+  airforce_image_model: imagen-4
+  airforce_timeout_sec: 45
+  allow_library_fallback: false
+  allow_rendered_fallback: true
+  generated_r2_prefix: generated
   gemini_prompt_model: gemini-2.0-flash
   gemini_image_model: models/imagen-3.0-generate-001
   image_request_interval_seconds: 20
@@ -388,7 +401,7 @@ visual:
   thumbnail_ocr_verify: false
   thumbnail_text_overlay_enabled: true
   thumbnail_text_style: yt_clean
-  thumbnail_text_max_words: 3
+  thumbnail_text_max_words: 4
   screenshot_priority_keywords: []
 news_pack:
   enabled: true
@@ -423,7 +436,7 @@ news_pack:
   r2_prefix: news_pack
   manifest_path: storage/state/news_pack_manifest.jsonl
   state_path: storage/state/news_pack_state.json
-  thumb_hook_max_words: 3
+  thumb_hook_max_words: 4
   thumb_overlay_enabled: true
   thumb_overlay_style: yt_clean
   thumb_overlay_font_paths:

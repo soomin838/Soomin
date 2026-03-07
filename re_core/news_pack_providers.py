@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -31,7 +32,8 @@ class ProviderResult:
 
 
 class PollinationsProvider:
-    def __init__(self, *, auth: bool, api_key: str = "", timeout_sec: int = 35) -> None:
+    def __init__(self, *, auth: bool, api_key: str = "", model: str = "flux", timeout_sec: int = 35) -> None:
+        self.model = str(model or "flux").strip()
         self.auth = bool(auth)
         self.api_key = str(api_key or "").strip()
         self.timeout_sec = max(10, int(timeout_sec or 35))
@@ -52,9 +54,14 @@ class PollinationsProvider:
             "nologo": "true",
             "nofeed": "true",
         }
+        if self.model:
+            params["model"] = self.model
         if seed is not None:
             params["seed"] = int(seed)
-        headers = {"Accept": "image/*"}
+        headers = {
+            "Accept": "image/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
         if self.auth and self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
             headers["x-api-key"] = self.api_key
@@ -86,6 +93,9 @@ class PollinationsProvider:
 
 
 class AirforceImageProvider:
+    _last_call_finished_at: float = 0.0
+    _min_interval_after_success_sec: float = 12.0
+
     def __init__(
         self,
         *,
@@ -102,6 +112,15 @@ class AirforceImageProvider:
     @property
     def name(self) -> str:
         return "airforce_imagen4"
+
+    def _respect_rate_limit(self) -> None:
+        last = float(type(self)._last_call_finished_at or 0.0)
+        if last <= 0.0:
+            return
+        delta = time.monotonic() - last
+        wait_for = float(type(self)._min_interval_after_success_sec) - delta
+        if wait_for > 0.0:
+            time.sleep(wait_for)
 
     def generate_image(self, *, prompt: str, width: int = 1280, height: int = 720, seed: int | None = None) -> ProviderResult:
         if not self.api_key:
@@ -123,20 +142,45 @@ class AirforceImageProvider:
             "Content-Type": "application/json",
             "x-api-key": self.api_key,
         }
-        try:
-            resp = requests.post(endpoint, headers=headers, json=payload, timeout=self.timeout_sec)
-        except requests.Timeout as exc:
-            raise TemporaryProviderError("airforce_timeout") from exc
-        except Exception as exc:
-            raise TemporaryProviderError(str(exc)[:180] or "airforce_request_error") from exc
+        resp = None
+        data: dict[str, Any] = {}
+        for attempt in range(2):
+            self._respect_rate_limit()
+            try:
+                resp = requests.post(endpoint, headers=headers, json=payload, timeout=self.timeout_sec)
+            except requests.Timeout as exc:
+                type(self)._last_call_finished_at = time.monotonic()
+                raise TemporaryProviderError("airforce_timeout") from exc
+            except Exception as exc:
+                type(self)._last_call_finished_at = time.monotonic()
+                raise TemporaryProviderError(str(exc)[:180] or "airforce_request_error") from exc
+            type(self)._last_call_finished_at = time.monotonic()
 
-        try:
-            data = resp.json() or {}
-        except json.JSONDecodeError as exc:
-            data = {}
-            if resp.status_code >= 400:
-                raise BadResponseError(f"airforce_http_{resp.status_code}") from exc
-            raise BadResponseError("airforce_non_json") from exc
+            try:
+                data = resp.json() or {}
+            except json.JSONDecodeError as exc:
+                data = {}
+                if resp.status_code >= 400:
+                    if resp.status_code == 429 and attempt == 0:
+                        time.sleep(max(12, self.timeout_sec // 3))
+                        continue
+                    raise BadResponseError(f"airforce_http_{resp.status_code}") from exc
+                raise BadResponseError("airforce_non_json") from exc
+
+            error_obj = data.get("error") if isinstance(data, dict) else None
+            rate_limited = False
+            if isinstance(error_obj, dict):
+                code = str(error_obj.get("code", "") or "").strip().lower()
+                message = str(error_obj.get("message", "") or "").strip().lower()
+                rate_limited = bool(resp.status_code == 429 or code == "429" or "rate limit" in message)
+            elif resp.status_code == 429:
+                rate_limited = True
+            if rate_limited and attempt == 0:
+                time.sleep(max(12, self.timeout_sec // 3))
+                continue
+            break
+        if resp is None:
+            raise TemporaryProviderError("airforce_request_missing_response")
 
         error_obj = data.get("error") if isinstance(data, dict) else None
         if isinstance(error_obj, dict):
@@ -220,23 +264,25 @@ class GeminiImageProvider:
         clean_prompt = re.sub(r"\s+", " ", str(prompt or "").strip())
         if not clean_prompt:
             raise BadResponseError("empty_prompt")
-        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        
+        # Ensure model has 'models/' prefix
+        model_id = self.model if self.model.startswith("models/") else f"models/{self.model}"
+        # Fallback to a known working Imagen model if it's still set to the old text model
+        if "gemini" in model_id.lower() or "imagen-3.0" in model_id.lower():
+            model_id = "models/imagen-4.0-fast-generate-001"
+            
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/{model_id}:predict"
+        
+        aspect_ratio = "16:9" if width > height else "1:1" if width == height else "9:16"
+        
         payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": (
-                                f"{clean_prompt}. "
-                                f"Target size {int(width)}x{int(height)}. "
-                                "No text, no letters, no numbers, no logo, no watermark."
-                            )
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {"responseModalities": ["IMAGE"]},
+            "instances": [{"prompt": clean_prompt}],
+            "parameters": {
+                "sampleCount": 1,
+                "aspectRatio": aspect_ratio
+            }
         }
+        
         try:
             resp = requests.post(endpoint, params={"key": self.api_key}, json=payload, timeout=self.timeout_sec)
         except requests.Timeout as exc:
@@ -268,7 +314,19 @@ class GeminiImageProvider:
         )
 
     def _extract_image_payload(self, data: dict[str, Any]) -> tuple[bytes | None, str]:
-        for candidate in (data.get("candidates", []) or []):
+        predictions = data.get("predictions", []) if isinstance(data, dict) else []
+        for pred in predictions:
+            if not isinstance(pred, dict):
+                continue
+            b64_str = str(pred.get("bytesBase64Encoded", "") or "").strip()
+            if b64_str:
+                try:
+                    return base64.b64decode(b64_str), "image/jpeg"
+                except Exception:
+                    continue
+                    
+        # Fallback for old Gemini response structure just in case
+        for candidate in (data.get("candidates", []) if isinstance(data, dict) else []):
             content = candidate.get("content", {}) if isinstance(candidate, dict) else {}
             parts = content.get("parts", []) if isinstance(content, dict) else []
             for part in parts:
@@ -285,5 +343,6 @@ class GeminiImageProvider:
                     return base64.b64decode(encoded), mime
                 except Exception:
                     continue
+                    
         return None, "image/png"
 

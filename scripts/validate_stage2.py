@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 import re
@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.brain import stable_hash  # noqa: E402
-from core.news_facets import ensure_what_to_do_now_section, resolve_facet_context  # noqa: E402
+from re_core.brain import stable_hash  # noqa: E402
+from re_core.news_facets import ensure_what_to_do_now_section, resolve_facet_context  # noqa: E402
 
 
 def validate_rotation_order() -> tuple[list[str], list[str]]:

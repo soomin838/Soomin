@@ -37,7 +37,7 @@ class ThemeManager:
             payload = json.loads(self.pref_path.read_text(encoding="utf-8"))
             mode = str((payload or {}).get("theme_mode", "dark") or "dark").strip().lower()
             if mode not in {"auto", "light", "dark"}:
-                mode = "auto"
+                mode = "dark"
             intensity = str((payload or {}).get("animation_intensity", "high") or "high").strip().lower()
             if intensity not in {"high", "medium", "off"}:
                 intensity = "high"
@@ -60,6 +60,18 @@ class ThemeManager:
         )
 
     def detect_os_dark(self) -> bool:
+        import platform
+        if platform.system() == "Windows":
+            try:
+                import winreg
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+                )
+                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                return value == 0
+            except Exception:
+                pass
         palette: QPalette = self.app.palette()
         base = palette.color(QPalette.ColorRole.Window)
         return self._is_dark_color(base)
@@ -111,7 +123,17 @@ class ThemeManager:
                 parts.append(path.read_text(encoding="utf-8"))
         return "\n".join(parts)
 
+    def check_auto_theme_update(self) -> bool:
+        if self.state.mode != "auto":
+            return False
+        current_resolved = "dark" if self.detect_os_dark() else "light"
+        if getattr(self, "_last_applied_mode", "") != current_resolved:
+            self.apply()
+            return True
+        return False
+
     def apply(self) -> None:
+        self._last_applied_mode = "dark" if self.detect_os_dark() else "light" if self.state.mode == "auto" else self.state.mode
         raw = self._load_qss()
         if not raw:
             return

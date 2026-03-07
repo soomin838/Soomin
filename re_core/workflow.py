@@ -17,48 +17,54 @@ from typing import Any
 from urllib.parse import quote_plus, urlparse
 from zoneinfo import ZoneInfo
 
-from .brain import DraftPost, GeminiBrain, stable_hash
-from .actionability_gate import ActionabilityGate, ActionabilityGateResult
-from .news_actionability_gate import NewsActionabilityGate, NewsActionabilityGateResult
-from .budget import BudgetGuard
-from .asset_store import KeywordAssetStore, PostsIndexStore
-from .image_library import pick_images
-from .index_sync import BloggerIndexSync
-from .logstore import LogStore, RunRecord
-from .news_facets import ensure_what_to_do_now_section, facet_emphasis_hint, resolve_facet_context
-from .news_pool import NewsPoolStore
-from .services.worldmonitor_client import WorldMonitorClient
-from .news_pack_manifest import NewsPackManifest
-from .news_pack_picker import NewsPackPicker
-from .news_pack_seeder import NewsPackSeeder
-from .publish_ledger import PublishLedger, make_ledger_key
-from .readability import optimize_html_readability
-from .source_naturalization import apply_source_naturalization
-from .content_entropy import check_entropy
-from .visual_diagnostics import diagnose_visual_settings
-from .title_diversity import choose_diverse_title
-from .run_metrics import RunMetricsLogger, parse_reason_codes
-from .clickbait_sanitizer import sanitize_clickbait_terms
-from .ollama_client import OllamaClient
-from .ollama_manager import OllamaManager
-from .patterns import PatternEngine
-from .prompt_factory import PromptFactory
-from .publisher import Publisher
-from .quality import ContentQAGate
-from .reference_docs import ReferenceCorpus
-from .scheduler import MonthlyScheduler
-from .scout import SourceScout, TopicCandidate
-from .settings import AppSettings, is_news_mode
-from .preflight import validate_secrets
-from .text_segmenter import section_bundle_for_llm
-from .thumbnail_overlay import ThumbnailOverlayRenderer
-from .topic_growth import TopicGrower
-from .visual import ImageAsset, VisualPipeline
-from .watchdog import Watchdog
-from .r2_uploader import R2Config, upload_file as r2_upload_file
-from .services.media_manager import MediaManagerService
-from .services.metrics_tracker import MetricsTrackerService
-from .services.ollama_fallback import OllamaFallbackService
+from re_core.brain import DraftPost, GeminiBrain, stable_hash
+from re_core.actionability_gate import ActionabilityGate, ActionabilityGateResult
+from re_core.news_actionability_gate import NewsActionabilityGate, NewsActionabilityGateResult
+from re_core.budget import BudgetGuard
+from re_core.asset_store import KeywordAssetStore, PostsIndexStore
+from re_core.index_sync import BloggerIndexSync
+from re_core.logstore import LogStore, RunRecord
+from re_core.news_facets import ensure_what_to_do_now_section, facet_emphasis_hint, resolve_facet_context
+from re_core.news_pool import NewsPoolStore
+from re_core.news_clustering import NewsClusterEngine, should_skip_same_run
+from re_core.services.worldmonitor_client import WorldMonitorClient
+from re_core.news_pack_manifest import NewsPackManifest
+from re_core.news_pack_picker import NewsPackPicker
+
+from re_core.publish_ledger import PublishLedger, make_ledger_key
+from re_core.readability import optimize_html_readability
+from re_core.source_naturalization import apply_source_naturalization
+from re_core.content_entropy import check_entropy
+from re_core.visual_diagnostics import diagnose_visual_settings
+from re_core.title_diversity import choose_diverse_title
+from re_core.run_metrics import RunMetricsLogger, parse_reason_codes
+from re_core.clickbait_sanitizer import sanitize_clickbait_terms
+from re_core.ollama_client import OllamaClient
+from re_core.ollama_manager import OllamaManager
+from re_core.patterns import PatternEngine
+from re_core.prompt_factory import PromptFactory
+from re_core.publisher import Publisher
+from re_core.quality import ContentQAGate
+from re_core.reference_docs import ReferenceCorpus
+from re_core.scheduler import MonthlyScheduler
+from re_core.scout import SourceScout, TopicCandidate
+from re_core.settings import AppSettings, is_news_mode
+from re_core.story_profile import (
+    build_story_tags,
+    filter_relevant_authority_links,
+    infer_story_profile,
+)
+from re_core.preflight import validate_secrets
+from re_core.text_segmenter import section_bundle_for_llm
+from re_core.thumbnail_overlay import ThumbnailOverlayRenderer
+from re_core.topic_growth import TopicGrower
+from re_core.visual import ImageAsset, VisualPipeline
+from re_core.watchdog import Watchdog
+from re_core.r2_uploader import R2Config, upload_file as r2_upload_file
+from re_core.services.media_manager import MediaManagerService
+from re_core.services.metrics_tracker import MetricsTrackerService
+from re_core.services.ollama_fallback import OllamaFallbackService
+from re_core.services.intelligence_service import IntelligenceService
 
 
 @dataclass
@@ -95,6 +101,16 @@ class AgentWorkflow:
         )
         self._workflow_perf_path = self.root / "storage" / "logs" / "workflow_perf.jsonl"
         self.metrics_tracker = MetricsTrackerService(log_path=self._workflow_perf_path)
+        self.ollama_manager = OllamaManager(
+            root=root,
+            settings=settings.local_llm,
+            log_path=root / "storage" / "logs" / "ollama_manager.jsonl",
+        )
+        self.ollama_client = OllamaClient(
+            settings.local_llm,
+            log_path=root / "storage" / "logs" / "ollama_calls.jsonl",
+        )
+        self.intelligence = IntelligenceService(ollama_client=self.ollama_client)
         self.publisher = Publisher(
             credentials_path=root / settings.blogger.credentials_path,
             blog_id=settings.blogger.blog_id,
@@ -111,23 +127,17 @@ class AgentWorkflow:
             auto_allow_data_uri_on_blogger_405=bool(getattr(settings.publish, "auto_allow_data_uri_on_blogger_405", False)),
             min_required_images=int(getattr(settings.publish, "min_images_required", 0) or 0),
         )
+
         self.qa = ContentQAGate(
             settings.quality,
             settings.authority_links,
             qa_runtime_path=root / "storage" / "logs" / "qa_runtime.jsonl",
+            ollama_client=self.ollama_client,
         )
         self.actionability_gate = ActionabilityGate()
         self.news_actionability_gate = NewsActionabilityGate()
         self.worldmonitor = WorldMonitorClient()
-        self.ollama_manager = OllamaManager(
-            root=root,
-            settings=settings.local_llm,
-            log_path=root / "storage" / "logs" / "ollama_manager.jsonl",
-        )
-        self.ollama_client = OllamaClient(
-            settings.local_llm,
-            log_path=root / "storage" / "logs" / "ollama_calls.jsonl",
-        )
+        self.scout = SourceScout(settings.sources, root, settings.content_mode, intelligence=self.intelligence)
         self.topic_grower = TopicGrower(
             root=root,
             seeds_path=root / settings.sources.seeds_path,
@@ -162,6 +172,7 @@ class AgentWorkflow:
         self._title_fingerprint_path = self.root / "storage" / "logs" / "title_fingerprints.jsonl"
         self._news_title_shape_path = self.root / "storage" / "logs" / "news_title_shapes.jsonl"
         self._news_guard_logged: set[str] = set()
+        self._seen_cluster_ids_in_run: set[str] = set()
         self.keyword_assets = KeywordAssetStore(
             db_path=self.root / str(getattr(self.settings.keywords, "db_path", "storage/keywords.sqlite")),
         )
@@ -289,23 +300,19 @@ class AgentWorkflow:
             root=self.root,
             manifest_path=str(getattr(self.settings.news_pack, "manifest_path", "storage/state/news_pack_manifest.jsonl")),
         )
-        self.news_pack_seeder = NewsPackSeeder(
-            root=self.root,
-            settings=self.settings.news_pack,
-            ollama_client=self.ollama_client,
-            gemini_api_key=str(getattr(self.settings.gemini, "api_key", "") or ""),
-            gemini_model=str(getattr(self.settings.gemini, "model", "gemini-2.0-flash") or "gemini-2.0-flash"),
-            r2_config=getattr(self.settings.publish, "r2", None),
-        )
         self.thumbnail_overlay = ThumbnailOverlayRenderer(
             style=str(getattr(self.settings.news_pack, "thumb_overlay_style", "yt_clean") or "yt_clean"),
             font_paths=list(getattr(self.settings.news_pack, "thumb_overlay_font_paths", []) or []),
-            max_words=int(getattr(self.settings.news_pack, "thumb_hook_max_words", 3) or 3),
+            max_words=int(getattr(self.settings.news_pack, "thumb_hook_max_words", 4) or 4),
         )
         self._news_pack_last_tick_mono = 0.0
         self._news_domain = "tech_news_explainer"
         self.news_pool_store = NewsPoolStore(
             db_path=root / "storage" / "logs" / "news_pool.sqlite3",
+        )
+        self.news_cluster_engine = NewsClusterEngine(
+            state_path=root / "storage" / "logs" / "news_pool_state.json",
+            stable_hash_fn=stable_hash,
         )
         self._news_pool_state_path = self.root / "storage" / "state" / "news_pool_state.json"
         self._news_pool_refresh_log_path = self.root / "storage" / "logs" / "news_pool_refresh.jsonl"
@@ -337,32 +344,6 @@ class AgentWorkflow:
         except Exception:
             pass
 
-    def news_pack_seed_tick_if_needed(self, force: bool = False, min_interval_sec: int = 100) -> dict[str, Any]:
-        if not bool(getattr(self.settings.news_pack, "enabled", True)):
-            return {"status": "disabled"}
-        now_mono = time.monotonic()
-        if (not force) and self._news_pack_last_tick_mono > 0:
-            if (now_mono - self._news_pack_last_tick_mono) < max(30, int(min_interval_sec)):
-                return {"status": "skipped", "reason": "interval_guard"}
-        self._news_pack_last_tick_mono = now_mono
-        try:
-            result = self.news_pack_seeder.seed_one_tick(force=bool(force))
-            return result if isinstance(result, dict) else {"status": "ok"}
-        except Exception as exc:
-            row = {
-                "event": "news_pack_tick_failed",
-                "error": str(exc)[:220],
-                "ts_utc": datetime.now(timezone.utc).isoformat(),
-            }
-            try:
-                path = self.root / "storage" / "logs" / "news_pack_seeder.jsonl"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            return {"status": "failed", "error": str(exc)[:220]}
-
     def _news_pack_tags_for_candidate(self, candidate: TopicCandidate, category: str) -> list[str]:
         tags: list[str] = []
         raw_meta = dict(getattr(candidate, "meta", {}) or {})
@@ -370,9 +351,15 @@ class AgentWorkflow:
             t = re.sub(r"[^a-z0-9_-]", "", str(value or "").lower()).strip()
             if t and t not in tags:
                 tags.append(t)
-        cat = re.sub(r"[^a-z0-9_-]", "", str(category or "").lower()).strip()
-        if cat and cat not in tags:
-            tags.insert(0, cat)
+        inferred_tags = build_story_tags(
+            title=str(getattr(candidate, "title", "") or ""),
+            snippet=str(getattr(candidate, "body", "") or ""),
+            category=str(category or ""),
+        )
+        for tag in reversed(inferred_tags):
+            t = re.sub(r"[^a-z0-9_-]", "", str(tag or "").lower()).strip()
+            if t and t not in tags:
+                tags.insert(0, t)
         defaults = [str(x or "").strip().lower() for x in (getattr(self.settings.news_pack, "tags", []) or []) if str(x or "").strip()]
         for t in defaults:
             if t not in tags:
@@ -703,6 +690,138 @@ class AgentWorkflow:
             "story_markers": int(story_hits),
         }
 
+    def _build_news_word_count_expansion(self, *, html: str, source_url: str = "") -> str:
+        metrics = self._news_html_metrics(html)
+        quality = getattr(self.settings, "quality", None)
+        target_words = max(1200, int(getattr(quality, "min_word_count", 1800) or 1800))
+        current_words = int(metrics.get("word_count", 0) or 0)
+        deficit = max(0, target_words - current_words)
+        if deficit <= 0:
+            return ""
+
+        text = re.sub(r"<[^>]+>", " ", str(html or ""))
+        tokens = re.findall(r"[A-Za-z0-9']+", text)
+        stopwords = {
+            "about",
+            "after",
+            "before",
+            "could",
+            "first",
+            "from",
+            "have",
+            "into",
+            "more",
+            "most",
+            "news",
+            "over",
+            "said",
+            "that",
+            "their",
+            "there",
+            "these",
+            "this",
+            "those",
+            "today",
+            "using",
+            "what",
+            "when",
+            "where",
+            "which",
+            "while",
+            "with",
+            "would",
+        }
+        subject_tokens: list[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            clean = str(token or "").strip()
+            lower = clean.lower()
+            if len(clean) < 4 or lower in stopwords or lower in seen:
+                continue
+            seen.add(lower)
+            subject_tokens.append(clean)
+            if len(subject_tokens) >= 4:
+                break
+        subject = " ".join(subject_tokens[:4]) or "this development"
+
+        host = ""
+        try:
+            host = (urlparse(str(source_url or "")).netloc or "").lower()
+        except Exception:
+            host = ""
+        if host.startswith("www."):
+            host = host[4:]
+        source_note = f" tied to reporting from {escape(host)}" if host else ""
+
+        blocks: list[tuple[str, str]] = [
+            (
+                "Why This Story Has Operational Weight",
+                (
+                    f"<p>Readers looking at {escape(subject)} need more than the headline summary{source_note}. "
+                    "The practical meaning usually sits one layer deeper than the announcement itself: who has to change behavior, "
+                    "what assumptions stop being safe, and which routine now carries more friction than it did a week ago. "
+                    "That is why the right reading of a tech news explainer is operational rather than theatrical. "
+                    "The question is not simply whether the move is interesting. The question is whether it changes timing, tooling, review steps, or trust for the people who actually have to live with the outcome.</p>"
+                    "<p>That deeper lens also helps filter hype. A launch note, policy shift, funding round, or research update can sound bigger than it really is if the article never forces the next question: what becomes easier, harder, cheaper, slower, or riskier because of this? "
+                    "For an American reader, that often means tracing the downstream effect into familiar routines such as account security, team approvals, device management, cloud spend, vendor selection, or rollout sequencing. "
+                    "Once the story is translated into those concrete terms, the signal becomes far more useful and far less noisy.</p>"
+                ),
+            ),
+            (
+                "What Changes For Readers And Teams",
+                (
+                    "<p>A second pass matters because teams rarely absorb change in one clean step. "
+                    "Executives may read the strategic angle first, operators may care about migration risk, and end users may only notice the change when a daily workflow becomes slower or more confusing. "
+                    "Good analysis has to bridge those layers. "
+                    "It should explain what a cautious team would verify before rollout, what a small team can safely defer, and what signals suggest the story is becoming durable instead of temporary.</p>"
+                    "<p>In practice, that means slowing the reader down just enough to create better decisions. "
+                    "The safest response is usually a staged one: confirm the exact scope, identify the dependency most exposed to the change, and decide what evidence would justify broader action. "
+                    "That sounds conservative, but it is also the fastest path to useful clarity because it prevents teams from overreacting to partial information or mistaking a narrow edge case for a broad platform shift.</p>"
+                    "<h3>Reader Checklist</h3>"
+                    "<ul>"
+                    "<li>Confirm whether the story changes policy, pricing, access, or only marketing language.</li>"
+                    "<li>Check if the impact lands immediately or only after a staged rollout reaches more users.</li>"
+                    "<li>Identify one workflow that would break first if the interpretation is wrong.</li>"
+                    "<li>Note which official document or release note would validate the next decision.</li>"
+                    "<li>Keep a rollback or wait-and-see option visible instead of treating action as mandatory.</li>"
+                    "</ul>"
+                ),
+            ),
+            (
+                "Signals Worth Tracking Next",
+                (
+                    "<p>The final layer is time. Many stories become clearer only after support updates, user reactions, and follow-on clarifications start to agree with each other. "
+                    "When those sources point in the same direction, the reader can upgrade confidence. "
+                    "When they diverge, the smarter move is often to document the ambiguity, narrow the blast radius, and watch for a second wave of evidence before changing anything expensive. "
+                    "That discipline is especially useful in fast-moving software, platform, privacy, and infrastructure stories where the first interpretation is often incomplete.</p>"
+                    "<p>So the durable takeaway is simple: treat the news as a change-management signal, not just a content event. "
+                    "Use it to decide what deserves immediate testing, what belongs on a watchlist, and what should stay in observation mode until the facts settle. "
+                    "That approach gives the article more value than a recap because it leaves the reader with a decision frame, a monitoring plan, and a clearer sense of what to do next if the story keeps growing.</p>"
+                ),
+            ),
+        ]
+
+        need_blocks = 1 if deficit <= 220 else 2 if deficit <= 460 else 3
+        chosen: list[str] = []
+        for heading, body in blocks:
+            if len(chosen) >= need_blocks:
+                break
+            if re.search(rf"<h2[^>]*>\s*{re.escape(heading)}\s*</h2>", str(html or ""), flags=re.IGNORECASE):
+                continue
+            chosen.append(f"<h2>{heading}</h2>{body}")
+        while len(chosen) < need_blocks:
+            addendum_no = len(chosen) + 1
+            chosen.append(
+                f"<h2>Extended Context Addendum {addendum_no}</h2>"
+                "<p>This addendum exists for one reason: a useful explainer should not stop at the point where the basic facts are visible. "
+                "Readers still need enough context to decide whether the story deserves immediate testing, cautious monitoring, or no action at all. "
+                "That means spelling out the tradeoff in plain language, especially for people managing a live workflow, a team dependency, or a platform decision that could be expensive to reverse later.</p>"
+                "<p>The practical takeaway is rarely dramatic. It is usually procedural. "
+                "Confirm what changed, identify who is exposed first, and treat the next decision as reversible until the evidence becomes consistent across official notes, user reports, and follow-up documentation. "
+                "That discipline turns a fast-moving news item into something operationally useful instead of just memorable for a day.</p>"
+            )
+        return "".join(chosen)
+
     def _log_news_qa_runtime(self, event: str, payload: dict[str, Any] | None = None) -> None:
         row = {
             "ts_utc": datetime.now(timezone.utc).isoformat(),
@@ -765,16 +884,7 @@ class AgentWorkflow:
                 missing -= 1
 
         if "word_count" in failed:
-            out += (
-                "<h3>Key Details Expansion</h3>"
-                "<ul>"
-                "<li>Check the exact version and rollout timestamp before applying fixes.</li>"
-                "<li>Record one expected signal for each step so pass/fail is obvious.</li>"
-                "<li>Apply changes in sequence and confirm impact after each change.</li>"
-                "<li>If impact is unclear, pause and gather logs before the next step.</li>"
-                "<li>Document final stable state to prevent repeat incidents.</li>"
-                "</ul>"
-            )
+            out += self._build_news_word_count_expansion(html=out, source_url=source_url)
 
         if {"authority_links", "external_links", "source_attribution"} & failed:
             links_now = re.findall(r'href="([^"]+)"', out, flags=re.IGNORECASE)
@@ -861,10 +971,23 @@ class AgentWorkflow:
                 },
             )
             raise RuntimeError("news_mode_image_library_disabled")
-        return pick_images(
-            title=title,
-            min_count=max(1, int(min_count or 1)),
-            root=self.root,
+        draft = DraftPost(
+            title=str(title or "").strip() or "Generated visual",
+            alt_titles=[],
+            html=(
+                f"<h2>Quick Take</h2><p>{escape(str(title or 'Generated visual context'))}</p>"
+                f"<h2>What To Show</h2><p>{escape(str(title or 'Generated visual context'))}</p>"
+                f"<h2>Why This Matters</h2><p>{escape(str(title or 'Generated visual context'))}</p>"
+            ),
+            summary=str(title or "").strip(),
+            score=80,
+            source_url="",
+            extracted_urls=[],
+        )
+        return self.media_manager.prepare_post_images(
+            draft=draft,
+            prompt_plan=None,
+            target_count=max(1, int(min_count or 1)),
         )
 
     def _reset_local_llm_budget(self) -> None:
@@ -1956,7 +2079,8 @@ class AgentWorkflow:
         )
         source_url = re.sub(r"\s+", " ", str(getattr(selected, "url", "") or "")).strip()
         snippet = re.sub(r"\s+", " ", str(getattr(selected, "body", "") or "")).strip()
-        cat = re.sub(r"\s+", " ", str(category or "platform")).strip().lower()
+        profile = infer_story_profile(title=title, snippet=snippet, category=str(category or "platform"))
+        cat = str(profile.category or "platform").strip().lower() or "platform"
         facet_data = dict(facet_context or {})
         selected_facet = str(facet_data.get("selected_facet", "impact") or "impact").strip().lower() or "impact"
         perspective_hint = facet_emphasis_hint(selected_facet)
@@ -1967,11 +2091,7 @@ class AgentWorkflow:
         if fallback_seed <= 0:
             fallback_seed = stable_hash(f"{title}{cat}")
         rng = random.Random(int(fallback_seed) ^ 0x4F1BBCDC)
-        safe_authorities = [
-            re.sub(r"\s+", " ", str(x or "").strip())
-            for x in (authority_links or [])
-            if str(x or "").strip()
-        ][:2]
+
         def _publisher_label(url: str) -> str:
             host = (urlparse(str(url or "")).netloc or "").lower()
             if "security.googleblog.com" in host:
@@ -1992,27 +2112,43 @@ class AgentWorkflow:
             if not label_parts:
                 return "Source"
             return " ".join(x.capitalize() for x in label_parts[:2]) + " Report"
+
+        safe_authorities = filter_relevant_authority_links(
+            list(authority_links or []),
+            title=title,
+            snippet=snippet,
+            category=cat,
+        )[:2]
         source_items: list[str] = []
+        if source_url:
+            source_items.append(
+                f'<li><a href="{escape(source_url)}" rel="nofollow noopener" target="_blank">{escape(_publisher_label(source_url))}</a></li>'
+            )
         for link in safe_authorities:
             if any(bad in link.lower() for bad in ("google.com", "googleusercontent.com", "googleapis.com")):
                 continue
             source_items.append(
                 f'<li><a href="{escape(link)}" rel="nofollow noopener" target="_blank">{escape(_publisher_label(link))}</a></li>'
             )
-        question_pool = [
-            "What changes first for regular users this week?",
-            "Should teams update immediately or watch rollout signals first?",
-            "Could this affect background sync, sign-in, or notifications for your setup?",
-            "What is the fastest low-risk check you can run today?",
-        ]
+        question_pool = list(profile.questions or [])
+        if len(question_pool) < 3:
+            question_pool.extend(
+                [
+                    "What should a normal reader compare before acting on the headline?",
+                    "Which tradeoff would matter first after a week of real use?",
+                    "What part of the claim still needs better evidence?",
+                ]
+            )
         rng.shuffle(question_pool)
-        question_lines = question_pool[:2]
-        compare_pool = [
-            "Comparison: immediate rollout is faster, but staged rollout lowers rollback risk if issues spread.",
-            "Comparison: waiting 24 hours may delay benefits, but it reduces disruption for mission-critical workflows.",
-            "Comparison: broad policy push gives consistency, while pilot-first gives safer validation data.",
-        ]
+        question_lines = question_pool[:3]
+        compare_pool = list(profile.comparisons or [])
+        if not compare_pool:
+            compare_pool = [
+                "A faster first impression can still be a worse long-term fit if cost or maintenance rises later.",
+                "The highest-ranked option is not automatically the best choice once real-life constraints show up.",
+            ]
         compare_block = compare_pool[int(rng.randrange(len(compare_pool)))]
+        compare_followup = compare_pool[(int(rng.randrange(len(compare_pool))) + 1) % len(compare_pool)]
         emphasis_line_map = {
             "impact": "This analysis focuses on who feels the impact first and where disruptions are most likely to surface.",
             "timeline": "This analysis follows the update sequence so readers can align decisions with timing, not guesswork.",
@@ -2022,15 +2158,6 @@ class AgentWorkflow:
             "user_angle": "This analysis reflects everyday reader workflows and immediate usability consequences.",
         }
         emphasis_line = emphasis_line_map.get(selected_facet, emphasis_line_map["impact"])
-        key_facts = (
-            "<ul>"
-            f"<li>Who: End users and IT teams tracking {escape(cat)} rollout updates.</li>"
-            f"<li>What: A reported {escape(cat)} policy or platform change affecting routine workflows.</li>"
-            "<li>When: Timing varies by region; exact global completion is Not confirmed.</li>"
-            "<li>Scope: Software behavior and platform policy impact, not hardware damage.</li>"
-            "<li>Risk: Low to medium for normal users, depending on update timing and configuration.</li>"
-            "</ul>"
-        )
         action_items = [
             re.sub(r"\s+", " ", str(x or "").strip())
             for x in (facet_data.get("action_items", []) or [])
@@ -2043,32 +2170,295 @@ class AgentWorkflow:
                 "Monitor impact for 24 hours and keep a rollback option available.",
             ]
         what_to_do = "<ul>" + "".join(f"<li>{escape(item)}</li>" for item in action_items[:6]) + "</ul>"
-        html = (
-            "<h2>Quick Take</h2>"
-            f"<p>{escape(snippet or title)}</p>"
-            f"<p>{escape(emphasis_line)}</p>"
-            f"<p>{escape(perspective_hint)}</p>"
-            f"{key_facts}"
-            "<h2>What Happened</h2>"
-            f"<p>According to reports, this {escape(cat)} update affects users who rely on daily workflows.</p>"
-            f"<p>{escape(question_lines[0])}</p>"
-            "<h2>Why It Matters (for normal users)</h2>"
-            "<p>If this change impacts login, sync, notifications, or background tasks, normal usage can degrade quickly.</p>"
-            f"<p>{escape(question_lines[1])}</p>"
-            "<h2>Key Details</h2>"
-            "<ul>"
-            "<li>Scope: software behavior and update impact only.</li>"
-            "<li>Risk level: low to medium depending on current rollout status.</li>"
-            "<li>Best practice: test first, then expand changes gradually.</li>"
-            "</ul>"
-            f"<p><strong>Example:</strong> {escape(compare_block)}</p>"
-            "<h2>What To Watch Next</h2>"
-            "<p>Watch official release notes, support advisories, and confirmed user impact updates.</p>"
-            "<h2>What To Do Now</h2>"
-            f"{what_to_do}"
-            "<h2>Sources</h2>"
-            f"<ul>{''.join(source_items) if source_items else '<li>No external source available yet.</li>'}</ul>"
+        reader_group = {
+            "wellness": "students, commuters, gym-goers, and anyone buying caffeine on repeat",
+            "home": "households comparing room coverage, allergy relief, quiet operation, and filter cost",
+            "consumer": "shoppers trying to separate useful testing from headline ranking noise",
+            "security": "admins, small teams, and readers worried about immediate exposure",
+            "policy": "users trying to understand which defaults or limits are quietly moving",
+            "ai": "workers, students, and small teams who depend on consistent output",
+            "chips": "buyers and teams timing the next hardware decision",
+        }.get(cat, "ordinary readers trying to map a headline to a practical decision")
+        decision_cost_line = {
+            "wellness": "The hidden costs usually show up as price per can, overstimulation, ingredient tolerance, and whether the drink still feels worth buying on the fifth weekday in a row.",
+            "home": "The hidden costs usually show up as replacement filters, fan noise, electricity use, and whether the recommended model actually fits the room where it will live.",
+            "consumer": "The hidden costs usually show up as setup friction, accessories, cleaning effort, warranty headaches, and the small compromises that never fit neatly inside a winner badge.",
+            "security": "The hidden costs usually show up as downtime, emergency patch windows, support overhead, and the time it takes to separate confirmed scope from raw fear.",
+            "policy": "The hidden costs usually show up as changed defaults, user confusion, new compliance steps, and the effort required to retrain habits after a quiet rule shift.",
+            "ai": "The hidden costs usually show up as slower output, weaker answers, new usage caps, or a price move that suddenly changes the economics of everyday work.",
+            "chips": "The hidden costs usually show up as delayed purchases, price movement, accessory changes, and uncertainty around how long an older system remains sensible.",
+        }.get(cat, "The hidden costs usually show up after the headline cycle ends and real life has to absorb the tradeoff.")
+        real_world_line = {
+            "wellness": "In real life, that means comparing how a can feels at 8 a.m. before work, at 2 p.m. after lunch, or before a workout rather than assuming one ranking applies to every routine.",
+            "home": "In real life, that means thinking about a nursery, a bedroom, a pet-heavy living room, or a small apartment where noise and footprint matter just as much as the clean-air claim.",
+            "consumer": "In real life, that means asking where the product will sit, how often it will be used, and which inconvenience will start to annoy you after the return window closes.",
+            "security": "In real life, that means deciding which accounts, devices, or teams need action first and which can safely wait for better evidence.",
+            "policy": "In real life, that means tracking which users will notice the change first and which support questions will arrive before the documentation catches up.",
+            "ai": "In real life, that means checking whether the update helps the exact task people do every day instead of assuming the new capability automatically improves the workflow.",
+            "chips": "In real life, that means judging whether the supply and pricing story actually changes the next purchase rather than just feeding speculation.",
+        }.get(cat, "In real life, the signal matters only when it changes the next practical choice.")
+        headline_gap_line = {
+            "wellness": "List-style coverage compresses taste, caffeine feel, price, and ingredient tolerance into one score even though those are exactly the reasons readers make different choices.",
+            "home": "List-style coverage compresses room size, filter cost, design, and sleep-time noise into one score even though those are the variables that split households apart.",
+            "consumer": "List-style coverage compresses fit, comfort, warranty, and upkeep into one winner badge even though those are the variables that make recommendations feel trustworthy or shallow.",
+            "security": "Headline coverage compresses scope, severity, and mitigation timing into a single level of urgency even though each part changes the real response plan.",
+            "policy": "Headline coverage compresses enforcement language, defaults, and rollout timing into one reaction even though each part changes what users must do next.",
+            "ai": "Headline coverage compresses price, quality, and latency into one progress narrative even though readers feel those tradeoffs separately in ordinary work.",
+            "chips": "Headline coverage compresses pricing, roadmap, and availability into one momentum story even though buyers experience those signals at different times.",
+        }.get(cat, "Headline coverage tends to flatten the exact detail readers need in order to make a better decision.")
+        summary_line = snippet or f"{title} has moved beyond a casual headline and into a story about {profile.subject_phrase}."
+        source_label = _publisher_label(source_url) if source_url else "the latest source coverage"
+        detail_items = list(profile.detail_items or [])
+        while len(detail_items) < 4:
+            detail_items.append("The most useful explanation is the one that connects the headline to real tradeoffs.")
+        heading_sets = (
+            [
+                {
+                    "quick": "Bottom Line",
+                    "happened": "What The Coverage Actually Says",
+                    "care": "Why This Matters To Buyers",
+                    "read": "How To Judge The Claim",
+                    "tradeoffs": "What The Ranking Hides",
+                    "costs": "Where The Real Cost Shows Up",
+                    "scenarios": "Where This Plays Out",
+                    "gap": "What The Headline Misses",
+                    "watch": "What To Watch Next",
+                    "do_now": "What To Do Before You Act",
+                },
+                {
+                    "quick": "Quick Verdict",
+                    "happened": "What Changed",
+                    "care": "Why People Are Paying Attention",
+                    "read": "How To Evaluate The Claim",
+                    "tradeoffs": "What The Comparison Leaves Out",
+                    "costs": "The Tradeoffs You Feel Later",
+                    "scenarios": "Real-World Scenarios",
+                    "gap": "What The Roundup Still Does Not Show",
+                    "watch": "Signals Worth Watching",
+                    "do_now": "What Readers Can Do Now",
+                },
+            ]
+            if cat in {"wellness", "home", "consumer"}
+            else [
+                {
+                    "quick": "Quick Take",
+                    "happened": "What Happened",
+                    "care": "Why Readers Care",
+                    "read": "How To Read The Claim",
+                    "tradeoffs": "The Tradeoffs Behind The Headline",
+                    "costs": "The Costs Readers Actually Feel",
+                    "scenarios": "Real-World Scenarios",
+                    "gap": "What The Headline Still Leaves Out",
+                    "watch": "What To Watch Next",
+                    "do_now": "What To Do Now",
+                },
+                {
+                    "quick": "The Short Version",
+                    "happened": "What Changed",
+                    "care": "Why It Matters",
+                    "read": "How To Interpret The Claim",
+                    "tradeoffs": "What The Headline Flattens",
+                    "costs": "Where The Real Cost Shows Up",
+                    "scenarios": "Where This Becomes Real",
+                    "gap": "What The First Wave Leaves Out",
+                    "watch": "What To Watch Next",
+                    "do_now": "What To Do Next",
+                },
+            ]
         )
+        headings = heading_sets[int(fallback_seed) % len(heading_sets)]
+        audience_line = rng.choice(
+            [
+                f"For U.S. readers, the useful question is not whether the headline sounds dramatic. It is whether the story changes cost, convenience, comfort, trust, or planning over the next few weeks. {real_world_line}",
+                f"American readers usually feel stories like this through routine first, not hype. If the coverage changes cost, convenience, comfort, trust, or planning soon, it matters. {real_world_line}",
+                f"The practical test for U.S. readers is straightforward: does this story change what people buy, postpone, tolerate, or double-check this month? {real_world_line}",
+            ]
+        )
+
+        def _p(text: str) -> str:
+            return f"<p>{escape(re.sub(r'\s+', ' ', str(text or '').strip()))}</p>"
+
+        facts_html = (
+            "<ul>"
+            f"<li>Who: {escape(reader_group)}.</li>"
+            f"<li>What: New coverage about {escape(profile.subject_phrase)}.</li>"
+            f"<li>Source frame: The current read is anchored by {escape(source_label)}.</li>"
+            "<li>Timing: The headline is current, but the most durable implications still depend on follow-up evidence.</li>"
+            f"<li>Main tradeoff: {escape(compare_block)}</li>"
+            "</ul>"
+        )
+
+        body_html = (
+            f"<h2>{headings['quick']}</h2>"
+            + _p(summary_line)
+            + _p(emphasis_line)
+            + _p(
+                f"{profile.decision_frame} Read the story as a decision aid for {reader_group}, not as a generic attention spike."
+            )
+            + _p(perspective_hint)
+            + facts_html
+            + f"<h2>{headings['happened']}</h2>"
+            + _p(
+                f"The immediate news value is not simply that another headline appeared. It is that {source_label} packaged "
+                f"{profile.subject_phrase} in a form that can influence mainstream readers, buyers, and casual researchers."
+            )
+            + _p(
+                f"In plain English, {title} pushes readers to compare products, claims, or rollout signals that often get lumped together "
+                "even though the right choice can differ sharply once routine, budget, and tolerance enter the picture."
+            )
+            + _p(question_lines[0])
+            + _p(
+                f"When a story keeps resurfacing across coverage, the useful signal is usually not the headline itself. "
+                f"It is the operational consequence underneath it. {profile.operational_line}"
+            )
+            + f"<h2>{headings['care']}</h2>"
+            + "<h3>Where the headline lands</h3>"
+            + _p(profile.decision_frame)
+            + _p(audience_line)
+            + _p(
+                f"That is why readers should care before the story fully settles. A casual ranking or update note can turn into a much more practical decision "
+                f"once {reader_group} start mapping it to ordinary routines."
+            )
+            + f"<h2>{headings['read']}</h2>"
+            + _p(
+                f"A strong explainer does more than repeat the headline. It shows how testing, comparison criteria, or rollout evidence produced the claim in the first place. "
+                f"That matters because {profile.subject_phrase} almost always look simpler from far away than they feel in real life."
+            )
+            + "<ul>"
+            + "".join(f"<li>{escape(item)}</li>" for item in detail_items)
+            + "</ul>"
+            + _p(f"Comparison: {compare_block}")
+            + _p(
+                "Readers should separate headline force from practical fit. The most dramatic winner or the loudest warning is not always the choice "
+                "that best survives a month of ordinary use."
+            )
+            + f"<h2>{headings['tradeoffs']}</h2>"
+            + "<h3>What the comparison hides</h3>"
+            + _p(profile.scenario_line)
+            + _p(
+                f"Headlines flatten tradeoffs. They make one winner, one policy move, or one update path look universal even when the real choice is between "
+                f"comfort, price, maintenance, intensity, or timing. {decision_cost_line}"
+            )
+            + _p(f"Comparison: {compare_followup}")
+            + f"<h2>{headings['costs']}</h2>"
+            + _p(decision_cost_line)
+            + _p(
+                f"This is the part many readers experience only after they act. A purifier can be powerful but too loud. An energy drink can be effective but too harsh. "
+                "A platform change can sound manageable but still create annoying, repeated friction. The real cost rarely arrives as one dramatic failure. "
+                "It arrives as repeated inconvenience."
+            )
+            + _p(
+                f"That is why durable explainers translate abstract praise into household or workflow math. The question is not only what ranked well or what changed. "
+                f"It is whether the recommendation still makes sense once {reader_group} live with it for a week."
+            )
+            + f"<h2>{headings['scenarios']}</h2>"
+            + _p(profile.scenario_line)
+            + _p(real_world_line)
+            + _p(question_lines[1])
+            + f"<h2>{headings['gap']}</h2>"
+            + _p(headline_gap_line)
+            + _p(
+                "This gap matters because list-style and update-style coverage naturally compress nuance. That is useful for scanning. It is less useful for spending money, "
+                "adjusting routines, or advising someone else. Readers need to know not just who won the headline, but who is likely to regret following it blindly."
+            )
+            + _p(
+                f"When follow-up context is weak, the safest move is to narrow the decision rather than rush it. Figure out which variable matters most in your case, "
+                f"then compare the story against that variable first."
+            )
+            + f"<h2>{headings['watch']}</h2>"
+            + "<h3>Signals worth trusting</h3>"
+            + _p(profile.watch_line)
+            + _p(
+                "The strongest signal is consistency. When follow-up testing, owner feedback, pricing, support notes, or clarified methodology all point in the same direction, "
+                "confidence goes up. When they stay messy or contradictory, the headline should remain provisional."
+            )
+            + _p(question_lines[2])
+            + "<ul>"
+            + (
+                "<li>Look for updated testing notes or methodology details, not just recycled rankings.</li>"
+                "<li>Watch whether price, availability, or follow-up owner feedback shifts the conclusion.</li>"
+                "<li>Track what changes for the specific room, routine, or workflow you care about.</li>"
+                "<li>Give more weight to repeated evidence than to one sharp first impression.</li>"
+            )
+            + "</ul>"
+            + f"<h2>{headings['do_now']}</h2>"
+            + what_to_do
+            + _p(
+                "None of those steps require panic or blind trust. They simply make the next decision narrower, calmer, and more evidence-based while the story is still settling."
+            )
+            + _p(
+                "A useful news analysis should leave readers with a better question and a cleaner short list, not with the feeling that they were pushed into a generic conclusion. "
+                "That is the standard worth holding this kind of coverage to."
+            )
+        )
+        word_count = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", body_html)))
+        if word_count < 1700:
+            body_html += (
+                "<h2>How To Narrow The Decision</h2>"
+                + _p(
+                    f"A good next step is not to memorize the whole ranking or every reaction. It is to reduce the choice to one or two variables that matter most in your own case. "
+                    f"For {reader_group}, that usually means choosing between fit, cost, and how the product or change behaves on an ordinary day."
+                )
+                + _p(
+                    "Once the decision is narrowed, a lot of the noise falls away. Readers can ignore broad claims that do not affect their room, budget, tolerance, or workflow. "
+                    "That discipline matters because broad comparisons are designed to be shareable, not to be perfectly personalized."
+                )
+                + _p(
+                    "The smartest readers are often the ones who slow the story down just enough to test one assumption. That does not make the coverage less useful. "
+                    "It makes the next action much more defensible."
+                )
+            )
+        word_count = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", body_html)))
+        if word_count < 1850:
+            body_html += (
+                "<h2>The Part Most Roundups Compress</h2>"
+                + _p(
+                    "What gets compressed first is the mismatch between a universal headline and a specific life. A model can be the best for a reviewer and still be wrong for a bedroom. "
+                    "A drink can top a ranking and still be the wrong caffeine choice for a weekday routine. A software change can be officially minor and still be personally annoying."
+                )
+                + _p(
+                    "That is why readers should treat mainstream explainers as a map rather than a verdict. The article should help you see the landscape, the likely friction points, "
+                    "and the claims that deserve a second look. It should not try to erase the existence of tradeoffs."
+                )
+                + _p(
+                    "The closer a story gets to influencing real purchases or habits, the more important it is to read past the badge, the ranking number, or the first dramatic framing. "
+                    "That extra minute of skepticism usually produces a better decision than any perfect-sounding headline."
+                )
+            )
+        word_count = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", body_html)))
+        if word_count < 1950:
+            body_html += (
+                "<h2>Questions That Actually Change The Choice</h2>"
+                + _p(
+                    f"The best follow-up questions are usually the least glamorous ones. For {reader_group}, that means asking what part of daily use would feel wrong first, "
+                    "what cost shows up after the first purchase, and what piece of the headline would stop mattering once the product or update meets a real week of use."
+                )
+                + _p(
+                    "These questions work because they pull the story out of generic commentary and back into lived constraints. A recommendation is only as good as the situation it fits, "
+                    "and most reader regret begins when a general claim is mistaken for a personal answer."
+                )
+                + _p(
+                    "That is also why good analysis keeps returning to fit. Fit is where price, tolerance, convenience, maintenance, and timing finally meet. If the article helps readers identify fit more quickly, "
+                    "it has done its job. If it only made the headline louder, it has not."
+                )
+            )
+        word_count = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", body_html)))
+        if word_count < 2050:
+            body_html += (
+                "<h2>How Readers Can Compare Evidence Better</h2>"
+                + _p(
+                    "A useful habit is to compare the story on three levels at once: the headline claim, the evidence behind the claim, and the situation where the claim is supposed to matter. "
+                    "Most weak explainers handle only the first level. Better explainers make the other two visible."
+                )
+                + _p(
+                    f"For {reader_group}, that means checking whether the article actually explains why one option fits one routine better than another. "
+                    "If the reasoning stays vague, readers should treat the ranking or reaction as directional rather than final."
+                )
+                + _p(
+                    "That sounds slower, but it usually saves time. One careful comparison is cheaper than buying, updating, or trusting the wrong thing and then undoing the mistake after a week of irritation."
+                )
+            )
+        html = body_html + "<h2>Sources</h2>" + f"<ul>{''.join(source_items) if source_items else '<li>No external source available yet.</li>'}</ul>"
         html = ensure_what_to_do_now_section(html=html, action_items=action_items)
         return DraftPost(
             title=title,
@@ -2364,6 +2754,21 @@ class AgentWorkflow:
                 return WorkflowResult("skipped", skip_reason)
             if api_ready and self._gemini_budget_remaining() > 0:
                 try:
+                    if self.ollama_client and selected.body:
+                        # Locally clean context to reduce noise/cost before Gemini
+                        selected.body = self._profile_call(
+                            "ollama_clean_context",
+                            lambda: self.ollama_client.clean_context(selected.body),
+                            slow_ms=1500
+                        )
+                        # NEW: Think step - generate expert hints locally
+                        expert_hints = self._profile_call(
+                            "ollama_think_step",
+                            lambda: self.ollama_client.think_about_topic(selected.title, selected.body),
+                            slow_ms=2000
+                        )
+                        selected.meta["expert_hints"] = expert_hints
+
                     draft = self.brain.generate_news_post(
                         selected,
                         self.settings.authority_links,
@@ -2376,7 +2781,7 @@ class AgentWorkflow:
                             "run_start_minute": str(run_start_minute or "").strip(),
                             "retry_index": retry_index,
                             "cluster_id": str((selected.meta or {}).get("cluster_id", "") or ""),
-                            "format": "briefing" if random.random() < 0.30 else "explainer",
+                            "format": "explainer",
                         },
                     )
                     if self.brain.call_count:
@@ -2481,10 +2886,10 @@ class AgentWorkflow:
             if self.settings.quality.enabled and self.settings.quality.strict_mode:
                 min_quality = max(91, int(getattr(self.settings.quality, "min_quality_score", 85) or 85))
                 configured_max_passes = int(getattr(self.settings.quality, "qa_retry_max_passes", 0) or 0)
-                # News mode hard rule: retry loop must run even when qa_retry_max_passes=0.
-                max_passes = max(15, configured_max_passes) if configured_max_passes > 0 else 15
-                max_passes = min(25, max_passes)
-                no_progress_limit = 4
+                # Keep news QA retries bounded; long no-progress loops were consuming minutes per run.
+                max_passes = max(1, configured_max_passes) if configured_max_passes > 0 else 3
+                max_passes = min(6, max_passes)
+                no_progress_limit = min(2, max_passes)
                 pass_no = 0
                 no_progress = 0
                 loop_stop_reason = "not_started"
@@ -2649,7 +3054,22 @@ class AgentWorkflow:
                     else:
                         hold_reason = f"qa_below_threshold:{qa_result.score}/{min_quality}"
                     self.watchdog.register_hard_failure(event_id, hold_reason)
+                    only_word_count_shortfall = (not qa_result.has_hard_failure) and failed_keys == ["word_count"]
                     can_retry = bool(self._retry_enabled and int(news_retry_depth) < int(self._retry_max_attempts_per_event))
+                    if only_word_count_shortfall and loop_stop_reason == "no_progress_limit":
+                        can_retry = False
+                        degraded_note = self._append_note(
+                            degraded_note,
+                            "news_qa_retry_skipped_no_progress_word_count",
+                        )
+                        self._append_workflow_perf(
+                            "news_qa_retry_skipped",
+                            {
+                                "reason": "no_progress_word_count",
+                                "passes_used": int(pass_no),
+                                "last_score": int(qa_result.score),
+                            },
+                        )
                     abort_now, abort_reason = self.watchdog.should_abort_event(event_id)
                     if can_retry and (not abort_now):
                         next_depth = int(news_retry_depth) + 1
@@ -2777,20 +3197,30 @@ class AgentWorkflow:
             min_images_required = self._image_min_required()
             news_tags = self._news_pack_tags_for_candidate(selected, category)
             
-            images, emergency_notes = self.media_manager.prepare_news_images(
-                draft=draft,
-                category=category,
-                tags=news_tags,
-                target_count=target_images,
-                min_required=min_images_required,
-                seed_tick_fn=self.news_pack_seed_tick_if_needed
+            images, emergency_notes = self._profile_call(
+                "media_manager_prepare_news_images",
+                lambda: self.media_manager.prepare_news_images(
+                    draft=draft,
+                    category=category,
+                    tags=news_tags,
+                    target_count=target_images,
+                    min_required=min_images_required,
+                    seed_tick_fn=lambda **kw: {},
+                ),
+                slow_ms=4000,
+                meta={
+                    "category": str(category or ""),
+                    "target_count": int(target_images),
+                    "min_required": int(min_images_required),
+                },
             )
             
             for note in emergency_notes:
                 degraded_note = self._append_note(degraded_note, note)
                 
             if len(images) < min_images_required:
-                hold_reason = f"missing_images_required({len(images)}/{min_images_required})"
+                detail = "; ".join(emergency_notes) if emergency_notes else "no_provider_notes"
+                hold_reason = f"missing_images_required({len(images)}/{min_images_required}) | {detail}"
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -2843,24 +3273,42 @@ class AgentWorkflow:
                 required_images=min_images_required,
             )
             if dry_run:
-                gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
+                gate_preview_html = self._profile_call(
+                    "news_gate_preview_html",
+                    lambda: self.publisher.build_dry_run_html(final_html, images),
+                    slow_ms=1200,
+                    meta={"images_count": int(len(images)), "mode": "dry_run"},
+                )
             else:
                 if images:
                     if not preflight_thumb_src:
-                        images, preflight_thumb_src = self._preflight_thumbnail_with_recovery(
-                            draft=draft,
-                            candidate=selected,
-                            images=images,
-                            prompt_plan={"source": "news_pack_picker"},
-                            max_attempts=2,
-                            manual_trigger=manual_trigger,
+                        images, preflight_thumb_src = self._profile_call(
+                            "news_preflight_thumbnail_recovery",
+                            lambda: self._preflight_thumbnail_with_recovery(
+                                draft=draft,
+                                candidate=selected,
+                                images=images,
+                                prompt_plan={"source": "news_pack_picker"},
+                                max_attempts=2,
+                                manual_trigger=manual_trigger,
+                            ),
+                            slow_ms=1800,
+                            meta={"images_count": int(len(images))},
                         )
                 creds_for_gate = self.publisher._oauth_credentials()  # noqa: SLF001
-                gate_preview_html = self.publisher._merge_images(  # noqa: SLF001
-                    final_html,
-                    images,
-                    creds_for_gate,
-                    preflight_thumbnail_src=preflight_thumb_src,
+                gate_preview_html = self._profile_call(
+                    "news_gate_merge_images",
+                    lambda: self.publisher._merge_images(  # noqa: SLF001
+                        final_html,
+                        images,
+                        creds_for_gate,
+                        preflight_thumbnail_src=preflight_thumb_src,
+                    ),
+                    slow_ms=2500,
+                    meta={
+                        "images_count": int(len(images)),
+                        "preflight_thumb": bool(preflight_thumb_src),
+                    },
                 )
 
             post_image_qa = self._qa_evaluate(
@@ -2987,11 +3435,17 @@ class AgentWorkflow:
                 final_html,
                 degraded_note,
             )
+            final_html = self._normalize_duplicate_h2_sections(final_html)
 
             entropy_settings = getattr(self.settings, "entropy_check", None)
             entropy_result: dict[str, Any] = {"ok": True, "reasons": []}
             if self._entropy_check_enabled:
-                entropy_result = check_entropy(final_html, entropy_settings)
+                entropy_result = self._profile_call(
+                    "news_entropy_check",
+                    lambda: check_entropy(final_html, entropy_settings),
+                    slow_ms=800,
+                    meta={"phase": "post_images"},
+                )
                 if not bool(entropy_result.get("ok", False)):
                     entropy_reason = ",".join(list(entropy_result.get("reasons", []) or [])[:4]) or "unknown"
                     degraded_note = self._append_note(degraded_note, f"entropy_fail:{entropy_reason}")
@@ -3015,20 +3469,28 @@ class AgentWorkflow:
                         rewritten_draft: DraftPost | None = None
                         if api_ready and self._gemini_budget_remaining() > 0:
                             try:
-                                rewritten_draft = self.brain.generate_news_post(
-                                    selected,
-                                    self.settings.authority_links,
-                                    reference_guidance,
-                                    category=category,
-                                    plan={
-                                        "primary_keyword": selected.title,
-                                        "news_category": category,
-                                        "event_id": event_id,
-                                        "run_start_minute": str(run_start_minute or "").strip(),
+                                rewritten_draft = self._profile_call(
+                                    "news_entropy_rewrite_gemini",
+                                    lambda: self.brain.generate_news_post(
+                                        selected,
+                                        self.settings.authority_links,
+                                        reference_guidance,
+                                        category=category,
+                                        plan={
+                                            "primary_keyword": selected.title,
+                                            "news_category": category,
+                                            "event_id": event_id,
+                                            "run_start_minute": str(run_start_minute or "").strip(),
+                                            "retry_index": int(entropy_retry_index),
+                                            "cluster_id": str((selected.meta or {}).get("cluster_id", "") or ""),
+                                            "entropy_retry": True,
+                                            "format": "explainer",
+                                        },
+                                    ),
+                                    slow_ms=4000,
+                                    meta={
                                         "retry_index": int(entropy_retry_index),
-                                        "cluster_id": str((selected.meta or {}).get("cluster_id", "") or ""),
-                                        "entropy_retry": True,
-                                        "format": "explainer",
+                                        "category": str(category or ""),
                                     },
                                 )
                                 if self.brain.call_count:
@@ -3067,11 +3529,16 @@ class AgentWorkflow:
                                 selected.meta = selected_meta
                             except Exception:
                                 pass
-                            rewritten_draft = self._build_news_post_local_fallback(
-                                selected,
-                                category,
-                                self.settings.authority_links,
-                                facet_context=local_facet_context,
+                            rewritten_draft = self._profile_call(
+                                "news_entropy_rewrite_local_fallback",
+                                lambda: self._build_news_post_local_fallback(
+                                    selected,
+                                    category,
+                                    self.settings.authority_links,
+                                    facet_context=local_facet_context,
+                                ),
+                                slow_ms=120,
+                                meta={"retry_index": int(entropy_retry_index)},
                             )
                             degraded_note = self._append_note(degraded_note, "entropy_rewrite_local_fallback")
 
@@ -3170,6 +3637,7 @@ class AgentWorkflow:
                                 )
                             except Exception:
                                 degraded_note = self._append_note(degraded_note, "internal_links_failed")
+                            final_html = self._normalize_duplicate_h2_sections(final_html)
 
                             if dry_run:
                                 gate_preview_html = self.publisher.build_dry_run_html(final_html, images)
@@ -3184,7 +3652,12 @@ class AgentWorkflow:
                                     )
                                 except Exception:
                                     pass
-                            entropy_result = check_entropy(final_html, entropy_settings)
+                            entropy_result = self._profile_call(
+                                "news_entropy_check",
+                                lambda: check_entropy(final_html, entropy_settings),
+                                slow_ms=800,
+                                meta={"phase": "post_rewrite"},
+                            )
 
                 if not bool(entropy_result.get("ok", False)):
                     exhausted_reason = ",".join(list(entropy_result.get("reasons", []) or [])[:4]) or "unknown"
@@ -3600,8 +4073,11 @@ class AgentWorkflow:
         existing_titles = [r.get("title", "") for r in self.logs.get_recent_topic_history(days=30, limit=600)]
         try:
             self.topic_grower.maybe_grow(existing_titles)
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_publish_backend_event({
+                "event": "topic_growth_error",
+                "error": str(e)
+            })
         if is_news_mode(self.settings):
             return self._run_once_news_mode(
                 manual_trigger=bool(manual_trigger),
@@ -4077,6 +4553,21 @@ class AgentWorkflow:
                 return WorkflowResult("hold", reason)
 
             try:
+                if self.ollama_client and selected.body:
+                    # Locally clean context to reduce noise/cost before Gemini
+                    selected.body = self._profile_call(
+                        "ollama_clean_context",
+                        lambda: self.ollama_client.clean_context(selected.body),
+                        slow_ms=1500
+                    )
+                    # NEW: Think step - generate expert hints locally
+                    expert_hints = self._profile_call(
+                        "ollama_think_step",
+                        lambda: self.ollama_client.think_about_topic(selected.title, selected.body),
+                        slow_ms=2000
+                    )
+                    selected.meta["expert_hints"] = expert_hints
+
                 generation_count += 1
                 draft_candidate = self.brain.generate_post(
                     selected,
@@ -4426,7 +4917,8 @@ class AgentWorkflow:
             lambda: self._evaluate_actionability_gate(draft.title, final_html),
             slow_ms=1200,
         )
-        if (not actionability_result.ok) and (not free_local_mode):
+        is_news_domain = str(current_domain or "").strip().lower() in {"tech_news_explainer", "news_interpretation"}
+        if (not actionability_result.ok) and (not free_local_mode) and (not is_news_domain):
             # First remediation: local rewrite to preserve low-cost path.
             try:
                 local_rewrite = self._build_local_draft_with_ollama(
@@ -4514,7 +5006,7 @@ class AgentWorkflow:
                     f"actionability_rewrite_failed:{str(exc)[:140]}",
                 )
 
-        if not actionability_result.ok:
+        if (not actionability_result.ok) and (not is_news_domain):
             reason_tags = ",".join(actionability_result.reasons[:6]) if actionability_result.reasons else "unknown"
             hold_reason = f"actionability_gate_failed:{reason_tags}"
             hold_labels = self._build_public_labels(
@@ -5350,7 +5842,7 @@ class AgentWorkflow:
         if candidate is None:
             return False
         mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
-        if mode == "tech_news_only":
+        if is_news_mode(self.settings) or mode == "tech_news_only":
             text = (
                 f"{str(getattr(candidate, 'title', '') or '')}\n"
                 f"{str(getattr(candidate, 'body', '') or '')}"
@@ -5408,7 +5900,7 @@ class AgentWorkflow:
 
     def _infer_domain_from_title(self, title: str) -> str:
         mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
-        if mode == "tech_news_only":
+        if is_news_mode(self.settings) or mode == "tech_news_only":
             return self._news_domain
         if mode == "tech_troubleshoot_only":
             return "tech_troubleshoot"
@@ -5936,7 +6428,7 @@ class AgentWorkflow:
         row = self._refresh_resume_row_payload(row)
 
         stage = str(row.get("stage", "") or "").strip().lower()
-        if stage in {"collect_done", "draft_done", "publish_blocked", "images_done"}:
+        if stage in {"collect_done", "draft_done", "publish_blocked", "images_done", "hold"}:
             stage_title = self._strip_wip_title_prefix(str(row.get("title", "") or "").strip())
             stage_html = self._strip_wip_checkpoint_banner(str(row.get("content", "") or ""))
             if not stage_title or not stage_html:
@@ -5953,6 +6445,9 @@ class AgentWorkflow:
             return self._resume_draft_done(row=row, manual_trigger=manual_trigger, queue_advisory=queue_advisory)
         if stage == "collect_done":
             return self._resume_collect_done(row=row, manual_trigger=manual_trigger, queue_advisory=queue_advisory)
+        if stage == "hold":
+            # Rezero 2.8: Treat 'hold' as resumable draft-done for recovery.
+            return self._resume_draft_done(row=row, manual_trigger=manual_trigger, queue_advisory=queue_advisory)
         return None
 
     def _resume_collect_done(self, row: dict, manual_trigger: bool, queue_advisory: str = "") -> WorkflowResult:
@@ -5986,6 +6481,13 @@ class AgentWorkflow:
             )
             if api_ready and self._gemini_budget_remaining() > 0:
                 try:
+                    if self.ollama_client and candidate.body:
+                        candidate.body = self._profile_call(
+                            "ollama_clean_context",
+                            lambda: self.ollama_client.clean_context(candidate.body),
+                            slow_ms=1500
+                        )
+
                     draft = self.brain.generate_post(
                         candidate,
                         self.settings.authority_links,
@@ -6167,9 +6669,13 @@ class AgentWorkflow:
         title = self._strip_wip_title_prefix(str(row.get("title", "") or "").strip())
         base_html = self._strip_wip_checkpoint_banner(str(row.get("content", "") or ""))
         if not title or not base_html:
+            tok = "resume_draft_payload_empty"
+            if not title: tok += ":missing_title"
+            if not base_html: tok += ":missing_html"
+            tok += f";post_id={post_id}"
             skip_reason = self._auto_park_corrupt_resume_draft(
                 row=row,
-                reason_token="resume_draft_payload_empty",
+                reason_token=tok,
             )
             return WorkflowResult("skipped", skip_reason)
 
@@ -6197,7 +6703,26 @@ class AgentWorkflow:
         min_images_required = self._image_min_required()
         self._set_image_pipeline_state("running", 0, target_images, "중단 작업 이미지 선택")
         image_prompt_plan: dict[str, Any] = {"source": "library"}
-        images = pick_images(title=title, min_count=target_images, root=self.root)
+        if is_news_mode(self.settings):
+            cat = str(row.get("category", "tech") or "tech")
+            tg = [str(x) for x in (row.get("tags", []) or [])]
+            images, resume_emergency_notes = self.media_manager.prepare_news_images(
+                draft=draft,
+                category=cat,
+                tags=tg,
+                target_count=target_images,
+                min_required=min_images_required,
+                seed_tick_fn=lambda **kw: {}
+            )
+            for note in (resume_emergency_notes or []):
+                resume_degraded_note = self._append_note(resume_degraded_note, note)
+        else:
+            image_prompt_plan = self._build_image_prompt_plan_with_local_llm(draft, candidate)
+            images = self.media_manager.prepare_post_images(
+                draft=draft,
+                prompt_plan=image_prompt_plan,
+                target_count=target_images,
+            )
         images = self.visual.ensure_unique_assets(images)
         if len(images) < min_images_required:
             hold_labels = self._normalize_resume_labels(row.get("labels", []))
@@ -6218,6 +6743,8 @@ class AgentWorkflow:
                 reason=f"missing_images_required({len(images)}/{min_images_required})",
             )
             hold_msg = f"missing_images_required({len(images)}/{min_images_required})"
+            if resume_degraded_note:
+                hold_msg += f" | {resume_degraded_note}"
             if hold_note:
                 hold_msg += f" | {hold_note}"
             if updated_draft_id:
@@ -6873,8 +7400,9 @@ class AgentWorkflow:
         raw = re.sub(r"\s+", " ", str(title or "")).strip()
         base_candidate_title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
         pref = re.sub(r"\s+", " ", str(preferred_keyword or "")).strip()
+        news_mode = is_news_mode(self.settings)
         if not raw:
-            raw = pref or base_candidate_title or "Windows update error fix"
+            raw = pref or base_candidate_title or ("Tech update" if news_mode else "Windows update error fix")
         raw = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", raw)
         banned_phrases = [
             "fixes that actually work",
@@ -6884,7 +7412,25 @@ class AgentWorkflow:
         for phrase in banned_phrases:
             raw = re.sub(re.escape(phrase), "", raw, flags=re.IGNORECASE)
         mode = str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower()
-        if mode == "tech_news_only":
+        if news_mode or mode == "tech_news_only":
+            raw = re.sub(r"\s+", " ", raw).strip(" -:")
+            raw_segments = [seg.strip() for seg in re.split(r"\s*:\s*", raw) if seg.strip()]
+            if len(raw_segments) > 1 and any(
+                re.search(
+                    r"\b(fix|error|troubleshoot|not working|safe steps to try first|after update)\b",
+                    seg,
+                    flags=re.IGNORECASE,
+                )
+                for seg in raw_segments[1:]
+            ):
+                raw = raw_segments[0]
+            raw = re.sub(
+                r"\b(not working|safe steps to try first|fix guide|troubleshooting|after update)\b",
+                "",
+                raw,
+                flags=re.IGNORECASE,
+            )
+            raw = re.sub(r"\berror\s+fix\b", "", raw, flags=re.IGNORECASE)
             raw = re.sub(r"\s+", " ", raw).strip(" -:")
             category_hint = ""
             if isinstance(candidate, TopicCandidate):
@@ -6949,7 +7495,14 @@ class AgentWorkflow:
                     return -9000
                 if "google.com" in low:
                     return -9000
-                if "fix guide" in low or "troubleshooting" in low:
+                if (
+                    "fix guide" in low
+                    or "troubleshooting" in low
+                    or "error fix" in low
+                    or "safe steps to try first" in low
+                    or "not working" in low
+                    or "after update" in low
+                ):
                     return -8500
                 if re.search(
                     r"\b(shocking|disaster|scam|fraud|criminal|exposed|destroyed|caught)\b",
@@ -6996,12 +7549,19 @@ class AgentWorkflow:
                     if shape_id and int(shape_recent_counts.get(shape_id, 0)) >= 3:
                         rejected_due_to_shape += 1
                         continue
-                    if "fix guide" in low or "troubleshooting" in low:
+                    if (
+                        "fix guide" in low
+                        or "troubleshooting" in low
+                        or "error fix" in low
+                        or "safe steps to try first" in low
+                        or "not working" in low
+                        or "after update" in low
+                    ):
                         continue
                     out.append(t[:100])
                 return out
 
-            best = raw
+            best = raw or topic_phrase
             if allow_gemini:
                 try:
                     variants = self.brain.generate_news_title_variants(
@@ -7369,6 +7929,45 @@ class AgentWorkflow:
             out.append(t[:120])
         return out
 
+    def _build_rule_news_title_candidates(
+        self,
+        *,
+        source_title: str,
+        category: str,
+        attempt: int = 0,
+    ) -> list[str]:
+        topic = re.sub(r"\s+", " ", str(source_title or "")).strip(" -:") or "Tech update"
+        category_word = re.sub(r"[^a-z0-9 ]+", " ", str(category or "platform").lower()).strip() or "platform"
+        angles = [
+            "what changes for users",
+            "who is affected now",
+            "timeline and immediate impact",
+            "what to watch next",
+            "what it means in practice",
+            "key details from the latest update",
+        ]
+        frames = [
+            "{topic}: {angle}",
+            "{topic} update: {angle}",
+            "{topic} analysis: {angle}",
+            "{topic} and users: {angle}",
+            "{topic} {category} shift: {angle}",
+            "New update on {topic}: {angle}",
+        ]
+        out: list[str] = []
+        seen: set[str] = set()
+        for idx in range(len(frames)):
+            angle = angles[(attempt + idx) % len(angles)]
+            frame = frames[(attempt + idx) % len(frames)]
+            title = frame.format(topic=topic, angle=angle, category=category_word)
+            title = re.sub(r"\s+", " ", str(title or "")).strip(" -:")[:100]
+            low = title.lower()
+            if not title or low in seen:
+                continue
+            seen.add(low)
+            out.append(title)
+        return out
+
     def _finalize_title_after_content(
         self,
         *,
@@ -7380,6 +7979,124 @@ class AgentWorkflow:
         allow_gemini: bool,
     ) -> tuple[str, str]:
         plan = dict(troubleshooting_plan or {})
+        if is_news_mode(self.settings):
+            recent_titles = self._get_recent_blogger_titles(limit=240, refresh_api=False)
+            recent_first4 = {
+                self._title_first_words_key(t, n=4)
+                for t in recent_titles[:20]
+                if str(t or "").strip()
+            }
+            shape_rows = self._read_news_title_shape_rows(limit=200)
+            shape_recent_counts = Counter(
+                str((row or {}).get("shape_id", "") or "").strip().lower()
+                for row in shape_rows[-60:]
+                if str((row or {}).get("shape_id", "") or "").strip()
+            )
+            category = re.sub(
+                r"\s+",
+                " ",
+                str((getattr(selected, "meta", {}) or {}).get("news_category", "platform") or "platform"),
+            ).strip().lower()
+            snippet = re.sub(r"<[^>]+>", " ", str(final_html or ""))
+            snippet = re.sub(r"\s+", " ", snippet).strip()[:420]
+            banned_tokens = [
+                str(x or "").strip().lower()
+                for x in (getattr(self.settings.content_mode, "banned_topic_keywords", []) or [])
+                if str(x or "").strip()
+            ]
+            source_tokens = {
+                tok
+                for tok in re.findall(r"[a-z0-9]+", str(selected.title or "").lower())
+                if len(tok) >= 4 and tok not in {"what", "when", "with", "this", "that", "from"}
+            }
+            candidates: list[str] = []
+            if allow_gemini and self._gemini_budget_remaining() > 0:
+                try:
+                    generated_news = self.brain.generate_news_title_variants(
+                        category=category,
+                        source_title=str(getattr(selected, "title", "") or current_title or "Tech update"),
+                        source_snippet=str(getattr(selected, "body", "") or snippet),
+                        recent_titles=recent_titles,
+                        banned_tokens=banned_tokens,
+                        limit=10,
+                    )
+                    if self.brain.call_count:
+                        self.logs.increment_today_gemini_count(self.brain.call_count)
+                        self.brain.reset_run_counter()
+                    candidates.extend(
+                        [re.sub(r"\s+", " ", str(x or "")).strip() for x in generated_news if str(x or "").strip()]
+                    )
+                except Exception:
+                    if self.brain.call_count:
+                        self.logs.increment_today_gemini_count(self.brain.call_count)
+                        self.brain.reset_run_counter()
+            seeds = [
+                re.sub(r"\s+", " ", str(current_title or "")).strip(),
+                re.sub(r"\s+", " ", str(getattr(selected, "title", "") or "")).strip(),
+            ]
+            candidates.extend([seed for seed in seeds if seed])
+            candidates.extend(
+                self._build_rule_news_title_candidates(
+                    source_title=str(getattr(selected, "title", "") or current_title or "Tech update"),
+                    category=category,
+                    attempt=0,
+                )
+            )
+
+            best_title = ""
+            best_score = -10_000
+            seen: set[str] = set()
+            bad_pattern = re.compile(
+                r"\b(fix guide|troubleshooting|error fix|safe steps to try first|not working|after update)\b",
+                flags=re.IGNORECASE,
+            )
+            for raw_candidate in candidates:
+                candidate_title = re.sub(r"\s+", " ", str(raw_candidate or "")).strip(" -:")
+                if not candidate_title:
+                    continue
+                low = candidate_title.lower()
+                if low in seen:
+                    continue
+                seen.add(low)
+                if bad_pattern.search(candidate_title):
+                    continue
+                if any(tok and tok in low for tok in banned_tokens):
+                    continue
+                score = 0
+                n = len(candidate_title)
+                if 45 <= n <= 95:
+                    score += 18
+                elif 36 <= n <= 100:
+                    score += 8
+                else:
+                    score -= 10
+                score += min(12, sum(1 for tok in source_tokens if tok in low) * 3)
+                if ":" in candidate_title:
+                    score += 2
+                if "?" in candidate_title:
+                    score += 1
+                if self._is_recent_title_duplicate(candidate_title):
+                    score -= 24
+                first4 = self._title_first_words_key(candidate_title, n=4)
+                if first4 and first4 in recent_first4:
+                    score -= 16
+                shape_id = self._news_title_shape_id(candidate_title).lower()
+                if shape_id and int(shape_recent_counts.get(shape_id, 0)) >= 3:
+                    score -= 10
+                if score > best_score:
+                    best_score = score
+                    best_title = candidate_title
+
+            normalized = self._enforce_seo_title(
+                title=best_title or str(getattr(selected, "title", "") or current_title or "Tech update"),
+                candidate=selected,
+                global_keywords=global_keywords,
+                preferred_keyword=str(getattr(selected, "title", "") or current_title or ""),
+            )
+            if normalized:
+                return normalized, ""
+            return "", "news_title_finalize_failed"
+
         summary_payload = self._build_title_summary_payload_with_local_llm(
             current_title=current_title or selected.title,
             final_html=final_html,
@@ -7711,8 +8428,6 @@ class AgentWorkflow:
         src = str(html or "")
         if not src or not images:
             return src
-
-        # Idempotent re-run safety: clear previously injected blocks before re-injecting.
         out = re.sub(
             r"<!--\s*RZ-CTR-IMG:START.*?RZ-CTR-IMG:END[^>]*-->",
             "",
@@ -7720,67 +8435,15 @@ class AgentWorkflow:
             flags=re.IGNORECASE | re.DOTALL,
         )
         out = re.sub(r"\n{3,}", "\n\n", out)
-
-        entries: list[tuple[str, str]] = []
-        for image in (images or []):
-            image_src = str(getattr(image, "source_url", "") or "").strip()
-            if not image_src:
-                continue
-            try:
-                allowed = bool(self.publisher._is_allowed_image_url(image_src, allow_data_uri=False))  # noqa: SLF001
-            except Exception:
-                allowed = False
-            if not allowed:
-                continue
-            image_alt = str(getattr(image, "alt", "") or "").strip()
-            entries.append((image_src, image_alt))
-        if not entries:
-            return out
-
-        h2_matches = list(re.finditer(r"<h2\b[^>]*>", out, flags=re.IGNORECASE))
-        insertions: list[tuple[int, str]] = []
-
-        thumb_src, thumb_alt = entries[0]
-        thumb_block = self._injected_image_block(thumb_src, thumb_alt, kind="thumb")
-        if h2_matches:
-            insertions.append((h2_matches[0].start(), thumb_block))
-        else:
-            insertions.append((0, thumb_block))
-
-        inline_entries = entries[1:]
-        if inline_entries and h2_matches:
-            # Distribute inline images across sections with 2~3 H2 interval.
-            target_sections: list[int] = []
-            cursor = 1
-            interval_toggle = 0
-            while cursor < len(h2_matches) and len(target_sections) < len(inline_entries):
-                target_sections.append(cursor)
-                cursor += 2 if (interval_toggle % 2 == 0) else 3
-                interval_toggle += 1
-
-            for (inline_src, inline_alt), section_idx in zip(inline_entries, target_sections):
-                sec_start = h2_matches[section_idx].end()
-                sec_end = h2_matches[section_idx + 1].start() if (section_idx + 1) < len(h2_matches) else len(out)
-                body = out[sec_start:sec_end]
-                m_para = re.search(r"</p>", body, flags=re.IGNORECASE)
-                if m_para:
-                    insert_at = sec_start + m_para.end()
-                else:
-                    insert_at = sec_start
-                inline_block = self._injected_image_block(inline_src, inline_alt, kind="inline")
-                insertions.append((insert_at, inline_block))
-
-        for pos, block in sorted(insertions, key=lambda x: x[0], reverse=True):
-            out = out[:pos] + block + out[pos:]
-
-        # Guard against accidental consecutive injected image paragraphs.
-        out = re.sub(
-            r"(</p>\s*<!--\s*RZ-CTR-IMG:END[^>]*-->)(\s*<p class=\"rz-ctr-image rz-ctr-image-inline\">\s*<img\b[^>]*>\s*</p>\s*<!--\s*RZ-CTR-IMG:END[^>]*-->)",
-            r"\1",
-            out,
-            flags=re.IGNORECASE,
+        records = self.publisher._image_records_from_assets(  # noqa: SLF001
+            images=images,
+            src_lookup=None,
+            target_images=len(images or []),
+            allow_data_uri=False,
         )
-        return out
+        if not records:
+            return out
+        return self.publisher._compose_image_enriched_html(out, records)  # noqa: SLF001
 
     def _annotate_image_pipeline_diagnostics(
         self,
@@ -8106,6 +8769,63 @@ class AgentWorkflow:
         converted = re.sub(r"(?m)^\s*#{1,6}\s+(.+)$", "", converted)
         converted = re.sub(r"\n{3,}", "\n\n", converted)
         return converted.strip()
+
+    def _normalize_duplicate_h2_sections(self, html: str) -> str:
+        src = str(html or "")
+        if not src:
+            return src
+        heading_re = re.compile(r"(?is)<h2([^>]*)>(.*?)</h2>")
+        matches = list(heading_re.finditer(src))
+        if len(matches) < 2:
+            return src
+
+        variant_map: dict[str, list[str]] = {
+            "quick take": ["Key Context", "Bottom Line"],
+            "what happened": ["Latest Context", "Timeline Snapshot"],
+            "why it matters": ["Why Readers Should Care", "Decision Impact"],
+            "key details": ["Details That Matter", "Signals To Notice"],
+            "real-world scenarios": ["Practical Scenarios", "Reader Examples"],
+            "what to watch next": ["Signals To Watch", "What Comes Next"],
+            "what to do now": ["Practical Next Steps", "What To Check First"],
+            "sources": ["Further Reading", "Reference Links"],
+        }
+
+        pieces: list[str] = []
+        last_idx = 0
+        seen_counts: dict[str, int] = {}
+        changed = False
+
+        for match in matches:
+            pieces.append(src[last_idx : match.start()])
+            attrs = str(match.group(1) or "")
+            raw_title = re.sub(r"(?is)<[^>]+>", " ", str(match.group(2) or ""))
+            raw_title = unescape(raw_title)
+            raw_title = re.sub(r"\s+", " ", raw_title).strip()
+            key = raw_title.lower()
+            seen_counts[key] = int(seen_counts.get(key, 0)) + 1
+            occurrence = int(seen_counts[key])
+
+            title = raw_title
+            if occurrence > 1 and key:
+                variants = variant_map.get(key, [])
+                variant_index = occurrence - 2
+                if variant_index < len(variants):
+                    title = variants[variant_index]
+                elif key == "sources":
+                    title = f"Reference Links {occurrence - 1}"
+                elif key == "what to do now":
+                    title = f"Next Steps {occurrence - 1}"
+                else:
+                    title = f"{raw_title}: Additional Context {occurrence - 1}"
+                changed = True
+
+            pieces.append(f"<h2{attrs}>{escape(title)}</h2>")
+            last_idx = match.end()
+
+        pieces.append(src[last_idx:])
+        if not changed:
+            return src
+        return "".join(pieces)
 
     def _convert_markdown_like_to_html(self, text: str) -> str:
         src = str(text or "")

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -8,9 +8,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.news_pack_seeder import NewsPackSeeder
-from core.ollama_client import OllamaClient
-from core.settings import load_settings
+from re_core.news_pack_seeder import NewsPackSeeder
+from re_core.ollama_client import OllamaClient
+from re_core.settings import load_settings
 
 
 def main() -> int:

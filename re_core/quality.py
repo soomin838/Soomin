@@ -4,13 +4,14 @@ import json
 import re
 import time
 import uuid
-from collections import Counter
+from typing import Any, Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import pstdev
 
 from .settings import QualitySettings
+from .story_profile import looks_like_tech_story
 
 
 @dataclass
@@ -49,10 +50,12 @@ class ContentQAGate:
         settings: QualitySettings,
         authority_links: list[str],
         qa_runtime_path: Path | None = None,
+        ollama_client: Any = None,
     ) -> None:
         self.settings = settings
         self.authority_links = authority_links
         self.qa_runtime_path = qa_runtime_path
+        self.ollama_client = ollama_client
         if qa_runtime_path is not None:
             self.qa_timing_path = qa_runtime_path.parent / "qa_timing.jsonl"
         else:
@@ -100,6 +103,8 @@ class ContentQAGate:
             "link_requirements",
             lambda: self._link_requirements(domain),
         )
+        if is_news_domain and not looks_like_tech_story(title=title, snippet=text):
+            min_authority_links = 0
         parsed = _timed(
             "word_h2_h3_li_link_parsing",
             lambda: {
@@ -207,6 +212,30 @@ class ContentQAGate:
             weight=0,
             hard_reason="non_english_content_detected",
         )
+
+        if self.ollama_client and (not is_news_domain):
+            local_qa = _timed(
+                "ollama_local_pre_validate",
+                lambda: self.ollama_client.pre_validate_content(html, title=title)
+            )
+            if local_qa.get("leaks_found"):
+                _add_check(
+                    "ollama_leak_check",
+                    False,
+                    f"leaks: {', '.join(local_qa['leaks_found'])}",
+                    weight=0,
+                    hard_reason="ollama_leak_detected"
+                )
+            if local_qa.get("non_english_found"):
+                _add_check(
+                    "ollama_english_check",
+                    False,
+                    "non-English detected by Ollama",
+                    weight=0,
+                    hard_reason="ollama_non_english_detected"
+                )
+        else:
+            breakdown_ms.setdefault("ollama_local_pre_validate", 0)
 
         phrase_fail, phrase_detail = _timed(
             "forbidden_phrase_or_format_detect",
@@ -402,19 +431,18 @@ class ContentQAGate:
         failed = {c.key for c in qa_result.failed}
         topic = self._infer_topic(self._to_text(out))
 
-        if "word_count" in failed and not self._has_section(out, "The Strategic Outlook"):
+        if "word_count" in failed and not self._has_section(out, "What The Headline Leaves Out"):
             out += (
-                "<h2>The Strategic Outlook</h2>"
-                f"<p>Regarding {topic}, the long-term impact depends on market adoption and regulatory clarity. "
-                "Early movers will likely focus on ecosystem integration, while others wait for standardization.</p>"
-                "<p>Success in this landscape requires a balance between aggressive innovation and cautious risk management. "
-                "Observing the shift in competitive dynamics is the key next step.</p>"
+                "<h2>What The Headline Leaves Out</h2>"
+                f"<p>Regarding {topic}, the missing context is usually not another dramatic prediction. It is the small tradeoff that changes day-to-day use: "
+                "cost, timing, upkeep, or fit. That is the layer readers need before the story becomes genuinely useful.</p>"
+                "<p>Most headlines compress nuance to move quickly. A better explainer slows down just enough to show what still needs confirmation and which part of the claim matters first in ordinary life.</p>"
             )
-        if "heading_structure" in failed and not self._has_section(out, "Industry Challenges"):
+        if "heading_structure" in failed and not self._has_section(out, "Where Readers Should Be Cautious"):
             out += (
-                "<h2>Industry Challenges</h2>"
-                "<h3>Primary Roadblocks</h3><p>Integrating new technological shifts often clashes with legacy infrastructure.</p>"
-                "<h3>Secondary Risks</h3><p>Data privacy and cross-platform compatibility remain the biggest hurdles for scaled adoption.</p>"
+                "<h2>Where Readers Should Be Cautious</h2>"
+                "<h3>What gets flattened first</h3><p>The first thing to get flattened is fit. A broad claim can look universally useful even when it depends on room size, budget, workflow, or tolerance.</p>"
+                "<h3>What deserves a second look</h3><p>Follow-up evidence matters more than the most dramatic early framing. Readers should give extra weight to repeatable details, methodology, and concrete tradeoffs.</p>"
             )
         if "actionability" in failed:
             li_count = len(re.findall(r"<li\\b", out, flags=re.IGNORECASE))
@@ -462,17 +490,16 @@ class ContentQAGate:
         min_authority_links = max(0, int(getattr(self.settings, "min_authority_links", 0) or 0))
         min_external_links = max(0, int(getattr(self.settings, "min_external_links", 0) or 0))
 
-        if h2_count < self.settings.min_h2 and not self._has_section(out, "Core Implications"):
+        if h2_count < self.settings.min_h2 and not self._has_section(out, "What This Means"):
             out += (
-                "<h2>Core Implications</h2>"
-                f"<p>For {topic}, the development signals a significant departure from previous trends. "
-                "Innovation here is not just incremental but foundational to the next decade of tech.</p>"
+                "<h2>What This Means</h2>"
+                f"<p>For {topic}, the useful takeaway is not that everything changed overnight. It is that readers now have a clearer reason to compare tradeoffs, timing, and practical fit instead of following the headline at face value.</p>"
             )
             h2_count += 1
-        if h3_count < self.settings.min_h3 and not self._has_section(out, "Competitive Landscape"):
+        if h3_count < self.settings.min_h3 and not self._has_section(out, "Where It Can Mislead"):
             out += (
-                "<h3>Competitive Landscape</h3>"
-                "<p>Major players are already positioning themselves to leverage this shift for market dominance.</p>"
+                "<h3>Where It Can Mislead</h3>"
+                "<p>The easiest mistake is assuming the broad winner or broad warning applies equally to every reader. It usually does not.</p>"
             )
             h3_count += 1
 
@@ -490,18 +517,13 @@ class ContentQAGate:
             ][:need]
             out += "<h3>Key Technical Indicators</h3><ul>" + "".join(f"<li>{s}</li>" for s in steps) + "</ul>"
 
-        if words < self.settings.min_word_count and not self._has_section(out, "Deep Dive Analysis"):
+        if words < self.settings.min_word_count and not self._has_section(out, "How To Interpret The Signal"):
             out += (
-                "<h2>Deep Dive Analysis</h2>"
-                f"<p>Analyzing {topic} reveals a complex intersection of engineering ambition and market reality. "
-                "While the technical breakthrough is impressive, the real story lies in its potential to disrupt "
-                "established profit models and user behaviors across the globe.</p>"
-                "<p>In the coming months, we expect to see a cascade of similar moves from competitors. "
-                "This isn't just a win for one company; it's a signal that the entire category is entering a "
-                "new phase of maturity. Watch for how this affects the broader tech supply chain as well.</p>"
-                "<p>Ultimately, the users who benefit most will be those who adapt their workflows "
-                "early to accommodate these new platform capabilities. The shift is already underway, "
-                "and its momentum shows no signs of slowing down.</p>"
+                "<h2>How To Interpret The Signal</h2>"
+                f"<p>Analyzing {topic} is more useful when readers separate the loudest framing from the most durable implication. "
+                "The durable implication is usually smaller and more practical: a changed buying decision, a clearer limit, a better fit question, or a follow-up check that suddenly matters more.</p>"
+                "<p>That is why the strongest analysis rarely sounds the most dramatic. It tells readers what to compare, what to ignore for now, and which detail could still reverse the early takeaway once better evidence arrives.</p>"
+                "<p>In other words, the story becomes valuable when it narrows the next decision. That is a much better standard than treating every update as a sweeping shift.</p>"
             )
 
         if self.authority_links and len(allowed_links) < min_authority_links:
@@ -606,18 +628,13 @@ class ContentQAGate:
                         "<p>On the third day, I tried the same method with a tighter deadline and failed at first. "
                         "I removed one unnecessary step, retried, and the task time dropped noticeably.</p>"
                     )
-        if (not targeted or "word_count" in failed) and words < self.settings.min_word_count and not self._has_section(out, "Practical Implementation Notes"):
+        if (not targeted or "word_count" in failed) and words < self.settings.min_word_count and not self._has_section(out, "How To Use This Information"):
             out += (
-                "<h2>Practical Implementation Notes</h2>"
-                f"<p>For {topic}, use a staged routine: baseline measurement, one-change-per-test cycle, "
-                "and pause criteria. Capture metrics before and after each change so decisions "
-                "are evidence-based rather than opinion-based.</p>"
-                "<p>When this process fails, the most common cause is missing decision boundaries. "
-                "Define what will trigger a pause, what metric delta is acceptable, and who has final "
-                "approval authority before rollout begins. This single change usually reduces rework dramatically.</p>"
-                "<p>Teams also underestimate context drift. A checklist can pass while real usage still fails "
-                "because assumptions about workload and timing were unrealistic. "
-                "Treat context validation as a first-class requirement, not an afterthought.</p>"
+                "<h2>How To Use This Information</h2>"
+                f"<p>For {topic}, the safest routine is to narrow the decision before acting. Pick the one or two variables that matter most in your case, "
+                "then compare the headline against those variables rather than trying to absorb every angle at once.</p>"
+                "<p>When readers get disappointed, the failure is often not the product or the update itself. It is the mismatch between a broad headline and a specific real-life constraint that the article never slowed down enough to explain.</p>"
+                "<p>That is why a useful explainer translates noise into a short list: what is confirmed, what is still open, and what would change the decision if follow-up evidence moves.</p>"
                 "<h3>Validation Checklist</h3>"
                 "<ul>"
                 "<li>Define success metrics before rollout.</li>"

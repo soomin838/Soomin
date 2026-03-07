@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
+from .story_profile import normalize_story_category
+
 
 FACET_POOL = (
     "impact",
@@ -82,13 +84,7 @@ def normalize_facet(value: str) -> str:
 
 
 def normalize_category(value: str) -> str:
-    key = re.sub(r"\s+", " ", str(value or "").strip().lower())
-    if "security" in key or key == "sec":
-        return "security"
-    if "policy" in key:
-        return "policy"
-    if "platform" in key:
-        return "platform"
+    key = normalize_story_category(value)
     return key or "platform"
 
 
@@ -272,11 +268,12 @@ def build_action_items(
 
 
 def what_to_do_section_html(action_items: list[str]) -> str:
-    rows = [
-        f"<li>{escape(re.sub(r'\s+', ' ', str(item or '').strip()))}</li>"
-        for item in (action_items or [])
-        if str(item or "").strip()
-    ]
+    rows = []
+    for item in (action_items or []):
+        if not str(item or "").strip():
+            continue
+        cleaned = escape(re.sub(r'\s+', ' ', str(item).strip()))
+        rows.append(f"<li>{cleaned}</li>")
     if not rows:
         rows = [
             "<li>Review official updates.</li>",

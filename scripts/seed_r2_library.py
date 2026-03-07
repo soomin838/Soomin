@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.r2_uploader import R2Config, upload_file
-from core.settings import load_settings
+from re_core.r2_uploader import R2Config, upload_file
+from re_core.settings import load_settings
 
 
 def main() -> int:

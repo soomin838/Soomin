@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -11,14 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.brain import DraftPost
-from core.publisher import Publisher
-from core.image_library import pick_images
-from core.scheduler import generate_month_schedule
-from core.scout import TopicCandidate
-from core.settings import load_settings
-from core.visual import ImageAsset
-from core.workflow import AgentWorkflow
+from re_core.brain import DraftPost
+from re_core.publisher import Publisher
+from re_core.image_library import pick_images
+from re_core.scheduler import generate_month_schedule
+from re_core.scout import TopicCandidate
+from re_core.settings import load_settings
+from re_core.visual import ImageAsset
+from re_core.workflow import AgentWorkflow
 
 
 def _check(name: str, passed: bool, detail: str) -> dict:

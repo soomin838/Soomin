@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from .settings import LocalLLMSettings
+from .story_profile import infer_story_profile
 
 
 @dataclass
@@ -127,7 +128,7 @@ class OllamaClient:
             "options": {
                 "num_ctx": self.num_ctx,
                 "num_thread": self.num_thread,
-                "temperature": 0.35,
+                "temperature": 0.3,
                 "top_p": 0.9,
             },
         }
@@ -167,6 +168,62 @@ class OllamaClient:
         if last_err is not None:
             raise last_err
         return {}
+
+    def pre_validate_content(self, html: str, title: str = "") -> dict[str, Any]:
+        """Fast local pre-validation of content to catch leaks and language issues."""
+        compact_html = re.sub(r"\s+", " ", str(html or "")).strip()[:4000]
+        system_prompt = (
+            "You are a strict QA validator for US tech blogs.\n"
+            "Return JSON only.\n"
+            "Detect: Internal debug leaks, prompt instructions bleeding in, non-English sentences.\n"
+            "JSON schema: {\"leaks_found\": [str], \"non_english_found\": bool, \"is_low_quality\": bool, \"suggestion\": str}"
+        )
+        user_payload = {
+            "title": title,
+            "html_sample": compact_html,
+            "banned_phrases": [
+                "workflow checkpoint stage",
+                "av reference context",
+                "as an ai language model",
+                "selected topic"
+            ]
+        }
+        try:
+            return self.generate_json(system_prompt, user_payload, purpose="pre_validate")
+        except Exception:
+            return {"error": "validation_failed"}
+
+    def clean_context(self, raw_text: str) -> str:
+        """Locally clean up noisy web scrapings or large context logs."""
+        compact_text = re.sub(r"\s+", " ", str(raw_text or "")).strip()[:5000]
+        system_prompt = (
+            "You clean noisy text for RAG injection.\n"
+            "Remove footer links, cookie warnings, navigation menus, and ads.\n"
+            "Keep only core facts and troubleshooting steps.\n"
+            "Return JSON: {\"cleaned_text\": \"...\"}"
+        )
+        user_payload = {"raw_text": compact_text}
+        try:
+            res = self.generate_json(system_prompt, user_payload, purpose="clean_context")
+            return str(res.get("cleaned_text", compact_text[:1000]))
+        except Exception:
+            return compact_text[:1000]
+
+    def think_about_topic(self, title: str, body: str) -> str:
+        """Locally brainstorm expert hints or unique angles for the topic."""
+        compact_body = re.sub(r"\s+", " ", str(body or "")).strip()[:3000]
+        system_prompt = (
+            "You are a senior tech editor brainstorming unique angles for a blog post.\n"
+            "Provide 2-3 'expert hints' (US English) that help a writer create a more authoritative post.\n"
+            "Focus on: non-obvious causes, user psychology, or safety-first mindsets.\n"
+            "Return JSON: {\"hints\": \"...\"}"
+        )
+        user_payload = {"title": title, "body_sample": compact_body}
+        try:
+            res = self.generate_json(system_prompt, user_payload, purpose="think_step")
+            return str(res.get("hints", "Focus on clarity and safety."))
+        except Exception:
+            return "Focus on safe software troubleshooting steps."
 
     def build_image_prompt_plan(
         self,
@@ -270,14 +327,20 @@ class OllamaClient:
             for k, v in (context or {}).items()
             if str(k or "").strip()
         }
+        profile = infer_story_profile(
+            title=str(clean_context.get("title", "") or " ".join(clean_tags[:2])),
+            snippet=str(clean_context.get("summary", "") or clean_context.get("snippet", "") or ""),
+            category=str(clean_context.get("category", "") or (clean_tags[0] if clean_tags else "")),
+        )
         system_prompt = (
-            "You generate visual prompt packs for US tech news blog images.\n"
+            "You generate visual prompt packs for a US editorial news blog.\n"
             "Return JSON only.\n"
             "Fields: background_prompt, hook_candidates, style_tags.\n"
             "Hard rules:\n"
             "- Background image must contain NO readable text.\n"
             "- No logos, no trademarks, no watermark, no screenshots.\n"
-            "- Prefer abstract editorial visuals over people.\n"
+            "- Use concrete subject scenes when the story is about a physical product, home device, beverage, or shopping roundup.\n"
+            "- Only use abstract editorial visuals when the story is clearly software, policy, or platform news.\n"
             "- Keep it modern, high contrast, and thumbnail-friendly.\n"
             "- hook_candidates must be 2-5 short uppercase hooks, max 3 words each.\n"
             "- style_tags must be 3-6 tokens.\n"
@@ -287,6 +350,11 @@ class OllamaClient:
             "kind": clean_kind,
             "seed": int(seed),
             "context": clean_context,
+            "story_profile": {
+                "category": profile.category,
+                "topic_slug": profile.topic_slug,
+                "scene_hint": profile.scene_hint,
+            },
         }
         try:
             data = self.generate_json(
@@ -300,10 +368,7 @@ class OllamaClient:
             data = {}
         prompt = re.sub(r"\s+", " ", str(data.get("background_prompt", "") or "")).strip()
         if not prompt:
-            prompt = (
-                f"tech news editorial background for {', '.join(clean_tags[:2]) or 'technology'}, "
-                "abstract modern geometry, high contrast, no text, no logos, no watermark, no screenshot"
-            )
+            prompt = profile.scene_hint
         hooks: list[str] = []
         for item in (data.get("hook_candidates", []) if isinstance(data.get("hook_candidates", []), list) else []):
             h = re.sub(r"[^A-Za-z0-9\s]", " ", str(item or "").upper())
@@ -321,9 +386,9 @@ class OllamaClient:
             if len(styles) >= 6:
                 break
         if not hooks:
-            hooks = ["TECH UPDATE", "WHAT CHANGED", "BIG SHIFT"]
+            hooks = ["BIG SHIFT", "WHAT MATTERS", "WHY NOW"] if profile.tech_story else ["TOP PICK", "REAL TEST", "WHAT WINS"]
         if not styles:
-            styles = ["editorial", "abstract", "minimal"]
+            styles = ["editorial", "abstract", "minimal"] if profile.tech_story else ["editorial", "product", "realistic"]
         return {
             "background_prompt": prompt[:760],
             "hook_candidates": hooks[:5],

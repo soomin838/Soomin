@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.tuning_plan import build_tuning_plan, render_tuning_plan_md  # noqa: E402
+from re_core.tuning_plan import build_tuning_plan, render_tuning_plan_md  # noqa: E402
 
 
 def main() -> int:

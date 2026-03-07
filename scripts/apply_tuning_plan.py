@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.ops_report import read_run_metrics, summarize  # noqa: E402
-from core.tuning_apply import apply_patch, should_apply  # noqa: E402
+from re_core.ops_report import read_run_metrics, summarize  # noqa: E402
+from re_core.tuning_apply import apply_patch, should_apply  # noqa: E402
 
 
 def _r2_fail_count(summary: dict) -> int:

@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QTextEdit, QToolButton, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QTextEdit, QVBoxLayout
 
 from ui.widgets.glass_card import GlassCard
 
@@ -15,38 +15,32 @@ class LogPanel(GlassCard):
         self._phase_index = -1
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
 
         top = QHBoxLayout()
-        self.title = QLabel("실시간 콘솔")
-        self.title.setObjectName("Subtitle")
-        self.toggle_error_btn = QToolButton()
-        self.toggle_error_btn.setText("에러 로그 접기")
-        self.toggle_error_btn.clicked.connect(self.toggle_error_lines)
-        self.auto_scroll = QCheckBox("자동 스크롤")
-        self.auto_scroll.setChecked(True)
+        top.setSpacing(8)
+        self.title = QLabel("실행 로그")
+        self.title.setObjectName("PanelTitle")
         top.addWidget(self.title)
-        top.addStretch(1)
-        top.addWidget(self.auto_scroll)
-        top.addWidget(self.toggle_error_btn)
         root.addLayout(top)
 
         stage_row = QHBoxLayout()
         stage_row.setSpacing(6)
-        for name in ["수집", "초안", "스토리", "SEO", "이미지", "HTML", "발행"]:
+        for name in ["수집", "초안", "앵글", "QA", "이미지", "예약", "발행"]:
             dot = QLabel(name)
             dot.setProperty("stepState", "pending")
             dot.setObjectName("TimelineDot")
-            dot.setMinimumHeight(24)
+            dot.setMinimumHeight(26)
             dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._stage_labels.append(dot)
             stage_row.addWidget(dot, 1)
         root.addLayout(stage_row)
 
         self.viewer = QTextEdit()
+        self.viewer.setObjectName("LogViewer")
         self.viewer.setReadOnly(True)
-        self.viewer.setMinimumHeight(160)
+        self.viewer.setMinimumHeight(98)
         root.addWidget(self.viewer, 1)
 
     def set_phase(self, phase_key: str) -> None:
@@ -86,8 +80,8 @@ class LogPanel(GlassCard):
         if self._hide_error_lines and is_err:
             return
         self.viewer.append(text)
-        if self.auto_scroll.isChecked():
-            self.viewer.verticalScrollBar().setValue(self.viewer.verticalScrollBar().maximum())
+        bar = self.viewer.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def set_entries(self, entries: list[tuple[str, bool]]) -> None:
         self._entries = list(entries)
@@ -95,8 +89,11 @@ class LogPanel(GlassCard):
 
     def toggle_error_lines(self) -> None:
         self._hide_error_lines = not self._hide_error_lines
-        self.toggle_error_btn.setText("에러 로그 펼치기" if self._hide_error_lines else "에러 로그 접기")
         self._rebuild()
+
+    def copy_all(self) -> None:
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.viewer.toPlainText())
 
     def _rebuild(self) -> None:
         self.viewer.clear()
@@ -104,7 +101,16 @@ class LogPanel(GlassCard):
             if self._hide_error_lines and is_err:
                 continue
             self.viewer.append(line)
+        bar = self.viewer.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def _is_error_line(self, line: str) -> bool:
         lower = str(line or "").lower()
-        return "[오류]" in lower or " error:" in lower or "failed" in lower or "exception" in lower
+        return (
+            "[error]" in lower
+            or "[오류]" in lower
+            or " error:" in lower
+            or "failed" in lower
+            or "exception" in lower
+            or "traceback" in lower
+        )

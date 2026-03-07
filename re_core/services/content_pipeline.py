@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import asdict
 from typing import Any
 
-from core.scout import TopicCandidate, SourceScout
-from core.brain import GeminiBrain, DraftPost
+from re_core.scout import TopicCandidate, SourceScout
+from re_core.brain import GeminiBrain, DraftPost
 
 logger = logging.getLogger("agent.content_pipeline")
 

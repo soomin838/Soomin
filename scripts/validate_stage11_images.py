@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 import sys
@@ -8,8 +8,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.settings import load_settings  # noqa: E402
-from core.visual_diagnostics import diagnose_visual_settings  # noqa: E402
+from re_core.settings import load_settings  # noqa: E402
+from re_core.visual_diagnostics import diagnose_visual_settings  # noqa: E402
 
 
 def _tail_lines(path: Path, limit: int = 20) -> list[str]:

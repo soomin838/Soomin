@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 from pathlib import Path
@@ -9,14 +9,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.brain import (  # noqa: E402
+from re_core.brain import (  # noqa: E402
     NEWS_CONCLUSION_TEMPLATES,
     NEWS_INTRO_TEMPLATES,
     build_structure,
     render_from_plan,
     stable_hash,
 )
-from core.settings import QualitySettings  # noqa: E402
+from re_core.settings import QualitySettings  # noqa: E402
 
 
 def _signature(rendered: dict[str, object]) -> tuple:

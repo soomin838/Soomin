@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -10,13 +10,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.brain import build_structure, render_from_plan, stable_hash  # noqa: E402
-from core.content_entropy import check_entropy  # noqa: E402
-from core.news_clustering import NewsClusterEngine  # noqa: E402
-from core.news_facets import resolve_facet_context  # noqa: E402
-from core.publish_ledger import PublishLedger, make_ledger_key  # noqa: E402
-from core.source_naturalization import apply_source_naturalization  # noqa: E402
-from core.title_diversity import choose_diverse_title  # noqa: E402
+from re_core.brain import build_structure, render_from_plan, stable_hash  # noqa: E402
+from re_core.content_entropy import check_entropy  # noqa: E402
+from re_core.news_clustering import NewsClusterEngine  # noqa: E402
+from re_core.news_facets import resolve_facet_context  # noqa: E402
+from re_core.publish_ledger import PublishLedger, make_ledger_key  # noqa: E402
+from re_core.source_naturalization import apply_source_naturalization  # noqa: E402
+from re_core.title_diversity import choose_diverse_title  # noqa: E402
 
 
 TITLE_SETTINGS = {

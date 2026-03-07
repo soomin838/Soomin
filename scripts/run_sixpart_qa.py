@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import sys
@@ -9,9 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.preflight import validate_runtime_settings
-from core.quality import ContentQAGate
-from core.settings import load_settings
+from re_core.preflight import validate_runtime_settings
+from re_core.quality import ContentQAGate
+from re_core.settings import load_settings
 
 
 def _ok(name: str, passed: bool, detail: str) -> dict:

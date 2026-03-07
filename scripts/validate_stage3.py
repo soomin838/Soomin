@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.brain import stable_hash  # noqa: E402
-from core.news_clustering import NewsClusterEngine, should_skip_same_run, similarity  # noqa: E402
+from re_core.brain import stable_hash  # noqa: E402
+from re_core.news_clustering import NewsClusterEngine, should_skip_same_run, similarity  # noqa: E402
 
 
 def _state_path() -> Path:

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from pathlib import Path
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.source_naturalization import apply_source_naturalization, extract_domain, normalize_sources_section  # noqa: E402
+from re_core.source_naturalization import apply_source_naturalization, extract_domain, normalize_sources_section  # noqa: E402
 
 
 DEFAULT_SETTINGS = {

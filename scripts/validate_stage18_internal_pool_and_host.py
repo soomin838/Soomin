@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.publisher import Publisher  # noqa: E402
-from core.settings import load_settings  # noqa: E402
-from core.workflow import AgentWorkflow  # noqa: E402
+from re_core.publisher import Publisher  # noqa: E402
+from re_core.settings import load_settings  # noqa: E402
+from re_core.workflow import AgentWorkflow  # noqa: E402
 
 
 ALLOWED_TOPICS = {"security", "policy", "platform", "mobile", "ai", "chips", "privacy", "default"}

@@ -1,5 +1,32 @@
 ﻿from __future__ import annotations
 
+import platform
+import sys
+import os
+import ctypes
+import traceback
+
+# ⚡ PREVENT STDOUT/STDERR/STDIN CRASHES IN CONSOLE=FALSE (PYINSTALLER) ⚡
+if getattr(sys, "frozen", False):
+    try:
+        appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
+        log_dir = os.path.join(appdata, "RezeroAgent")
+        os.makedirs(log_dir, exist_ok=True)
+        sys.stderr = open(os.path.join(log_dir, "fatal.log"), "w", encoding="utf-8")
+        sys.stdout = open(os.devnull, "w")
+        sys.stdin = open(os.devnull, "r")
+    except Exception:
+        pass
+    
+# ⚡ IMMEDIATE CONSOLE HIDING FOR WINDOWS GUI ⚡
+if platform.system().lower() == "windows":
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass
+
 import argparse
 import base64
 import ctypes
@@ -21,13 +48,13 @@ from pathlib import Path
 import yaml
 from zoneinfo import ZoneInfo
 
-from core.onboarding import has_missing_required
-from core.preflight import validate_runtime_settings
-from core.qa_logger import QALogger, classify_error
-from core.daily_vector import run_daily_vector_if_needed
-from core.secret_backup import backup_runtime_secrets
-from core.settings import load_settings
-from core.workflow import AgentWorkflow
+from re_core.onboarding import has_missing_required
+from re_core.preflight import validate_runtime_settings
+from re_core.qa_logger import QALogger, classify_error
+from re_core.daily_vector import run_daily_vector_if_needed
+from re_core.secret_backup import backup_runtime_secrets
+from re_core.settings import load_settings
+from re_core.workflow import AgentWorkflow
 
 if getattr(sys, "frozen", False):
     BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -196,7 +223,7 @@ class AgentController:
         self._phase_started_at: float | None = None
         self._phase_last_key: str = "idle"
         self._run_started_at_monotonic: float | None = None
-        self.theme_mode: str = "auto"
+        self.theme_mode: str = "dark"
         self._ui_insights_snapshot: dict = {}
         self._ui_usage_cache: dict = {}
         self._ui_usage_loading = False
@@ -1185,6 +1212,34 @@ class AgentController:
             if (_nested_get(raw, "quality.qa_mode") or "").strip().lower() in {"", "quick"}:
                 _nested_set(raw, "quality.qa_mode", "full")
                 changed = True
+            try:
+                cur_min_words = int(_nested_get(raw, "quality.min_word_count") or "0")
+            except Exception:
+                cur_min_words = 0
+            if cur_min_words < 1800:
+                _nested_set(raw, "quality.min_word_count", 1800)
+                changed = True
+            try:
+                cur_max_words = int(_nested_get(raw, "quality.max_word_count") or "0")
+            except Exception:
+                cur_max_words = 0
+            if cur_max_words < 2200:
+                _nested_set(raw, "quality.max_word_count", 2200)
+                changed = True
+            try:
+                cur_thumb_words = int(_nested_get(raw, "visual.thumbnail_text_max_words") or "0")
+            except Exception:
+                cur_thumb_words = 0
+            if cur_thumb_words < 4:
+                _nested_set(raw, "visual.thumbnail_text_max_words", 4)
+                changed = True
+            try:
+                cur_hook_words = int(_nested_get(raw, "news_pack.thumb_hook_max_words") or "0")
+            except Exception:
+                cur_hook_words = 0
+            if cur_hook_words < 4:
+                _nested_set(raw, "news_pack.thumb_hook_max_words", 4)
+                changed = True
             if int(_nested_get(raw, "news_pack.min_ready_thumb_bg") or "0") <= 0:
                 _nested_set(raw, "news_pack.min_ready_thumb_bg", 20)
                 changed = True
@@ -1285,6 +1340,15 @@ class AgentController:
                 _nested_set(raw, "indexing.daily_quota", 200)
                 changed = True
 
+            # Legacy Cleanup: Remove obsolete keys to silence startup warnings.
+            if "images" in raw:
+                del raw["images"]
+                changed = True
+            if "llm" in raw and isinstance(raw.get("llm"), dict):
+                if "enable_image_generation" in raw["llm"]:
+                    del raw["llm"]["enable_image_generation"]
+                    changed = True
+
             _nested_set(raw, "runtime.policy_migration_version", migration_target)
             changed = True
 
@@ -1293,6 +1357,10 @@ class AgentController:
                 self.settings = load_settings(SETTINGS_PATH)
         except Exception:
             pass
+
+    def discard_all_wip_drafts(self) -> dict:
+        with self.lock:
+            return self.workflow.publisher.discard_all_wip_drafts()
 
     def _notify_failure(self, message: str) -> None:
         if platform.system().lower() != "windows":
@@ -1391,8 +1459,10 @@ def _validate_blogger_token_file(path_value: str) -> tuple[bool, str]:
 
 
 def run_cli(force_once: bool) -> None:
-    print(f"Running version: {resolve_running_version()}")
+    # CLI mode usually wants a console, but we'll log version to QA too.
+    version = resolve_running_version()
     controller = AgentController()
+    controller.qa.write("runtime", "cli_start", {"version": version})
     if force_once:
         controller.force_run = True
     controller.start()
@@ -1415,7 +1485,9 @@ def run_weekly_refresh_cli() -> int:
 
 
 def run_qt(force_once: bool, setup_only: bool) -> int:
-    print(f"Running version: {resolve_running_version()}")
+    # (Console hiding moved to global scope for immediate effect)
+
+    version = resolve_running_version()
     mutex_handle = None
     if platform.system().lower() == "windows":
         try:
@@ -1464,7 +1536,7 @@ def run_qt(force_once: bool, setup_only: bool) -> int:
         "runtime",
         "running_version",
         {
-            "version": resolve_running_version(),
+            "version": version,
             "frozen": bool(getattr(sys, "frozen", False)),
             "executable": str(getattr(sys, "executable", "")),
         },
@@ -1499,6 +1571,9 @@ def run_qt(force_once: bool, setup_only: bool) -> int:
     if force_once:
         controller.force_run = True
     controller.theme_mode = theme_manager.mode
+    
+    # Auto-start engine by default as requested.
+    controller.start()
 
     w = MainWindow(
         controller=controller,

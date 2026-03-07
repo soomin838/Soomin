@@ -1,4 +1,4 @@
-import re
+﻿import re
 import time
 import json
 import hashlib
@@ -6,8 +6,8 @@ from typing import Any
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from core.scout import TopicCandidate
-from core.brain import DraftPost
+from re_core.scout import TopicCandidate
+from re_core.brain import DraftPost
 
 
 class OllamaFallbackService:

@@ -8,6 +8,7 @@ import random
 import re
 import shutil
 import time
+import mimetypes
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,10 +21,10 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from .brain import DraftPost
+from .news_pack_providers import AirforceImageProvider, GeminiImageProvider, PollinationsProvider
 from .r2_uploader import R2Config, upload_bytes as r2_upload_bytes
 from .settings import VisualSettings
-from .image_prompts import vector_prompt_for_category
-from . import pollinations_client
+from .story_profile import infer_story_profile
 
 try:
     import mediapipe as mp  # type: ignore
@@ -39,6 +40,7 @@ class ImageAsset:
     source_kind: str = "generated"
     source_url: str = ""
     license_note: str = ""
+    slot_role: str = ""
 
 
 class VisualPipeline:
@@ -831,6 +833,146 @@ class VisualPipeline:
                 break
         return out
 
+    def _provider_order_for_generation(self) -> list[str]:
+        provider = str(getattr(self.visual_settings, "image_provider", "generated") or "generated").strip().lower()
+        if provider in {"", "library"}:
+            return []
+        if provider == "airforce":
+            return ["airforce_imagen4"]
+        if provider == "gemini":
+            return ["gemini"]
+        if provider == "pollinations":
+            return ["pollinations_auth", "pollinations_anon"]
+        raw = list(getattr(self.visual_settings, "provider_order", []) or [])
+        clean = [str(x or "").strip().lower() for x in raw if str(x or "").strip()]
+        return clean or ["airforce_imagen4", "gemini", "pollinations_auth", "pollinations_anon"]
+
+    def _generation_enabled(self) -> bool:
+        provider = str(getattr(self.visual_settings, "image_provider", "generated") or "generated").strip().lower()
+        enabled = bool(getattr(self.visual_settings, "enable_gemini_image_generation", True))
+        return bool(enabled and provider not in {"", "library"})
+
+    def _build_generation_providers(self, role: str) -> list[Any]:
+        if not self._generation_enabled():
+            return []
+        out: list[Any] = []
+        seen: set[str] = set()
+        for name in self._provider_order_for_generation():
+            if name in seen:
+                continue
+            seen.add(name)
+            if name == "airforce_imagen4":
+                if not bool(getattr(self.visual_settings, "airforce_enabled", True)):
+                    continue
+                api_key = str(getattr(self.visual_settings, "airforce_api_key", "") or "").strip()
+                if not api_key:
+                    continue
+                out.append(
+                    AirforceImageProvider(
+                        api_key=api_key,
+                        model=str(getattr(self.visual_settings, "airforce_image_model", "imagen-4") or "imagen-4"),
+                        base_url=str(getattr(self.visual_settings, "airforce_base_url", "https://api.airforce") or "https://api.airforce"),
+                        timeout_sec=max(20, int(getattr(self.visual_settings, "airforce_timeout_sec", 45) or 45)),
+                    )
+                )
+                continue
+            if name == "gemini":
+                if not self.gemini_api_key:
+                    continue
+                out.append(
+                    GeminiImageProvider(
+                        api_key=self.gemini_api_key,
+                        model=str(getattr(self.visual_settings, "gemini_image_model", "models/imagen-3.0-generate-001") or "models/imagen-3.0-generate-001"),
+                        timeout_sec=45,
+                    )
+                )
+                continue
+            if name == "pollinations_auth":
+                if not bool(getattr(self.visual_settings, "pollinations_enabled", False)):
+                    continue
+                api_key = str(getattr(self.visual_settings, "pollinations_api_key", "") or "").strip()
+                if not api_key:
+                    continue
+                model_name = str(
+                    getattr(self.visual_settings, "pollinations_thumbnail_model", "") if str(role or "").lower() == "thumbnail"
+                    else getattr(self.visual_settings, "pollinations_content_model", "")
+                    or ""
+                ).strip() or "flux"
+                out.append(
+                    PollinationsProvider(
+                        auth=True,
+                        api_key=api_key,
+                        model=model_name,
+                        timeout_sec=max(20, int(getattr(self.visual_settings, "pollinations_timeout_sec", 35) or 35)),
+                    )
+                )
+                continue
+            if name == "pollinations_anon":
+                if not bool(getattr(self.visual_settings, "pollinations_enabled", False)):
+                    continue
+                model_name = str(
+                    getattr(self.visual_settings, "pollinations_thumbnail_model", "") if str(role or "").lower() == "thumbnail"
+                    else getattr(self.visual_settings, "pollinations_content_model", "")
+                    or ""
+                ).strip() or "flux"
+                out.append(
+                    PollinationsProvider(
+                        auth=False,
+                        model=model_name,
+                        timeout_sec=max(20, int(getattr(self.visual_settings, "pollinations_timeout_sec", 35) or 35)),
+                    )
+                )
+        return out
+
+    def _generation_dimensions(self, role: str) -> tuple[int, int]:
+        role_key = str(role or "").strip().lower()
+        if role_key == "thumbnail":
+            return (1280, 720)
+        return (1152, 768)
+
+    def _variation_phrase(self, role: str, index: int) -> str:
+        role_key = str(role or "").strip().lower()
+        if role_key == "thumbnail":
+            variants = [
+                "one dominant subject, center-weighted composition, clean negative space",
+                "clear foreground object with layered background depth, no collage",
+                "single focal subject with strong editorial contrast, no infographic feel",
+            ]
+        else:
+            variants = [
+                "show the setup or environment around the subject",
+                "focus on the specific product or object mentioned in this section",
+                "show a realistic use-case moment connected to this section",
+                "show comparison context without turning it into a chart or diagram",
+            ]
+        return variants[max(0, int(index or 0)) % len(variants)]
+
+    def _build_generated_visual_prompt(self, role: str, index: int, paragraph: str, keyword: str) -> str:
+        role_key = "thumbnail" if str(role or "").strip().lower() == "thumbnail" else "content"
+        profile = infer_story_profile(title=keyword, snippet=paragraph, category="")
+        context = re.sub(r"\s+", " ", str(paragraph or "").strip())[:260]
+        role_instruction = (
+            "Create a realistic editorial thumbnail background in a wide frame."
+            if role_key == "thumbnail"
+            else "Create a realistic editorial supporting photo for one article section in a horizontal frame."
+        )
+        composition = self._variation_phrase(role_key, index)
+        prompt = (
+            f"{role_instruction} {profile.scene_hint}. "
+            f"Section context: {context or str(keyword or '').strip()[:220]}. "
+            f"Composition: {composition}. "
+            "Photographic, specific, natural materials, believable lighting. "
+            "No readable text, no letters, no numbers, no logo, no watermark, "
+            "no wireframe lines, no abstract line art, no flat infographic, no screenshot."
+        )
+        return re.sub(r"\s+", " ", prompt).strip()[:900]
+
+    def _negative_generation_prompt(self) -> str:
+        return (
+            "readable text, letters, numbers, logo, watermark, caption, "
+            "wireframe, abstract lines, line art, infographic, poster, diagram, chart, screenshot"
+        )
+
     def _generate_image_with_gemini(
         self,
         prompt: str,
@@ -839,15 +981,6 @@ class VisualPipeline:
         keyword: str,
         role: str = "content",
     ) -> ImageAsset | None:
-        # Stage-13 policy: Gemini image generation path is permanently disabled.
-        self._log_visual_event(
-            {
-                "event": "gemini_generation_disabled_policy",
-                "index": int(index or 0),
-                "role": str(role or "content"),
-            }
-        )
-        return None
         prompt_text = self._enforce_no_text_rule(re.sub(r"\s+", " ", str(prompt or "")).strip())
         if self._looks_like_news_prompt(prompt_text):
             prompt_text = self._enforce_news_visual_prompt(prompt_text)
@@ -1037,22 +1170,30 @@ class VisualPipeline:
         keyword: str,
         role: str = "content",
     ) -> ImageAsset | None:
-        # Pollinations path removed by policy: always forward to Gemini image generation.
-        self._log_visual_event(
-            {
-                "event": "pollinations_disabled_forwarded",
-                "index": int(index or 0),
-                "role": str(role or "content"),
-                "provider": "gemini",
-            }
-        )
-        return self._generate_image_with_gemini(
-            prompt=prompt,
-            index=index,
-            paragraph=paragraph,
-            keyword=keyword,
+        if not bool(getattr(self.visual_settings, "pollinations_enabled", False)):
+            self._log_visual_event(
+                {
+                    "event": "pollinations_disabled_forwarded",
+                    "index": int(index or 0),
+                    "role": str(role or "content"),
+                    "provider": "gemini",
+                }
+            )
+            return self._generate_image_with_gemini(
+                prompt=prompt,
+                index=index,
+                paragraph=paragraph,
+                keyword=keyword,
+                role=role,
+            )
+        prompt_text = self._enforce_no_text_rule(re.sub(r"\s+", " ", str(prompt or "")).strip())
+        result = self._build_local_generated_asset(
             role=role,
+            index=index,
+            paragraph=paragraph or prompt_text,
+            keyword=keyword,
         )
+        return result
 
     def _simplify_prompt_for_retry(self, prompt: str, retry_index: int, role: str) -> str:
         text = re.sub(r"\s+", " ", str(prompt or "")).strip()
@@ -1614,10 +1755,24 @@ class VisualPipeline:
             keyword="troubleshooting workflow",
         )
 
-    def _create_runtime_fallback_image(self, path: Path, role: str = "inline") -> None:
+    def _create_runtime_fallback_image(
+        self,
+        path: Path,
+        role: str = "inline",
+        keyword: str = "",
+        paragraph: str = "",
+        variation_index: int = 0,
+    ) -> None:
         width, height = (1280, 720) if str(role).lower() == "thumbnail" else (1152, 648)
-        bg_top = (241, 245, 255)
-        bg_bottom = (220, 234, 255)
+        profile = infer_story_profile(title=keyword, snippet=paragraph, category="")
+        variant = max(0, int(variation_index)) % 4
+
+        palette_map = {
+            "wellness": ((253, 244, 232), (246, 220, 201)),
+            "home": ((241, 247, 241), (216, 233, 228)),
+            "consumer": ((244, 239, 231), (229, 221, 210)),
+        }
+        bg_top, bg_bottom = palette_map.get(profile.category, ((239, 244, 252), (214, 228, 244)))
         img = Image.new("RGB", (width, height), bg_top)
         draw = ImageDraw.Draw(img)
         for y in range(height):
@@ -1626,41 +1781,142 @@ class VisualPipeline:
             g = int((1 - t) * bg_top[1] + t * bg_bottom[1])
             b = int((1 - t) * bg_top[2] + t * bg_bottom[2])
             draw.line([(0, y), (width, y)], fill=(r, g, b))
-        draw.rounded_rectangle(
-            [int(width * 0.08), int(height * 0.15), int(width * 0.92), int(height * 0.85)],
-            radius=28,
-            fill=(255, 255, 255),
-            outline=(185, 198, 230),
-            width=3,
-        )
-        # Text-free fallback: abstract geometry only.
-        draw.rounded_rectangle(
-            [int(width * 0.17), int(height * 0.30), int(width * 0.83), int(height * 0.40)],
-            radius=16,
-            fill=(205, 223, 246),
-            outline=(178, 198, 226),
-            width=2,
-        )
-        draw.rounded_rectangle(
-            [int(width * 0.17), int(height * 0.46), int(width * 0.73), int(height * 0.56)],
-            radius=16,
-            fill=(214, 232, 251),
-            outline=(184, 205, 231),
-            width=2,
-        )
-        draw.rounded_rectangle(
-            [int(width * 0.17), int(height * 0.62), int(width * 0.79), int(height * 0.72)],
-            radius=16,
-            fill=(223, 238, 253),
-            outline=(191, 212, 238),
-            width=2,
-        )
-        draw.ellipse(
-            [int(width * 0.76), int(height * 0.22), int(width * 0.86), int(height * 0.34)],
-            fill=(195, 216, 245),
-            outline=(173, 197, 230),
-            width=2,
-        )
+
+        def _shadow(box, radius: int, fill):
+            x0, y0, x1, y1 = box
+            draw.rounded_rectangle([x0 + 10, y0 + 14, x1 + 10, y1 + 14], radius=radius, fill=(0, 0, 0, 18))
+            draw.rounded_rectangle(box, radius=radius, fill=fill)
+
+        def _can(x0: int, y0: int, w: int, h: int, body_fill, cap_fill=(213, 217, 224)):
+            x1 = x0 + w
+            y1 = y0 + h
+            _shadow([x0, y0, x1, y1], 24, (252, 249, 244))
+            draw.rounded_rectangle([x0 + 10, y0 + 34, x1 - 10, y1 - 24], radius=20, fill=body_fill)
+            draw.rectangle([x0 + 18, y0 + 12, x1 - 18, y0 + 30], fill=cap_fill)
+            draw.ellipse([x0 + 22, y0 + 86, x1 - 22, y0 + 126], fill=(255, 255, 255, 80))
+
+        if profile.topic_slug == "energy_drinks":
+            draw.rectangle([0, int(height * 0.74), width, height], fill=(215, 195, 176))
+            draw.ellipse([int(width * 0.04), int(height * 0.04), int(width * 0.28), int(height * 0.30)], fill=(255, 229, 198))
+            can_w = int(width * 0.11)
+            can_h = int(height * 0.42)
+            colors = [(242, 122, 64), (94, 161, 235), (91, 192, 159), (255, 184, 78)]
+            if variant == 0:
+                start_x = int(width * 0.16)
+                for idx in range(3):
+                    _can(
+                        start_x + idx * int(can_w * 1.24),
+                        int(height * 0.25) - (idx % 2) * 16,
+                        can_w,
+                        can_h,
+                        colors[idx],
+                    )
+                draw.rounded_rectangle([int(width * 0.62), int(height * 0.18), int(width * 0.86), int(height * 0.55)], radius=30, fill=(255, 248, 241))
+                draw.ellipse([int(width * 0.68), int(height * 0.25), int(width * 0.82), int(height * 0.49)], fill=(255, 206, 112))
+                draw.ellipse([int(width * 0.74), int(height * 0.15), int(width * 0.86), int(height * 0.27)], fill=(255, 174, 98))
+            elif variant == 1:
+                draw.rectangle([int(width * 0.08), int(height * 0.54), int(width * 0.92), int(height * 0.58)], fill=(188, 171, 156))
+                _can(int(width * 0.16), int(height * 0.18), int(width * 0.16), int(height * 0.50), colors[0])
+                _can(int(width * 0.36), int(height * 0.30), int(width * 0.10), int(height * 0.34), colors[2])
+                draw.rounded_rectangle([int(width * 0.56), int(height * 0.18), int(width * 0.84), int(height * 0.48)], radius=28, fill=(254, 248, 242))
+                for row in range(3):
+                    y = int(height * 0.24) + row * 46
+                    draw.rounded_rectangle([int(width * 0.60), y, int(width * 0.79), y + 18], radius=9, fill=(234, 223, 211))
+                draw.ellipse([int(width * 0.71), int(height * 0.51), int(width * 0.80), int(height * 0.66)], fill=(255, 201, 102))
+                draw.ellipse([int(width * 0.78), int(height * 0.53), int(width * 0.87), int(height * 0.68)], fill=(255, 164, 89))
+            elif variant == 2:
+                draw.rectangle([int(width * 0.12), int(height * 0.48), int(width * 0.86), int(height * 0.54)], fill=(194, 178, 163))
+                for idx in range(4):
+                    x0 = int(width * 0.18) + idx * int(can_w * 1.12)
+                    _can(x0, int(height * 0.18), can_w, int(height * 0.34), colors[idx % len(colors)])
+                draw.rounded_rectangle([int(width * 0.18), int(height * 0.56), int(width * 0.46), int(height * 0.70)], radius=24, fill=(251, 246, 240))
+                draw.ellipse([int(width * 0.22), int(height * 0.59), int(width * 0.28), int(height * 0.68)], fill=(255, 236, 213))
+                draw.ellipse([int(width * 0.29), int(height * 0.58), int(width * 0.35), int(height * 0.67)], fill=(230, 245, 255))
+                draw.ellipse([int(width * 0.36), int(height * 0.59), int(width * 0.42), int(height * 0.68)], fill=(231, 255, 239))
+                draw.rounded_rectangle([int(width * 0.58), int(height * 0.20), int(width * 0.84), int(height * 0.46)], radius=28, fill=(255, 248, 241))
+                draw.rounded_rectangle([int(width * 0.62), int(height * 0.26), int(width * 0.80), int(height * 0.32)], radius=12, fill=(246, 221, 196))
+                draw.rounded_rectangle([int(width * 0.62), int(height * 0.35), int(width * 0.76), int(height * 0.39)], radius=10, fill=(222, 228, 233))
+            else:
+                draw.rectangle([int(width * 0.12), int(height * 0.58), int(width * 0.90), int(height * 0.62)], fill=(186, 168, 153))
+                draw.rounded_rectangle([int(width * 0.10), int(height * 0.48), int(width * 0.30), int(height * 0.70)], radius=26, fill=(78, 82, 96))
+                draw.rounded_rectangle([int(width * 0.14), int(height * 0.52), int(width * 0.26), int(height * 0.64)], radius=20, fill=(102, 108, 124))
+                _can(int(width * 0.40), int(height * 0.22), int(width * 0.13), int(height * 0.46), colors[1])
+                draw.rounded_rectangle([int(width * 0.62), int(height * 0.24), int(width * 0.86), int(height * 0.50)], radius=28, fill=(254, 248, 242))
+                draw.ellipse([int(width * 0.68), int(height * 0.31), int(width * 0.76), int(height * 0.43)], fill=(255, 201, 102))
+                draw.ellipse([int(width * 0.76), int(height * 0.29), int(width * 0.84), int(height * 0.41)], fill=(255, 164, 89))
+                draw.arc([int(width * 0.34), int(height * 0.26), int(width * 0.54), int(height * 0.62)], start=260, end=20, fill=(255, 198, 135), width=6)
+        elif profile.topic_slug == "air_purifiers":
+            draw.rectangle([0, int(height * 0.66), width, height], fill=(210, 199, 188))
+            draw.rectangle([0, 0, width, int(height * 0.66)], fill=(237, 243, 239))
+            if variant == 0:
+                draw.rectangle([int(width * 0.10), int(height * 0.14), int(width * 0.34), int(height * 0.48)], fill=(226, 236, 230))
+                for line_x in range(int(width * 0.14), int(width * 0.33), 18):
+                    draw.line([(line_x, int(height * 0.16)), (line_x, int(height * 0.46))], fill=(211, 223, 217), width=2)
+                purifier_left = 0.56
+                _shadow([int(width * purifier_left), int(height * 0.24), int(width * (purifier_left + 0.19)), int(height * 0.70)], 28, (248, 250, 249))
+                draw.rounded_rectangle([int(width * (purifier_left + 0.04)), int(height * 0.30), int(width * (purifier_left + 0.15)), int(height * 0.62)], radius=24, outline=(196, 208, 201), width=5)
+                draw.ellipse([int(width * (purifier_left + 0.075)), int(height * 0.34), int(width * (purifier_left + 0.115)), int(height * 0.38)], fill=(171, 196, 184))
+                for idx in range(4):
+                    y = int(height * 0.40) + idx * 32
+                    draw.line([(int(width * (purifier_left + 0.06)), y), (int(width * (purifier_left + 0.14)), y)], fill=(203, 214, 208), width=4)
+                for idx in range(3):
+                    x0 = int(width * (purifier_left - 0.08)) - idx * 28
+                    draw.arc([x0, int(height * 0.28), x0 + 140, int(height * 0.60)], start=270, end=40, fill=(150, 196, 183), width=4)
+                draw.rectangle([int(width * 0.16), int(height * 0.50), int(width * 0.24), int(height * 0.66)], fill=(124, 155, 124))
+                draw.ellipse([int(width * 0.12), int(height * 0.40), int(width * 0.28), int(height * 0.56)], fill=(157, 191, 150))
+                draw.ellipse([int(width * 0.14), int(height * 0.34), int(width * 0.26), int(height * 0.48)], fill=(171, 204, 165))
+            elif variant == 1:
+                draw.rectangle([int(width * 0.08), int(height * 0.20), int(width * 0.28), int(height * 0.58)], fill=(226, 232, 227))
+                draw.ellipse([int(width * 0.12), int(height * 0.16), int(width * 0.24), int(height * 0.28)], fill=(247, 233, 205))
+                draw.rectangle([int(width * 0.12), int(height * 0.28), int(width * 0.24), int(height * 0.54)], fill=(248, 244, 236))
+                draw.rounded_rectangle([int(width * 0.42), int(height * 0.24), int(width * 0.64), int(height * 0.72)], radius=30, fill=(248, 250, 249))
+                draw.rounded_rectangle([int(width * 0.47), int(height * 0.32), int(width * 0.59), int(height * 0.62)], radius=24, outline=(196, 208, 201), width=5)
+                for idx in range(4):
+                    y = int(height * 0.40) + idx * 30
+                    draw.line([(int(width * 0.49), y), (int(width * 0.57), y)], fill=(203, 214, 208), width=4)
+                draw.rounded_rectangle([int(width * 0.72), int(height * 0.22), int(width * 0.88), int(height * 0.44)], radius=24, fill=(255, 248, 244))
+                draw.rounded_rectangle([int(width * 0.75), int(height * 0.28), int(width * 0.84), int(height * 0.30)], radius=8, fill=(220, 228, 222))
+                draw.rounded_rectangle([int(width * 0.75), int(height * 0.35), int(width * 0.81), int(height * 0.37)], radius=8, fill=(181, 207, 196))
+                for idx in range(3):
+                    draw.arc([int(width * 0.34) - idx * 20, int(height * 0.30), int(width * 0.56) - idx * 20, int(height * 0.64)], start=270, end=30, fill=(150, 196, 183), width=4)
+            elif variant == 2:
+                draw.rectangle([int(width * 0.14), int(height * 0.18), int(width * 0.34), int(height * 0.50)], fill=(231, 239, 234))
+                draw.rectangle([int(width * 0.18), int(height * 0.24), int(width * 0.30), int(height * 0.44)], fill=(247, 250, 248))
+                draw.rounded_rectangle([int(width * 0.50), int(height * 0.18), int(width * 0.70), int(height * 0.66)], radius=30, fill=(248, 250, 249))
+                draw.rounded_rectangle([int(width * 0.55), int(height * 0.26), int(width * 0.65), int(height * 0.56)], radius=24, outline=(196, 208, 201), width=5)
+                draw.ellipse([int(width * 0.585), int(height * 0.31), int(width * 0.615), int(height * 0.35)], fill=(171, 196, 184))
+                for idx in range(4):
+                    y = int(height * 0.38) + idx * 30
+                    draw.line([(int(width * 0.57), y), (int(width * 0.63), y)], fill=(203, 214, 208), width=4)
+                draw.rounded_rectangle([int(width * 0.12), int(height * 0.54), int(width * 0.30), int(height * 0.68)], radius=24, fill=(220, 190, 154))
+                draw.ellipse([int(width * 0.74), int(height * 0.44), int(width * 0.88), int(height * 0.62)], fill=(161, 195, 154))
+                draw.ellipse([int(width * 0.72), int(height * 0.36), int(width * 0.84), int(height * 0.50)], fill=(175, 209, 167))
+                draw.arc([int(width * 0.40), int(height * 0.22), int(width * 0.78), int(height * 0.66)], start=280, end=20, fill=(157, 204, 191), width=5)
+            else:
+                draw.rounded_rectangle([int(width * 0.16), int(height * 0.24), int(width * 0.38), int(height * 0.66)], radius=26, fill=(247, 249, 248))
+                draw.rounded_rectangle([int(width * 0.21), int(height * 0.32), int(width * 0.33), int(height * 0.58)], radius=22, outline=(196, 208, 201), width=5)
+                for idx in range(5):
+                    y = int(height * 0.38) + idx * 28
+                    draw.line([(int(width * 0.23), y), (int(width * 0.31), y)], fill=(203, 214, 208), width=4)
+                draw.rounded_rectangle([int(width * 0.50), int(height * 0.20), int(width * 0.82), int(height * 0.46)], radius=26, fill=(255, 248, 244))
+                for idx in range(3):
+                    x = int(width * 0.56) + idx * 90
+                    draw.rounded_rectangle([x, int(height * 0.28), x + 62, int(height * 0.31)], radius=8, fill=(220, 228, 222))
+                for idx in range(4):
+                    draw.arc([int(width * 0.28) + idx * 12, int(height * 0.18), int(width * 0.62) + idx * 12, int(height * 0.74)], start=275, end=18, fill=(157, 204, 191), width=5)
+                draw.rectangle([int(width * 0.76), int(height * 0.50), int(width * 0.84), int(height * 0.66)], fill=(124, 155, 124))
+                draw.ellipse([int(width * 0.72), int(height * 0.40), int(width * 0.88), int(height * 0.56)], fill=(157, 191, 150))
+        else:
+            draw.rectangle([0, int(height * 0.70), width, height], fill=(207, 201, 194))
+            panel_left = 0.13 + variant * 0.03
+            _shadow([int(width * panel_left), int(height * 0.24), int(width * (panel_left + 0.30)), int(height * 0.66)], 26, (252, 252, 250))
+            draw.rounded_rectangle([int(width * (panel_left + 0.05)), int(height * 0.30), int(width * (panel_left + 0.25)), int(height * 0.58)], radius=24, fill=(168, 190, 223))
+            second_left = 0.46 if variant in {0, 2} else 0.52
+            _shadow([int(width * second_left), int(height * 0.18), int(width * (second_left + 0.34)), int(height * 0.60)], 26, (251, 248, 244))
+            draw.rounded_rectangle([int(width * (second_left + 0.06)), int(height * 0.24), int(width * (second_left + 0.28)), int(height * 0.48)], radius=26, fill=(95, 117, 146))
+            draw.rounded_rectangle([int(width * 0.58), int(height * 0.54), int(width * 0.84), int(height * 0.62)], radius=16, fill=(226, 231, 236))
+            draw.ellipse([int(width * 0.72), int(height * 0.10), int(width * 0.90), int(height * 0.28)], fill=(226, 212, 189))
+            draw.ellipse([int(width * 0.08), int(height * 0.08), int(width * 0.26), int(height * 0.30)], fill=(223, 231, 241))
         path.parent.mkdir(parents=True, exist_ok=True)
         img.save(path, format="PNG", optimize=True)
 
@@ -1668,13 +1924,18 @@ class VisualPipeline:
         raw = self.r2_config
         if raw is None:
             return None
+        prefix = str(
+            getattr(self.visual_settings, "generated_r2_prefix", "")
+            or getattr(raw, "prefix", "generated")
+            or "generated"
+        ).strip() or "generated"
         cfg = R2Config(
             endpoint_url=str(getattr(raw, "endpoint_url", "") or "").strip(),
             bucket=str(getattr(raw, "bucket", "") or "").strip(),
             access_key_id=str(getattr(raw, "access_key_id", "") or "").strip(),
             secret_access_key=str(getattr(raw, "secret_access_key", "") or "").strip(),
             public_base_url=str(getattr(raw, "public_base_url", "") or "").strip().rstrip("/"),
-            prefix=str(getattr(raw, "prefix", "library") or "library").strip() or "library",
+            prefix=prefix,
             cache_control=str(
                 getattr(raw, "cache_control", "public, max-age=31536000, immutable")
                 or "public, max-age=31536000, immutable"
@@ -1733,49 +1994,104 @@ class VisualPipeline:
             return None
 
         role_key = "thumbnail" if str(role or "").strip().lower() == "thumbnail" else "content"
-        last_reason_code = "r2_upload_exception"
-        
-        # Generate contextual prompt based on keyword
-        pack = vector_prompt_for_category("generic", context_keyword=keyword)
-        
+        providers = self._build_generation_providers(role_key)
+        if not providers and (not bool(getattr(self.visual_settings, "allow_rendered_fallback", False))):
+            reason_code = "no_generated_provider_available"
+            self._record_reason_code(reason_code)
+            self._log_visual_event(
+                {
+                    "event": "local_r2_asset_failed",
+                    "reason": reason_code,
+                    "reason_code": reason_code,
+                    "role": role_key,
+                    "index": int(index),
+                }
+            )
+            return None
+
+        last_reason_code = "generation_failed"
+        prompt_text = self._build_generated_visual_prompt(role_key, index, paragraph, keyword)
+        negative_text = self._negative_generation_prompt()
         for attempt in range(1, 4):
             tmp_path = (self.temp_dir / f"generated_{role_key}_{int(index):02d}_a{attempt}.png").resolve()
+            provider_name = ""
+            content_type = "image/png"
             try:
-                # 1. Try Pollinations first to get a context-rich dynamic image
-                generated_file = None
-                if self.visual_settings.pollinations_enabled:
+                attempt_prompt = prompt_text if attempt == 1 else self._simplify_prompt_for_retry(prompt_text, attempt, role_key)
+                width, height = self._generation_dimensions(role_key)
+                generated = False
+                for provider in providers:
                     try:
-                        generated_file = pollinations_client.generate_image(
-                            prompt=pack.prompt,
-                            negative=pack.negative,
-                            out_dir=self.temp_dir,
-                            timeout_sec=max(30, int(self.visual_settings.pollinations_timeout_sec))
+                        seed = random.randint(1, 2_147_483_647)
+                        result = provider.generate_image(
+                            prompt=attempt_prompt,
+                            width=width,
+                            height=height,
+                            seed=seed,
                         )
-                        if generated_file and generated_file.exists():
-                            import shutil
-                            shutil.move(str(generated_file), str(tmp_path))
-                        else:
-                            generated_file = None
-                    except Exception as e:
-                        self._record_reason_code("pollinations_failed")
+                        tmp_path.write_bytes(bytes(result.image_bytes or b""))
+                        provider_name = str(getattr(provider, "name", "") or getattr(result, "provider", "") or "generated").strip()
+                        content_type = str(getattr(result, "mime", "") or "image/png").strip() or "image/png"
+                        generated = tmp_path.exists() and int(tmp_path.stat().st_size or 0) >= 5 * 1024
+                        self._log_visual_event(
+                            {
+                                "event": "generated_provider_success",
+                                "provider": provider_name,
+                                "role": role_key,
+                                "index": int(index),
+                                "attempt": int(attempt),
+                                "bytes": int(tmp_path.stat().st_size if tmp_path.exists() else 0),
+                            }
+                        )
+                        if generated:
+                            break
+                    except Exception as exc:
+                        provider_name = str(getattr(provider, "name", "") or "generated").strip()
+                        last_reason_code = f"{provider_name}_failed"
+                        self._record_reason_code(last_reason_code)
+                        self._log_visual_event(
+                            {
+                                "event": "generated_provider_failed",
+                                "provider": provider_name,
+                                "role": role_key,
+                                "index": int(index),
+                                "attempt": int(attempt),
+                                "reason": str(exc)[:220],
+                            }
+                        )
+                        continue
 
-                # 2. If Pollinations fails or is disabled, fallback to the geometric abstraction
                 if not tmp_path.exists():
-                    self._create_runtime_fallback_image(tmp_path, role="thumbnail" if role_key == "thumbnail" else "inline")
-                    
+                    if not bool(getattr(self.visual_settings, "allow_rendered_fallback", False)):
+                        continue
+                    self._create_runtime_fallback_image(
+                        tmp_path,
+                        role="thumbnail" if role_key == "thumbnail" else "inline",
+                        keyword=keyword,
+                        paragraph=paragraph,
+                        variation_index=index,
+                    )
+                    provider_name = "rendered_fallback"
+                    content_type = "image/png"
+                    last_reason_code = "rendered_fallback_used"
+                    self._record_reason_code(last_reason_code)
+
                 try:
                     self._optimize_image_for_seo(tmp_path, role=role_key)
                 except Exception:
                     pass
                 data = tmp_path.read_bytes()
+                guessed_content_type = mimetypes.guess_type(str(tmp_path))[0] or ""
+                if guessed_content_type:
+                    content_type = guessed_content_type
                 try:
                     r2_url = r2_upload_bytes(
                         root=self.temp_dir.parent.parent,
                         cfg=cfg,
                         content=data,
                         filename_hint=f"{role_key}_{index:02d}_a{attempt}",
-                        category="thumb" if role_key == "thumbnail" else "content",
-                        content_type="image/png",
+                        category="thumbnail" if role_key == "thumbnail" else "inline",
+                        content_type=content_type,
                     )
                 except Exception as exc:
                     last_reason_code = "r2_upload_exception"
@@ -1826,9 +2142,10 @@ class VisualPipeline:
                     path=self._virtual_asset_path(role_key, index),
                     alt=self._build_alt_text(keyword, "generated image"),
                     anchor_text=str(paragraph or ""),
-                    source_kind="generated_r2",
+                    source_kind=str(provider_name or "generated_r2"),
                     source_url=str(r2_url),
-                    license_note="Generated locally and hosted on Cloudflare R2.",
+                    license_note=f"Generated by {str(provider_name or 'runtime').strip()} and hosted on Cloudflare R2.",
+                    slot_role=role_key,
                 )
             except Exception as exc:
                 last_reason_code = "r2_upload_exception"

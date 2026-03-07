@@ -1,27 +1,31 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect
-from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect
 
 
 class GlassCard(QFrame):
-    """A semi-transparent dark 'glass' card panel matching the neon theme."""
+    """Reusable surface card that defers its visual treatment to the global theme."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("GlassCard")
-        self.setStyleSheet(
-            """
-            QFrame#GlassCard {
-                background-color: rgba(28, 24, 37, 0.85);
-                border: 1px solid rgba(196, 161, 255, 0.12);
-                border-radius: 14px;
-            }
-            """
-        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._state = ""
+
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(20)
-        shadow.setOffset(0, 3)
-        shadow.setColor(QColor(20, 18, 24, 140))
+        shadow.setBlurRadius(34)
+        shadow.setOffset(0, 12)
+        shadow.setColor(QColor(10, 14, 20, 46))
         self.setGraphicsEffect(shadow)
+
+    def set_state(self, state: str = "") -> None:
+        clean = str(state or "").strip().lower()
+        if clean == self._state:
+            return
+        self._state = clean
+        self.setProperty("state", clean)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()

@@ -35,8 +35,8 @@ from PySide6.QtWidgets import (
 
 from ui.widgets.glass_card import GlassCard
 from ui.widgets.motion_button import MotionButton
-from core.ollama_manager import OllamaManager
-from core.settings import LocalLLMSettings
+from re_core.ollama_manager import OllamaManager
+from re_core.settings import LocalLLMSettings
 
 
 @dataclass

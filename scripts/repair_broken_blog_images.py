@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -11,9 +11,9 @@ import requests
 import yaml
 from googleapiclient.discovery import build
 
-from core.publisher import Publisher
-from core.settings import load_settings
-from core.visual import VisualPipeline
+from re_core.publisher import Publisher
+from re_core.settings import load_settings
+from re_core.visual import VisualPipeline
 
 
 @dataclass

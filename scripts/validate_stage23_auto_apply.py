@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import subprocess
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.tuning_apply import rollback_last_backup  # noqa: E402
+from re_core.tuning_apply import rollback_last_backup  # noqa: E402
 
 
 def _write_settings(temp_root: Path, *, target_images: int = 5) -> Path:

@@ -151,9 +151,29 @@ class Watchdog:
         events[key] = asdict(state)
         return state
 
+    def _reset_event_if_stale(self, state: EventWatchState, now: datetime) -> EventWatchState:
+        wallclock_limit = max(1, int(self._get("max_event_wallclock_minutes", 20) or 20))
+        last_touch = parse_utc(state.last_seen_utc) or parse_utc(state.first_seen_utc)
+        if last_touch is None:
+            return state
+        idle_min = (now - last_touch).total_seconds() / 60.0
+        if idle_min < float(wallclock_limit):
+            return state
+        now_iso = now.isoformat()
+        state.first_seen_utc = now_iso
+        state.last_seen_utc = now_iso
+        state.total_attempts = 0
+        state.hard_failure_streak = 0
+        state.provider_429_streak = 0
+        state.provider_530_streak = 0
+        state.last_failure_reason = ""
+        return state
+
     def begin_event(self, event_id: str) -> EventWatchState:
         state = self._event(event_id)
-        now_iso = utc_now().isoformat()
+        now = utc_now()
+        state = self._reset_event_if_stale(state, now)
+        now_iso = now.isoformat()
         if not state.first_seen_utc:
             state.first_seen_utc = now_iso
         state.last_seen_utc = now_iso
@@ -262,4 +282,3 @@ class Watchdog:
             return None
         idx = min(len(clean) - 1, max(0, streak - 1))
         return int(clean[idx])
-

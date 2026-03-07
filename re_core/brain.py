@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from .news_facets import (
+from re_core.news_facets import (
     FACET_POOL,
     ensure_what_to_do_now_section,
     facet_emphasis_hint,
@@ -23,7 +23,7 @@ from .news_facets import (
     reorder_optional_sections_for_facet,
     resolve_facet_context,
 )
-from .scout import TopicCandidate
+from re_core.scout import TopicCandidate
 from .settings import GeminiSettings
 
 
@@ -509,7 +509,7 @@ class GeminiBrain:
             f"Domain routing: {domain}\n"
             f"Source platform: {candidate.source}\n"
             f"Source title: {candidate.title}\n"
-            f"Source body: {candidate.body[:4000]}\n"
+            f"Source body: {candidate.body[:9000]}\n"
             f"Source URL: {candidate.url}\n"
         )
         if str(domain or "").strip().lower() in {"office_experiment", "news_interpretation"}:
@@ -831,15 +831,17 @@ class GeminiBrain:
             "Write a US tech news explainer article in valid HTML body fragment only.\n"
             "Language policy: US English only. Never output Korean.\n"
             "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
-            "Tone: factual, concise, ad-safe, and attribution-first.\n"
+            "Tone: factual, natural, ad-safe, and attribution-first.\n"
             "No defamation. No unverified allegations.\n"
             "Use attribution phrasing for uncertain claims: reported, may, could, according to.\n"
             "Apply perspective emphasis implicitly in section focus and sentence priority. "
             "Never print internal planning labels.\n"
             f"Perspective emphasis hint: {perspective_hint}\n"
+            "Write like a sharp American news explainer, not like a generic AI summary.\n"
             "Do not write like a template. Vary transitions and avoid repeated phrases like 'In conclusion'.\n"
             "Avoid uniform paragraph lengths; mix 1-line punches with longer analysis.\n"
             "Do not write as a troubleshooting fix guide.\n"
+            "Never use troubleshooting headings such as Symptoms, Why This Happens, Fix 1, Fix 2, Fix 3, If None Worked, or Prevention Checklist.\n"
             "Do NOT include FAQ section.\n"
             "Required core H2 sections (must appear exactly once): Quick Take, What Happened, Sources.\n"
             f"Use exactly {section_count} H2 sections for this run (minimum H2 count: 5).\n"
@@ -856,7 +858,9 @@ class GeminiBrain:
             "  If unknown, write 'Not confirmed'.\n"
             f"{what_to_do_rule}"
             "The article must include at least 2 question sentences and one explicit comparison/example block.\n"
-            "Target depth: roughly 900-1400 words for editorial completeness.\n"
+            "Target depth: roughly 1800-2000 words for editorial completeness.\n"
+            "Each major H2 section should contain 2-4 substantial paragraphs, not placeholder filler.\n"
+            "Give mainstream American readers concrete implications, tradeoffs, and a few realistic examples.\n"
             f"Use 6-8 diversity modules from this pool: {selected_modules}\n"
             f"Module placement map (vary rhythm): {module_slots}\n"
             "In Sources, show publisher-labeled links (not raw URL text).\n"
@@ -872,7 +876,7 @@ class GeminiBrain:
             f"Reference guidance: {reference_guidance}\n"
             f"Plan JSON: {json.dumps(plan_payload, ensure_ascii=False) if plan_payload else '{}'}\n"
             f"Source title: {candidate.title}\n"
-            f"Source body: {candidate.body[:4000]}\n"
+            f"Source body: {candidate.body[:9000]}\n"
         )
         payload = self._extract_json(
             self._generate_text(
@@ -903,6 +907,28 @@ class GeminiBrain:
             if retry_html:
                 html = retry_html
                 payload = retry_payload
+        if self._news_needs_depth_retry(html, min_words=1800):
+            depth_retry_prompt = (
+                prompt
+                + "\n\nREWRITE REQUIRED: previous output was too short, too generic, or drifted into a troubleshooting template. "
+                "Regenerate the full article as a real news explainer only. "
+                "Minimum target: 1800 words. "
+                "Use Quick Take, What Happened, Why It Matters, Key Details, What To Watch Next, What To Do Now, and Sources. "
+                "Do not use Fix-style headings."
+            )
+            depth_retry_payload = self._extract_json(
+                self._generate_text(
+                    depth_retry_prompt,
+                    system_instruction=(
+                        "You are a senior US tech news editor writing practical explainers for mainstream readers. "
+                        "Be precise, readable, concrete, and human."
+                    ),
+                )
+            )
+            depth_retry_html = _render_news_html(depth_retry_payload)
+            if depth_retry_html:
+                html = depth_retry_html
+                payload = depth_retry_payload
         _focus_keywords = payload.get("focus_keywords", [])
         if not isinstance(_focus_keywords, list):
             _focus_keywords = []
@@ -1094,6 +1120,36 @@ class GeminiBrain:
         joined = " ".join(re.sub(r"<[^>]+>", " ", x) for x in lis).lower()
         required = ("who", "what", "when", "scope", "risk")
         return not all(tok in joined for tok in required)
+
+    def _news_needs_depth_retry(self, html: str, *, min_words: int = 1800) -> bool:
+        src = str(html or "")
+        text = re.sub(r"<[^>]+>", " ", src)
+        text = re.sub(r"\s+", " ", text).strip()
+        words = len(re.findall(r"[A-Za-z0-9']+", text))
+        if words < max(900, int(min_words)):
+            return True
+
+        h2_titles = [
+            re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", part)).strip().lower()
+            for part in re.findall(r"<h2[^>]*>(.*?)</h2>", src, flags=re.IGNORECASE | re.DOTALL)
+        ]
+        if len(h2_titles) < 6:
+            return True
+
+        required_titles = ("quick take", "what happened", "what to do now", "sources")
+        if any(title not in h2_titles for title in required_titles):
+            return True
+
+        forbidden_titles = (
+            r"\bsymptoms\b",
+            r"\bwhy this happens\b",
+            r"\bfix\s*1\b",
+            r"\bfix\s*2\b",
+            r"\bfix\s*3\b",
+            r"\bif none worked\b",
+            r"\bprevention checklist\b",
+        )
+        return any(re.search(pattern, src, flags=re.IGNORECASE) for pattern in forbidden_titles)
 
     def rewrite_to_actionable(self, title: str, html: str, plan: dict | None = None) -> str:
         plan_payload = plan if isinstance(plan, dict) else {}

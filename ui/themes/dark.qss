@@ -1,164 +1,293 @@
-﻿/* ═══════════════════════════════════════
-   Rezy Cute Dark — dark.qss (통일 톤)
-   ═══════════════════════════════════════ */
-
-QMainWindow, QDialog {
-    background-color: #141218;
+QMainWindow,
+QDialog {
+    background: #0d1012;
 }
 
 QWidget {
-    color: #F0ECF8;
-    font-family: "Pretendard", "Segoe UI", "Malgun Gothic", "맑은 고딕", "Inter", sans-serif;
-    font-size: 14px;
+    color: #eef1eb;
 }
 
-QLabel#Title {
-    font-size: 22px;
-    font-weight: 800;
-    color: #F0ECF8;
+QWidget#RootShell {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #161b1f,
+        stop:0.42 #0f1317,
+        stop:1 #0a0d10);
 }
 
-QLabel#Subtitle {
-    font-size: 13px;
-    font-weight: 600;
-    color: #B8AECF;
+QFrame#TopNav {
+    background: rgba(13, 17, 20, 0.86);
+    border-color: rgba(213, 180, 128, 0.16);
 }
 
-QLabel#Value {
-    font-size: 24px;
-    font-weight: 800;
-    color: #F0ECF8;
-}
-
-QLabel#ValueSmall {
-    font-size: 13px;
-    color: #C9BDE0;
-}
-
-#TopNav {
-    background: rgba(28, 24, 37, 0.72);
-    border: 1px solid rgba(196, 161, 255, 0.10);
-    border-radius: 18px;
-}
-
-QFrame#GlassCard {
-    background: rgba(28, 24, 37, 0.78);
-    border: 1px solid rgba(196, 161, 255, 0.12);
-    border-radius: 14px;
-}
-
-QFrame#GlassCard[state="success"] {
-    background: rgba(127, 219, 202, 0.15);
-}
-
-QFrame#GlassCard[state="warning"] {
-    background: rgba(255, 204, 0, 0.14);
-}
-
-QFrame#GlassCard[state="error"] {
-    background: rgba(255, 100, 100, 0.15);
-}
-
-QFrame#GlassCard[state="active"] {
-    background: rgba(196, 161, 255, 0.20);
+QFrame#MissionCard {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 rgba(20, 28, 30, 0.98),
+        stop:0.65 rgba(18, 24, 27, 0.96),
+        stop:1 rgba(28, 24, 20, 0.96));
+    border-color: rgba(128, 205, 195, 0.18);
 }
 
 QFrame#HeroCard {
-    background: rgba(28, 24, 37, 0.80);
-    border: 1px solid rgba(196, 161, 255, 0.14);
-    border-radius: 18px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 rgba(19, 23, 28, 0.99),
+        stop:0.58 rgba(18, 22, 26, 0.98),
+        stop:1 rgba(32, 25, 20, 0.98));
+    border-color: rgba(149, 181, 196, 0.22);
+}
+
+QFrame#ControlCard,
+QFrame#ScheduleCard,
+QFrame#TimelineCard,
+QFrame#MetricsCard,
+QFrame#WatchCard,
+QFrame#GlassCard {
+    background: rgba(17, 21, 25, 0.9);
+    border-color: rgba(225, 232, 235, 0.08);
+}
+
+QFrame#GlassCard[state="success"] {
+    border-color: rgba(126, 214, 192, 0.24);
+}
+
+QFrame#GlassCard[state="warning"] {
+    border-color: rgba(220, 171, 102, 0.26);
+}
+
+QFrame#GlassCard[state="error"] {
+    border-color: rgba(255, 122, 104, 0.28);
+}
+
+QFrame#GlassCard[state="active"] {
+    border-color: rgba(120, 173, 255, 0.28);
+}
+
+QLabel#HeroEyebrow,
+QLabel#MetaLabel,
+QLabel#DataLabel {
+    color: #d8ba85;
+}
+
+QLabel#TopBrandTitle,
+QLabel#HeroTitle,
+QLabel#PanelTitle,
+QLabel#KpiTitle,
+QLabel#TimelineTitle,
+QLabel#PanelValue,
+QLabel#Value,
+QLabel#KpiValue,
+QLabel#MetaValue {
+    color: #faf7f2;
+}
+
+QLabel#TopBrandCopy,
+QLabel#HeroBody,
+QLabel#PanelBody,
+QLabel#ValueSmall,
+QLabel#KpiMeta,
+QLabel#TimelineBody,
+QCheckBox {
+    color: #a8b1b2;
 }
 
 QLabel#StatusChip {
-    background: rgba(196, 161, 255, 0.22);
-    border: 1px solid rgba(196, 161, 255, 0.45);
-    border-radius: 12px;
-    padding: 4px 10px;
-    font-size: 12px;
-    font-weight: 700;
-    color: #E8DEFF;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #edf1ec;
+}
+
+QLabel#StatusChip[tone="good"] {
+    background: rgba(126, 214, 192, 0.16);
+    border-color: rgba(126, 214, 192, 0.32);
+    color: #9ee8d8;
+}
+
+QLabel#StatusChip[tone="warning"] {
+    background: rgba(220, 171, 102, 0.16);
+    border-color: rgba(220, 171, 102, 0.3);
+    color: #f0c88a;
+}
+
+QLabel#StatusChip[tone="danger"] {
+    background: rgba(255, 122, 104, 0.16);
+    border-color: rgba(255, 122, 104, 0.3);
+    color: #ffb2a7;
+}
+
+QLabel#Badge {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #ced7d7;
+}
+
+QLabel#Badge[tone="success"] {
+    background: rgba(126, 214, 192, 0.16);
+    border-color: rgba(126, 214, 192, 0.28);
+    color: #9ee8d8;
+}
+
+QLabel#Badge[tone="active"],
+QLabel#Badge[tone="running"] {
+    background: rgba(120, 173, 255, 0.16);
+    border-color: rgba(120, 173, 255, 0.28);
+    color: #b4d4ff;
+}
+
+QLabel#Badge[tone="warning"],
+QLabel#Badge[tone="warn"] {
+    background: rgba(220, 171, 102, 0.16);
+    border-color: rgba(220, 171, 102, 0.28);
+    color: #f0c88a;
+}
+
+QLabel#Badge[tone="error"],
+QLabel#Badge[tone="fail"] {
+    background: rgba(255, 122, 104, 0.16);
+    border-color: rgba(255, 122, 104, 0.28);
+    color: #ffb2a7;
 }
 
 QLabel#TimelineDot {
-    border-radius: 12px;
-    padding: 3px 8px;
-    font-size: 12px;
-    font-weight: 600;
-    background: rgba(196, 161, 255, 0.10);
-    color: #C9BDE0;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: #839292;
 }
 
 QLabel#TimelineDot[stepState="active"] {
-    background: rgba(196, 161, 255, 0.28);
-    color: #F0ECF8;
-    border: 1px solid rgba(196, 161, 255, 0.55);
+    background: rgba(120, 173, 255, 0.14);
+    border-color: rgba(120, 173, 255, 0.26);
+    color: #c1daff;
 }
 
 QLabel#TimelineDot[stepState="done"] {
-    background: rgba(127, 219, 202, 0.22);
-    color: #99EDCC;
+    background: rgba(126, 214, 192, 0.14);
+    border-color: rgba(126, 214, 192, 0.26);
+    color: #9ee8d8;
 }
 
-QPushButton, QToolButton {
-    background: rgba(28, 24, 37, 0.85);
-    border: 1px solid rgba(196, 161, 255, 0.18);
-    border-radius: 12px;
-    padding: 8px 14px;
-    font-size: 13px;
-    font-weight: 700;
-    color: #F0ECF8;
+QLabel#KpiIndex,
+QLabel#StepIndex {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #dbe2df;
 }
 
-QPushButton:hover, QToolButton:hover {
-    border: 1px solid rgba(196, 161, 255, 0.55);
-    background: rgba(196, 161, 255, 0.15);
+QLabel#KpiIndex[tone="good"],
+QLabel#StepIndex[tone="success"] {
+    background: rgba(126, 214, 192, 0.16);
+    border-color: rgba(126, 214, 192, 0.28);
+    color: #9ee8d8;
+}
+
+QLabel#KpiIndex[tone="warning"],
+QLabel#StepIndex[tone="warning"] {
+    background: rgba(220, 171, 102, 0.16);
+    border-color: rgba(220, 171, 102, 0.28);
+    color: #f0c88a;
+}
+
+QLabel#KpiIndex[tone="danger"],
+QLabel#StepIndex[tone="error"] {
+    background: rgba(255, 122, 104, 0.16);
+    border-color: rgba(255, 122, 104, 0.28);
+    color: #ffb2a7;
+}
+
+QLabel#KpiIndex[tone="active"],
+QLabel#StepIndex[tone="active"] {
+    background: rgba(120, 173, 255, 0.16);
+    border-color: rgba(120, 173, 255, 0.28);
+    color: #b4d4ff;
+}
+
+QPushButton,
+QToolButton {
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: #eef1eb;
+}
+
+QPushButton:hover,
+QToolButton:hover {
+    background: rgba(255, 255, 255, 0.07);
+    border-color: rgba(255, 255, 255, 0.16);
 }
 
 QPushButton#PrimaryBtn {
-    background: #C4A1FF;
-    color: #141218;
-    border: 1px solid #C4A1FF;
+    background: #d19a4d;
+    border-color: #d19a4d;
+    color: #15120e;
+}
+
+QPushButton#PrimaryBtn:hover {
+    background: #dfaa5f;
+    border-color: #dfaa5f;
+}
+
+QPushButton#AccentBtn {
+    background: rgba(126, 214, 192, 0.16);
+    border-color: rgba(126, 214, 192, 0.26);
+    color: #9ee8d8;
+}
+
+QPushButton#AccentBtn:hover {
+    background: rgba(126, 214, 192, 0.22);
+}
+
+QPushButton#GhostBtn,
+QToolButton#GhostBtn {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.08);
+    color: #dbe2df;
 }
 
 QPushButton#DangerBtn {
-    background: rgba(239, 68, 68, 0.15);
-    color: #FF8A8A;
-    border: 1px solid rgba(239, 68, 68, 0.35);
+    background: rgba(255, 122, 104, 0.12);
+    border-color: rgba(255, 122, 104, 0.22);
+    color: #ffb2a7;
 }
 
-QLineEdit, QComboBox, QTextEdit, QSpinBox, QPlainTextEdit {
-    background: rgba(20, 18, 24, 0.80);
-    border: 1px solid rgba(196, 161, 255, 0.18);
-    border-radius: 10px;
-    padding: 6px 8px;
-    color: #F0ECF8;
+QTextEdit,
+QLineEdit,
+QComboBox,
+QPlainTextEdit,
+QSpinBox {
+    background: rgba(10, 14, 17, 0.86);
+    border: 1px solid rgba(220, 227, 230, 0.08);
+    color: #eef1eb;
 }
 
-QListWidget {
-    background: transparent;
-    border: none;
+QTextEdit#LogViewer {
+    background: rgba(9, 13, 16, 0.96);
+    border-color: rgba(126, 214, 192, 0.16);
+    color: #cce7dc;
+}
+
+QTextEdit:focus,
+QLineEdit:focus,
+QComboBox:focus,
+QPlainTextEdit:focus {
+    border-color: rgba(120, 173, 255, 0.36);
 }
 
 QProgressBar {
-    background: rgba(196, 161, 255, 0.10);
-    border-radius: 9px;
-    border: 1px solid rgba(196, 161, 255, 0.10);
-    text-align: center;
-    color: #F0ECF8;
-    height: 16px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 QProgressBar::chunk {
-    border-radius: 8px;
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #C4A1FF, stop:0.5 #7FDBCA, stop:1 #FF8AC4);
+        stop:0 #d19a4d,
+        stop:0.52 #86d7c1,
+        stop:1 #6ea5ff);
 }
 
-QScrollArea {
-    border: none;
-    background: transparent;
+QLabel#ScheduleLine,
+QLabel#AlertLine {
+    color: #e2e7e4;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-QCheckBox {
-    color: #C9BDE0;
+QScrollBar::handle:vertical {
+    background: rgba(255, 255, 255, 0.14);
 }

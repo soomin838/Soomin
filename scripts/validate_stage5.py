@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.watchdog import Watchdog, utc_now  # noqa: E402
+from re_core.watchdog import Watchdog, utc_now  # noqa: E402
 
 
 def _state_path() -> Path:

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -7,8 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.quality import ContentQAGate
-from core.settings import QualitySettings
+from re_core.quality import ContentQAGate
+from re_core.settings import QualitySettings
 
 
 def run() -> int:

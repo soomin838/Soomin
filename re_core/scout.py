@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote_plus
 
 import requests
@@ -185,10 +186,12 @@ class SourceScout:
         settings: SourceSettings,
         root: Path,
         content_mode: ContentModeSettings | None = None,
+        intelligence: Any = None,
     ) -> None:
         self.settings = settings
         self.root = root
         self.content_mode = content_mode or ContentModeSettings()
+        self.intelligence = intelligence
         self._longtail_cache: dict[str, tuple[datetime, list[str]]] = {}
         self._longtail_cache_ttl = timedelta(hours=6)
 
@@ -510,101 +513,23 @@ class SourceScout:
         return bool(has_news_intent or has_mainstream)
 
     def _extract_feature_token(self, text: str) -> str:
-        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
-        priority = [
-            "wifi",
-            "wi-fi",
-            "bluetooth",
-            "usb",
-            "printer",
-            "microphone",
-            "mic",
-            "camera",
-            "keyboard",
-            "mouse",
-            "driver",
-            "vpn",
-            "ethernet",
-            "audio",
-            "sound",
-            "battery",
-            "charging",
-            "speaker",
-        ]
-        for token in priority:
-            if token in lower:
-                return token
+        if self.intelligence:
+            return self.intelligence.infer_feature_token(text)
         return ""
 
     def _infer_device_token(self, text: str) -> str:
-        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
-        if any(tok in lower for tok in ("windows 11", "windows 10", "windows")):
-            return "windows"
-        if any(tok in lower for tok in ("macos", "macbook", "mac")):
-            return "mac"
-        if any(tok in lower for tok in ("iphone", "ios")):
-            return "iphone"
-        if any(tok in lower for tok in ("galaxy", "samsung", "android")):
-            return "galaxy"
+        if self.intelligence:
+            return self.intelligence.infer_device_type(text)
         return ""
 
     def _extract_device_hint(self, text: str, entity: str = "") -> str:
-        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
-        if "windows 11" in lower:
-            return "Windows 11"
-        if "windows 10" in lower:
-            return "Windows 10"
-        for token, label in (
-            ("windows", "Windows"),
-            ("macos", "macOS"),
-            ("mac", "Mac"),
-            ("iphone", "iPhone"),
-            ("ios", "iPhone"),
-            ("galaxy", "Galaxy"),
-            ("samsung", "Galaxy"),
-            ("android", "Android"),
-        ):
-            if token in lower:
-                return label
-        ent = str(entity or "").strip().lower()
-        for token, label in (
-            ("windows", "Windows"),
-            ("mac", "Mac"),
-            ("iphone", "iPhone"),
-            ("ios", "iPhone"),
-            ("galaxy", "Galaxy"),
-            ("samsung", "Galaxy"),
-            ("android", "Android"),
-        ):
-            if token in ent:
-                return label
+        if self.intelligence:
+            return self.intelligence.infer_device_hint(text, entity)
         return ""
 
     def _extract_feature_hint(self, text: str) -> str:
-        lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
-        mapping = [
-            ("wifi", "Wi-Fi"),
-            ("wi-fi", "Wi-Fi"),
-            ("bluetooth", "Bluetooth"),
-            ("usb", "USB"),
-            ("printer", "printer"),
-            ("microphone", "microphone"),
-            ("mic", "microphone"),
-            ("camera", "camera"),
-            ("keyboard", "keyboard"),
-            ("mouse", "mouse"),
-            ("driver", "driver"),
-            ("ethernet", "Ethernet"),
-            ("vpn", "VPN"),
-            ("audio", "audio"),
-            ("sound", "audio"),
-            ("battery", "battery"),
-            ("charging", "charging"),
-            ("update", "update"),
-        ]
-        for token, label in mapping:
-            if token in lower:
-                return label
+        if self.intelligence:
+            return self.intelligence.infer_feature_hint(text)
         return ""
 
     def _normalize_troubleshoot_title(self, title: str, entity: str = "", body: str = "") -> str:

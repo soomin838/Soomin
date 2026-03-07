@@ -7,7 +7,7 @@ from typing import Any
 
 
 _TRANSITION_START_RE = re.compile(
-    r"^\s*(however|therefore|additionally|in conclusion|moreover|furthermore|meanwhile|consequently|thus)\s*,?\s*",
+    r"^\s*(however|therefore|additionally|in conclusion|moreover|furthermore|meanwhile|consequently|thus|overall|to summarize|in summary)\s*,?\s*",
     flags=re.IGNORECASE,
 )
 
@@ -245,7 +245,17 @@ def optimize_html_readability(html: str, settings: dict | Any) -> str:
         paragraphs = _optimize_text_block(block_text, settings, allow_paragraph_split=True)
         if not paragraphs:
             return match.group(0)
-        return "\n".join([f"<p{attrs}>{escape(p, quote=False)}</p>" for p in paragraphs])
+            
+        def highlight_data(txt: str) -> str:
+            # Matches $1.5B, 45%, etc to highlight key data points for scanning readers
+            return re.sub(
+                r"(?<![\w])(\$\d+(?:\.\d+)?[A-Z]*|\d+(?:\.\d+)?%)(?!\w)", 
+                r'<mark style="background-color:#fff3cd; padding:0 3px; border-radius:3px; font-weight:600;">\1</mark>', 
+                txt
+            )
+            
+        # Join paragraphs with an extra <br> for breathing room
+        return "\n<br>\n".join([f"<p{attrs}>{highlight_data(escape(p, quote=False))}</p>" for p in paragraphs])
 
     optimized = paragraph_pattern.sub(replace_paragraph, source)
 
@@ -261,5 +271,22 @@ def optimize_html_readability(html: str, settings: dict | Any) -> str:
         return f"<li{attrs}>{escape(optimized_parts[0], quote=False)}</li>"
 
     optimized = list_item_pattern.sub(replace_list_item, optimized)
+    
+    # Anti-AI Cliché Filter
+    optimized = re.sub(r"(?i)\b(it is worth noting that|it's important to note that|we delve into|a tapestry of)\b\s*", "", optimized)
+    
+    # 3. Dynamic Summary Box Injection (Above the fold)
+    first_p_match = re.search(r"(?is)<p[^>]*>(.*?)</p>", optimized)
+    if first_p_match:
+        first_p_text = re.sub(r"(?is)<[^>]+>", "", first_p_match.group(1)).strip()
+        if len(first_p_text) > 40:
+            summary_box = f"""
+<div style="background-color: #f8f9fa; border-left: 4px solid #007bff; padding: 15px 20px; margin-bottom: 25px; border-radius: 0 4px 4px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+    <strong style="display:block; margin-bottom:8px; color:#333; font-size:1.1em;">Quick Brief</strong>
+    <p style="margin:0; color:#555; line-height:1.6;">{first_p_text}</p>
+</div>
+"""
+            optimized = summary_box + optimized
+
     return optimized
 

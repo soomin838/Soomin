@@ -39,6 +39,8 @@ def diagnose_visual_settings(settings: AppSettings, root: Path) -> dict[str, Any
 
     visual_provider = str(getattr(settings.visual, "image_provider", "") or "").strip().lower() or "unknown"
     visual_enable = bool(getattr(settings.visual, "enable_gemini_image_generation", False))
+    airforce_enabled = bool(getattr(settings.visual, "airforce_enabled", False))
+    has_airforce_api_key = bool(str(getattr(settings.visual, "airforce_api_key", "") or "").strip())
     target_images = int(getattr(settings.visual, "target_images_per_post", 0) or 0)
     max_banner = int(getattr(settings.visual, "max_banner_images", 0) or 0)
     max_inline = int(getattr(settings.visual, "max_inline_images", 0) or 0)
@@ -69,9 +71,9 @@ def diagnose_visual_settings(settings: AppSettings, root: Path) -> dict[str, Any
 
     blockers: list[str] = []
     if not visual_enable:
-        blockers.append("enable_gemini_image_generation=false")
-    if not has_gemini_api_key:
-        blockers.append("missing_gemini_api_key")
+        blockers.append("generated_pipeline_disabled")
+    if (not has_gemini_api_key) and (not (airforce_enabled and has_airforce_api_key)):
+        blockers.append("missing_generated_provider_key")
     if visual_provider == "library":
         blockers.append("image_provider=library")
     if min_images_required > 0 and ((not visual_enable) or (visual_provider == "library")):
@@ -82,12 +84,12 @@ def diagnose_visual_settings(settings: AppSettings, root: Path) -> dict[str, Any
         blockers.append("max_images_per_post too low")
 
     recommend_fix: list[str] = []
-    if "enable_gemini_image_generation=false" in blockers:
+    if "generated_pipeline_disabled" in blockers:
         recommend_fix.append("set visual.enable_gemini_image_generation=true")
-    if "missing_gemini_api_key" in blockers:
-        recommend_fix.append("provide GEMINI_API_KEY via env or config")
+    if "missing_generated_provider_key" in blockers:
+        recommend_fix.append("provide visual.airforce_api_key or GEMINI_API_KEY")
     if "image_provider=library" in blockers:
-        recommend_fix.append("set visual.image_provider=gemini for generation path")
+        recommend_fix.append("set visual.image_provider=generated for generation path")
     if "min_images_required>0 but generation disabled" in blockers:
         recommend_fix.append("align min_images_required with enabled generation mode")
     if "thumbnail_preflight_only=true" in blockers:
@@ -115,6 +117,8 @@ def diagnose_visual_settings(settings: AppSettings, root: Path) -> dict[str, Any
         "visual.max_banner_images": int(max_banner),
         "visual.max_inline_images": int(max_inline),
         "gemini.api_key_present": bool(has_gemini_api_key),
+        "visual.airforce_enabled": bool(airforce_enabled),
+        "visual.airforce_api_key_present": bool(has_airforce_api_key),
         "publish.min_images_required": int(min_images_required),
         "publish.max_images_per_post": int(max_images_per_post),
         "publish.thumbnail_preflight_only": bool(thumbnail_preflight_only),

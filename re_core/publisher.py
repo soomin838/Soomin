@@ -319,10 +319,17 @@ class Publisher:
             draft = service.posts().insert(blogId=self.blog_id, body=payload, isDraft=True).execute()
             post_id = str(draft.get("id", ""))
         # Blogger publish API expects RFC3339-style date-time.
+        # Ensure publish_at is at least 120s in the future to prevent immediate publication.
+        now_utc = datetime.now(timezone.utc)
+        target_dt = publish_at.astimezone(timezone.utc)
+        if target_dt < now_utc + timedelta(seconds=120):
+            target_dt = now_utc + timedelta(seconds=120)
+        
+        rfc3339_date = target_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
         result = service.posts().publish(
             blogId=self.blog_id,
             postId=post_id,
-            publishDate=publish_at.isoformat(),
+            publishDate=rfc3339_date,
         ).execute()
         published_id = str(result.get("id", post_id) or post_id)
         self._assert_post_contains_images(service=service, post_id=published_id)
@@ -343,21 +350,16 @@ class Publisher:
             if required_images > 0 and (not images):
                 raise RuntimeError(f"dry-run failed - missing images (0/{required_images})")
             return out
-        entries: list[tuple[str, str]] = []
-        for image in images[:target_images]:
-            src = ""
-            source_url = str(getattr(image, "source_url", "") or "").strip()
-            if source_url and self._is_allowed_image_url(source_url, allow_data_uri=False):
-                src = source_url
-            if not src:
-                src = self._file_to_data_uri(Path(getattr(image, "path", "")))
-            if not src:
-                continue
-            entries.append((src, str(getattr(image, "alt", "") or "")))
-        if len(entries) < required_images:
-            raise RuntimeError(f"dry-run failed - missing images ({len(entries)}/{required_images})")
-        if entries:
-            out = self._compose_image_enriched_html(out, entries[:target_images])
+        records = self._image_records_from_assets(
+            images=images,
+            src_lookup=None,
+            target_images=target_images,
+            allow_data_uri=True,
+        )
+        if len(records) < required_images:
+            raise RuntimeError(f"dry-run failed - missing images ({len(records)}/{required_images})")
+        if records:
+            out = self._compose_image_enriched_html(out, records[:target_images])
         self._assert_html_image_integrity(
             out,
             min_images=required_images,
@@ -366,6 +368,56 @@ class Publisher:
             allow_data_uri=True,
             require_backend_hosts=False,
         )
+        return out
+
+    def _ordered_images_for_publish(self, images: list[ImageAsset]) -> list[ImageAsset]:
+        ordered = list(images or [])
+        if not ordered:
+            return ordered
+        thumb_idx = 0
+        for idx, image in enumerate(ordered):
+            if str(getattr(image, "slot_role", "") or "").strip().lower() == "thumbnail":
+                thumb_idx = idx
+                break
+        if thumb_idx > 0:
+            ordered.insert(0, ordered.pop(thumb_idx))
+        return ordered
+
+    def _image_records_from_assets(
+        self,
+        *,
+        images: list[ImageAsset],
+        src_lookup: dict[str, str] | None,
+        target_images: int,
+        allow_data_uri: bool,
+    ) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        seen_src: set[str] = set()
+        for order, image in enumerate(self._ordered_images_for_publish(images)[: max(0, int(target_images))]):
+            src = ""
+            if isinstance(src_lookup, dict):
+                src = str(src_lookup.get(str(getattr(image, "path", "")), "") or "").strip()
+            if not src:
+                src = str(getattr(image, "source_url", "") or "").strip()
+            if not src and allow_data_uri:
+                src = self._file_to_data_uri(Path(getattr(image, "path", "")))
+            if not src or src in seen_src:
+                continue
+            if not self._is_allowed_image_url(src, allow_data_uri=allow_data_uri):
+                continue
+            seen_src.add(src)
+            role = str(getattr(image, "slot_role", "") or "").strip().lower()
+            if not role:
+                role = "thumbnail" if order == 0 else "content"
+            out.append(
+                {
+                    "src": src,
+                    "alt": str(getattr(image, "alt", "") or ""),
+                    "anchor_text": str(getattr(image, "anchor_text", "") or ""),
+                    "slot_role": role,
+                    "source_kind": str(getattr(image, "source_kind", "") or ""),
+                }
+            )
         return out
 
     def publish_existing_draft(
@@ -420,10 +472,17 @@ class Publisher:
                 postId=target_post_id,
             ).execute()
         else:
+            # Ensure publish_at is at least 120s in the future.
+            now_utc = datetime.now(timezone.utc)
+            target_dt = publish_at.astimezone(timezone.utc)
+            if target_dt < now_utc + timedelta(seconds=120):
+                target_dt = now_utc + timedelta(seconds=120)
+            
+            rfc3339_date = target_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
             result = service.posts().publish(
                 blogId=self.blog_id,
                 postId=target_post_id,
-                publishDate=publish_at.isoformat(),
+                publishDate=rfc3339_date,
             ).execute()
         self._assert_post_contains_images(
             service=service,
@@ -571,8 +630,10 @@ class Publisher:
         creds,
         preflight_thumbnail_src: str = "",
     ) -> str:
+        started_at = time.perf_counter()
         required_images = self._required_images_count()
         target_images = self._target_images_count()
+        src_map: dict[str, str] = {}
         if not images:
             if required_images > 0:
                 raise RuntimeError("이미지 자산이 비어 있습니다. retry required")
@@ -601,20 +662,22 @@ class Publisher:
                 "image_hosting_backend": str(self.image_hosting_backend or ""),
             }
         )
-        src_map: dict[str, str] = {}
         if preflight_thumbnail_src and images:
             src_map[str(images[0].path)] = str(preflight_thumbnail_src).strip()
+        upload_started_at = time.perf_counter()
         hosted_urls = self._upload_images(images=images, creds=creds)
+        upload_elapsed_ms = int(round((time.perf_counter() - upload_started_at) * 1000))
         for k, v in dict(hosted_urls or {}).items():
             clean = str(v or "").strip()
             if clean:
                 src_map[str(k)] = clean
         self._log_upload_event(
             {
-                "event": "merge_images_start",
+                "event": "merge_images_uploaded",
                 "images_in": len(images or []),
                 "hosted_urls_count": len(src_map),
                 "image_hosting_backend": str(self.image_hosting_backend or ""),
+                "elapsed_ms": int(upload_elapsed_ms),
             }
         )
         thumbnail = images[0]
@@ -678,43 +741,36 @@ class Publisher:
                 }
             )
 
-        selected_entries: list[tuple[str, str]] = []
-        seen_src: set[str] = set()
-        selected_entries.append((thumb_src, str(getattr(thumbnail, "alt", "") or "")))
-        seen_src.add(thumb_src)
-        for image in images[1:]:
-            src = str(src_map.get(str(image.path), "") or "").strip()
-            if not src:
-                continue
-            if src in seen_src:
-                continue
-            if not self._is_allowed_image_url(src, allow_data_uri=bool(self.thumbnail_data_uri_allowed)):
-                continue
-            seen_src.add(src)
-            selected_entries.append((src, str(getattr(image, "alt", "") or "")))
-            if len(selected_entries) >= target_images:
-                break
+        selected_records = self._image_records_from_assets(
+            images=images,
+            src_lookup=src_map,
+            target_images=target_images,
+            allow_data_uri=bool(self.thumbnail_data_uri_allowed),
+        )
+        if selected_records:
+            selected_records[0]["src"] = thumb_src
+            selected_records[0]["slot_role"] = "thumbnail"
 
-        if len(selected_entries) < required_images:
+        if len(selected_records) < required_images:
             self._log_upload_event(
                 {
                     "event": "go_live_gate_fail",
                     "reason": "insufficient_html_images_before_submit",
-                    "html_img_count": len(selected_entries),
+                    "html_img_count": len(selected_records),
                     "required_images": int(required_images),
                     "html_preview_500chars": str(html_body or "")[:500],
                 }
             )
             raise RuntimeError(
-                f"publish failed - missing images before submit ({len(selected_entries)}/{required_images})"
+                f"publish failed - missing images before submit ({len(selected_records)}/{required_images})"
             )
 
-        if not selected_entries:
+        if not selected_records:
             return str(html_body or "")
-        html = self._compose_image_enriched_html(str(html_body or ""), selected_entries[:target_images])
+        html = self._compose_image_enriched_html(str(html_body or ""), selected_records[:target_images])
 
         img_count = len(re.findall(r"<img\b[^>]*\bsrc=", html, flags=re.IGNORECASE))
-        banner_block = self._image_block(selected_entries[0][0], selected_entries[0][1])
+        banner_block = self._image_block(str(selected_records[0].get("src", "") or ""), str(selected_records[0].get("alt", "") or ""))
         self._log_upload_event(
             {
                 "event": "merge_images_inserted",
@@ -752,6 +808,15 @@ class Publisher:
                 }
             )
             raise
+        self._log_upload_event(
+            {
+                "event": "merge_images_finish",
+                "images_in": len(images or []),
+                "hosted_urls_count": len(src_map),
+                "image_hosting_backend": str(self.image_hosting_backend or ""),
+                "elapsed_ms": int(round((time.perf_counter() - started_at) * 1000)),
+            }
+        )
         return html
 
     def _recover_thumbnail_blogger_src(
@@ -836,6 +901,7 @@ class Publisher:
         raise RuntimeError(f"지원하지 않는 이미지 호스팅 백엔드: {backend}")
 
     def _upload_images_to_r2(self, images: list[ImageAsset]) -> dict[str, str]:
+        batch_started_at = time.perf_counter()
         cfg = self.r2_config
         if not str(getattr(cfg, "endpoint_url", "") or "").strip():
             raise RuntimeError("r2_missing_config:endpoint_url")
@@ -851,6 +917,7 @@ class Publisher:
         root = self.credentials_path.parent.parent
         hosted: dict[str, str] = {}
         for image in images or []:
+            file_started_at = time.perf_counter()
             path = Path(getattr(image, "path", ""))
             existing_src = str(getattr(image, "source_url", "") or "").strip()
             if existing_src and self._is_r2_public_url(existing_src):
@@ -862,6 +929,7 @@ class Publisher:
                     "status": 200,
                     "url": existing_src,
                     "error": "",
+                    "elapsed_ms": 0,
                 }
                 self._log_upload_event(payload)
                 self._log_r2_upload_event(payload)
@@ -874,6 +942,7 @@ class Publisher:
                     "status": 0,
                     "url": "",
                     "error": "file_missing",
+                    "elapsed_ms": 0,
                 }
                 self._log_upload_event(payload)
                 self._log_r2_upload_event(payload)
@@ -893,6 +962,7 @@ class Publisher:
                     "status": 200,
                     "url": str(url),
                     "error": "",
+                    "elapsed_ms": int(round((time.perf_counter() - file_started_at) * 1000)),
                 }
                 self._log_upload_event(payload)
                 self._log_r2_upload_event(payload)
@@ -905,9 +975,18 @@ class Publisher:
                     "status": 0,
                     "url": "",
                     "error": str(exc)[:220],
+                    "elapsed_ms": int(round((time.perf_counter() - file_started_at) * 1000)),
                 }
                 self._log_upload_event(payload)
                 self._log_r2_upload_event(payload)
+        self._log_r2_upload_event(
+            {
+                "event": "r2_upload_batch_done",
+                "requested": int(len(images or [])),
+                "uploaded": int(len(hosted)),
+                "elapsed_ms": int(round((time.perf_counter() - batch_started_at) * 1000)),
+            }
+        )
         return hosted
 
     def _compose_upload_report(
@@ -2175,10 +2254,30 @@ class Publisher:
         pos = closers[slot].end()
         return src[:pos] + "\n" + block + "\n" + src[pos:]
 
-    def _compose_image_enriched_html(self, html_body: str, entries: list[tuple[str, str]]) -> str:
-        html = str(html_body or "")
-        if not entries:
+    def _strip_managed_image_blocks(self, html: str) -> str:
+        out = str(html or "")
+        out = re.sub(
+            r"<!--\s*RZ-CTR-IMG:START.*?RZ-CTR-IMG:END[^>]*-->",
+            "",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        out = re.sub(
+            r"<figure\b[^>]*class=\"[^\"]*\brz-figure\b[^\"]*\"[^>]*>\s*<img\b[^>]*>\s*</figure>",
+            "",
+            out,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        out = re.sub(r"<p>\s*</p>", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"\n{3,}", "\n\n", out)
+        return out.strip()
+
+    def _compose_image_enriched_html(self, html_body: str, entries: list[Any]) -> str:
+        html = self._strip_managed_image_blocks(html_body)
+        records = self._normalize_image_records(entries)
+        if not records:
             return html
+
         is_news_layout = bool(
             re.search(
                 r"<h[23]\b[^>]*>\s*(What\s+Happened|Why\s+It\s+Matters|What\s+To\s+Do\s+Now|Key\s+Details|What\s+To\s+Watch\s+Next)\s*</h[23]>",
@@ -2187,43 +2286,176 @@ class Publisher:
             )
         )
         intro_text = self._first_paragraph_text(html)
-        banner_src, banner_alt = entries[0]
+        banner = records[0]
         if is_news_layout:
             safe_banner_alt = "Editorial illustration supporting this tech news section."
         else:
-            safe_banner_alt = self._regen_alt_if_too_similar(str(banner_alt or ""), intro_text)
-        banner_block = self._image_block(str(banner_src or ""), safe_banner_alt)
+            safe_banner_alt = self._regen_alt_if_too_similar(str(banner.get("alt", "") or ""), intro_text)
+        banner_block = self._image_block(str(banner.get("src", "") or ""), safe_banner_alt)
         html = self._insert_banner_after_quick_take_or_first_paragraph(html, banner_block)
-        if is_news_layout:
-            inline_patterns = [
-                ("after", r"\bWhat\s+Happened\b"),
-                ("before", r"\bWhat\s+To\s+Do\s+Now\b"),
-                ("after", r"\bKey\s+Details\b"),
-                ("after", r"\bWhat\s+To\s+Watch\s+Next\b"),
-            ]
-        else:
-            inline_patterns = [
-                ("after", r"\bFix\s*1\b"),
-                ("after", r"\bFix\s*2\b"),
-                ("after", r"\b(Advanced(?:\s+Fix)?|More\s+fix(?:es)?)\b"),
-                ("after", r"\bChecklist\b"),
-            ]
-        inline_total = max(0, min(int(self.max_inline_images), len(entries) - 1))
-        for idx in range(inline_total):
-            src, alt = entries[idx + 1]
-            if is_news_layout:
-                safe_alt = "Editorial illustration supporting this tech news section."
-            else:
-                safe_alt = self._regen_alt_if_too_similar(str(alt or ""), intro_text)
-            block = self._image_block(str(src or ""), safe_alt)
-            mode, pattern = inline_patterns[idx] if idx < len(inline_patterns) else ("after", "")
-            if mode == "before":
-                html, inserted = self._insert_before_heading(html, block, pattern)
-            else:
-                html, inserted = self._insert_after_heading(html, block, pattern)
-            if not inserted:
-                html = self._insert_after_paragraph_slot(html, block, idx, inline_total)
+
+        inline_total = max(0, min(int(self.max_inline_images), len(records) - 1))
+        inline_records = records[1 : 1 + inline_total]
+        if inline_records:
+            html = self._insert_inline_records_by_sections(
+                html=html,
+                records=inline_records,
+                is_news_layout=is_news_layout,
+                intro_text=intro_text,
+            )
         return html
+
+    def _normalize_image_records(self, entries: list[Any]) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        for idx, entry in enumerate(entries or []):
+            if isinstance(entry, dict):
+                src = str(entry.get("src", "") or "").strip()
+                if not src:
+                    continue
+                out.append(
+                    {
+                        "src": src,
+                        "alt": str(entry.get("alt", "") or ""),
+                        "anchor_text": str(entry.get("anchor_text", "") or ""),
+                        "slot_role": str(entry.get("slot_role", "") or ("thumbnail" if idx == 0 else "content")),
+                    }
+                )
+                continue
+            if isinstance(entry, tuple) and len(entry) >= 2:
+                src = str(entry[0] or "").strip()
+                if not src:
+                    continue
+                out.append(
+                    {
+                        "src": src,
+                        "alt": str(entry[1] or ""),
+                        "anchor_text": "",
+                        "slot_role": "thumbnail" if idx == 0 else "content",
+                    }
+                )
+        return out
+
+    def _extract_h2_sections(self, html: str) -> list[dict[str, Any]]:
+        src = str(html or "")
+        matches = list(re.finditer(r"<h2\b[^>]*>.*?</h2>", src, flags=re.IGNORECASE | re.DOTALL))
+        sections: list[dict[str, Any]] = []
+        for idx, match in enumerate(matches):
+            body_start = match.end()
+            body_end = matches[idx + 1].start() if (idx + 1) < len(matches) else len(src)
+            heading_html = str(match.group(0) or "")
+            heading_text = self._paragraph_plain_text(heading_html)
+            body_html = src[body_start:body_end]
+            body_text = self._paragraph_plain_text(body_html)
+            closers = [body_start + m.end() for m in re.finditer(r"</p>", body_html, flags=re.IGNORECASE)]
+            sections.append(
+                {
+                    "index": idx,
+                    "heading_text": heading_text,
+                    "heading_start": match.start(),
+                    "heading_end": match.end(),
+                    "body_start": body_start,
+                    "body_end": body_end,
+                    "body_text": body_text,
+                    "tokens": self._tokenize_text(f"{heading_text} {body_text}"),
+                    "paragraph_closers": closers,
+                }
+            )
+        return sections
+
+    def _section_disallowed_for_inline(self, heading_text: str) -> bool:
+        lower = str(heading_text or "").strip().lower()
+        return bool(
+            re.search(
+                r"\b(sources|related coverage|more fix guides you might like|faq|frequently asked questions)\b",
+                lower,
+            )
+        )
+
+    def _choose_inline_sections(
+        self,
+        sections: list[dict[str, Any]],
+        records: list[dict[str, str]],
+    ) -> list[tuple[int, dict[str, str]]]:
+        primary = [s for s in sections if (not self._section_disallowed_for_inline(str(s.get("heading_text", "") or ""))) and ("quick take" not in str(s.get("heading_text", "") or "").lower())]
+        eligible = primary or [s for s in sections if not self._section_disallowed_for_inline(str(s.get("heading_text", "") or ""))]
+        if not eligible:
+            return []
+
+        total = len(eligible)
+        used: set[int] = set()
+        placements: list[tuple[int, dict[str, str]]] = []
+        for order, record in enumerate(records):
+            desired_rank = max(0, min(total - 1, int(round(((order + 1) * total) / float(len(records) + 1)))))
+            anchor_tokens = self._tokenize_text(str(record.get("anchor_text", "") or ""))
+            best_section: dict[str, Any] | None = None
+            best_score = -1.0
+            for rank, section in enumerate(eligible):
+                sec_idx = int(section.get("index", -1))
+                if sec_idx in used:
+                    continue
+                section_tokens = set(section.get("tokens", set()) or set())
+                overlap = (len(anchor_tokens & section_tokens) / max(1, len(anchor_tokens | section_tokens))) if anchor_tokens else 0.0
+                position_score = 1.0 - (abs(rank - desired_rank) / max(1, total - 1))
+                length_score = min(1.0, len(str(section.get("body_text", "") or "")) / 420.0)
+                score = (overlap * 0.65) + (position_score * 0.25) + (length_score * 0.10)
+                if score > best_score:
+                    best_score = score
+                    best_section = section
+            if best_section is None:
+                continue
+            used.add(int(best_section.get("index", -1)))
+            placements.append((int(best_section.get("index", -1)), record))
+        return placements
+
+    def _section_insert_offset(self, section: dict[str, Any]) -> int:
+        closers = list(section.get("paragraph_closers", []) or [])
+        if len(closers) >= 2:
+            return int(closers[1])
+        if closers:
+            return int(closers[0])
+        return int(section.get("heading_end", 0) or 0)
+
+    def _insert_inline_records_by_sections(
+        self,
+        *,
+        html: str,
+        records: list[dict[str, str]],
+        is_news_layout: bool,
+        intro_text: str,
+    ) -> str:
+        sections = self._extract_h2_sections(html)
+        placements = self._choose_inline_sections(sections, records)
+        inserted_count = 0
+        insertions: list[tuple[int, str]] = []
+        used_records: set[int] = set()
+        for section_idx, record in placements:
+            section = next((s for s in sections if int(s.get("index", -1)) == int(section_idx)), None)
+            if section is None:
+                continue
+            safe_alt = (
+                "Editorial illustration supporting this tech news section."
+                if is_news_layout
+                else self._regen_alt_if_too_similar(str(record.get("alt", "") or ""), intro_text)
+            )
+            block = self._image_block(str(record.get("src", "") or ""), safe_alt)
+            insertions.append((self._section_insert_offset(section), block))
+            used_records.add(id(record))
+            inserted_count += 1
+
+        out = html
+        for pos, block in sorted(insertions, key=lambda x: x[0], reverse=True):
+            out = out[:pos] + "\n" + block + "\n" + out[pos:]
+
+        leftovers = [r for r in records if id(r) not in used_records]
+        for idx, record in enumerate(leftovers):
+            safe_alt = (
+                "Editorial illustration supporting this tech news section."
+                if is_news_layout
+                else self._regen_alt_if_too_similar(str(record.get("alt", "") or ""), intro_text)
+            )
+            block = self._image_block(str(record.get("src", "") or ""), safe_alt)
+            out = self._insert_after_paragraph_slot(out, block, inserted_count + idx, max(1, len(records)))
+        return self._rebalance_adjacent_image_blocks(out)
 
     def _insert_inline_between_fix2_fix3(self, html: str, block: str) -> str:
         src = str(html or "")
@@ -3251,6 +3483,54 @@ class Publisher:
             if not page_token:
                 break
         return items
+
+    def discard_all_wip_drafts(self) -> dict[str, Any]:
+        """List and permanently delete all agent-generated WIP drafts from Blogger."""
+        creds = self._oauth_credentials()
+        self._ensure_valid_token(creds)
+        from googleapiclient.discovery import build
+        service = build("blogger", "v3", credentials=creds)
+        
+        # List all drafts
+        # We use a large max_pages to catch many drafts if they exist
+        drafts = self._list_posts_by_status(
+            creds=creds,
+            status="draft",
+            start_utc=None,
+            end_utc=None,
+            max_pages=20,
+            fetch_bodies=False,
+            max_results=500,
+        )
+        
+        deleted_count = 0
+        error_count = 0
+        deleted_ids = []
+        
+        for post in drafts:
+            title = str(post.get("title", "") or "").strip()
+            labels = post.get("labels", []) or []
+            post_id = str(post.get("id", "") or "").strip()
+            
+            # Identify if it's an agent WIP draft
+            is_wip = self._infer_wip_stage(title=title, labels=labels)
+            if is_wip or "[WIP:" in title or "WIP" in [l.upper() for l in labels if isinstance(l, str)]:
+                try:
+                    service.posts().delete(
+                        blogId=self.blog_id,
+                        postId=post_id
+                    ).execute()
+                    deleted_count += 1
+                    deleted_ids.append(post_id)
+                except Exception:
+                    error_count += 1
+                    
+        return {
+            "deleted_count": deleted_count,
+            "error_count": error_count,
+            "deleted_ids": deleted_ids,
+            "total_drafts_scanned": len(drafts)
+        }
 
     def _ensure_valid_token(self, creds) -> None:
         def _raise_scope_error(exc: Exception) -> None:

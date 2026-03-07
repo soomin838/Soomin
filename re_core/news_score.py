@@ -4,6 +4,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from .story_profile import infer_news_category
+
 
 _SECURITY_TOKENS = (
     "security",
@@ -64,18 +66,7 @@ _CLICKBAIT_TOKENS = (
 
 
 def classify_category(text: str) -> str:
-    lower = re.sub(r"\s+", " ", str(text or "").strip().lower())
-    if any(tok in lower for tok in _SECURITY_TOKENS):
-        return "security"
-    if any(tok in lower for tok in _POLICY_TOKENS):
-        return "policy"
-    if any(tok in lower for tok in _AI_TOKENS):
-        return "ai"
-    if any(tok in lower for tok in _CHIPS_TOKENS):
-        return "chips"
-    if any(tok in lower for tok in _PLATFORM_TOKENS):
-        return "platform"
-    return "platform"
+    return infer_news_category(str(text or ""))
 
 
 def score_news_item(
@@ -117,6 +108,9 @@ def score_news_item(
         "ai": 6.0,
         "platform": 4.0,
         "chips": 5.0,
+        "home": 4.0,
+        "wellness": 4.0,
+        "consumer": 4.0,
     }
     category_bonus = float(category_bonus_map.get(category, 4.0))
 

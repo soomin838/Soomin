@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 import sys
@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.clickbait_sanitizer import sanitize_clickbait_terms  # noqa: E402
+from re_core.clickbait_sanitizer import sanitize_clickbait_terms  # noqa: E402
 
 
 def _assert_no_clickbait(text: str) -> None:
