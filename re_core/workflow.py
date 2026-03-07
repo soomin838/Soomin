@@ -2048,6 +2048,72 @@ class AgentWorkflow:
                 break
         return out
 
+    def _news_pool_evergreen_seed_candidates(self, limit: int = 4) -> list[TopicCandidate]:
+        seed_rows = self.news_pool_store.recent_items(days=21, limit=max(6, int(limit) * 4), min_score=72, statuses=("queued", "used"))
+        out: list[TopicCandidate] = []
+        seen_titles: set[str] = set()
+        for row in seed_rows:
+            title = str((row or {}).get("title", "") or "").strip()
+            snippet = str((row or {}).get("snippet", "") or "").strip()
+            category = str((row or {}).get("category", "") or "platform").strip().lower() or "platform"
+            source_url = str((row or {}).get("url", "") or "").strip()
+            topic = str((row or {}).get("topic", "") or "").strip()
+            assessment = self._assess_tech_news_candidate(
+                title=title,
+                snippet=snippet,
+                category=category,
+                source_url=source_url,
+                topic=topic,
+            )
+            if not assessment.allow or float(assessment.score) < 2.5:
+                continue
+            if category not in {"security", "policy", "platform", "ai", "chips"}:
+                continue
+            bundle, _ = self._build_search_intent_bundle(
+                candidate=TopicCandidate(
+                    source="news_pool_seed",
+                    title=title,
+                    body=snippet,
+                    score=max(70, int((row or {}).get("score", 70) or 70)),
+                    url=source_url,
+                    meta={"news_category": category},
+                ),
+                category=category,
+            )
+            evergreen_title = re.sub(r"\s+", " ", f"{bundle.primary_query} practical guide").strip()[:110]
+            title_key = evergreen_title.lower()
+            if not evergreen_title or title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+            cluster_id = self._infer_cluster_id_from_keyword(bundle.primary_query or evergreen_title)
+            candidate = TopicCandidate(
+                source="news_pool_seed",
+                title=evergreen_title,
+                body=(
+                    f"Evergreen seed derived from the news topic '{title}'. "
+                    f"Use the recurring query '{bundle.primary_query}' to build a durable utility article, not a breaking-news recap. "
+                    f"Cover lasting decision points, recurring mistakes, and practical comparisons for US readers."
+                ),
+                score=74,
+                url="",
+                long_tail_keywords=[bundle.primary_query] + list(bundle.supporting_queries[:2]),
+                meta={
+                    "content_type": "evergreen",
+                    "seed_from_news_pool": True,
+                    "seed_headline": title,
+                    "seed_source_url": source_url,
+                    "cluster_id": cluster_id,
+                    "news_category": category,
+                    "news_provider": str((row or {}).get("provider", "") or "").strip().lower(),
+                    "published_at": str((row or {}).get("published_at", "") or ""),
+                },
+            )
+            candidate.score = self._evergreen_score_for_candidate(candidate)
+            out.append(candidate)
+            if len(out) >= max(1, int(limit)):
+                break
+        return out
+
     def _search_derived_candidates(self, limit: int = 6) -> list[TopicCandidate]:
         out: list[TopicCandidate] = []
         for candidate in self._supporting_discovery_candidates(limit=max(1, int(limit))):
@@ -2095,6 +2161,28 @@ class AgentWorkflow:
             if str((row or {}).get("title", "") or "").strip()
         }
         out: list[TopicCandidate] = []
+        for candidate in self._news_pool_evergreen_seed_candidates(limit=max(2, int(limit) // 2 or 1)):
+            title_key = str(getattr(candidate, "title", "") or "").strip().lower()
+            if not title_key or title_key in recent_titles:
+                continue
+            meta = self._annotate_candidate_content_policy(candidate, requested_type="evergreen")
+            category = str(meta.get("news_category", "") or "platform")
+            candidate.score = self._evergreen_score_for_candidate(candidate)
+            if not self._candidate_matches_content_mode(candidate):
+                continue
+            allowed, _, _ = self._policy_gate_candidate(
+                title=str(getattr(candidate, "title", "") or ""),
+                snippet=str(getattr(candidate, "body", "") or ""),
+                body_excerpt="",
+                category=category,
+                route="news",
+                source_url="",
+            )
+            if allowed:
+                out.append(candidate)
+                recent_titles.add(title_key)
+            if len(out) >= max(1, int(limit)):
+                break
         for candidate in list(self.scout._collect_seeds() or []):  # noqa: SLF001
             title_key = str(getattr(candidate, "title", "") or "").strip().lower()
             if not title_key or title_key in recent_titles:
