@@ -8806,6 +8806,36 @@ class AgentWorkflow:
             "Start with one safe troubleshooting step, then scale only after you verify the result.",
         )
 
+    def _news_image_alt_key(self, text: str) -> str:
+        clean = re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())
+        clean = re.sub(
+            r"\b(illustration|supporting|image|related|article|topic|editorial|thumbnail|this|tech|news)\b",
+            " ",
+            clean,
+        )
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return clean[:120]
+
+    def _news_inline_image_is_meaningful(self, image: ImageAsset, subject: str) -> bool:
+        anchor = re.sub(r"\s+", " ", str(getattr(image, "anchor_text", "") or "").strip())
+        raw_alt = re.sub(r"\s+", " ", str(getattr(image, "alt", "") or "").strip())
+        source_kind = str(getattr(image, "source_kind", "") or "").strip().lower()
+        if len(anchor) >= 18:
+            return True
+        generic_alt = bool(
+            re.search(
+                r"\b(editorial support image|illustration related to the article topic|supporting image related to the article topic|editorial thumbnail illustration)\b",
+                raw_alt.lower(),
+            )
+        )
+        if generic_alt and source_kind in {"news_pack", "generated_thumb_overlay", "rendered_fallback"}:
+            return False
+        meaningful_alt_key = self._news_image_alt_key(raw_alt)
+        subject_key = self._news_image_alt_key(subject)
+        if meaningful_alt_key and meaningful_alt_key != subject_key and len(meaningful_alt_key) >= 12:
+            return True
+        return bool(anchor)
+
     def _curate_news_images(self, images: list[ImageAsset], candidate: TopicCandidate) -> list[ImageAsset]:
         if not images:
             return []
@@ -8833,6 +8863,7 @@ class AgentWorkflow:
 
         curated: list[ImageAsset] = []
         seen_sources: set[str] = set()
+        seen_alt_keys: set[str] = set()
         for index, image in enumerate(images or []):
             if len(curated) >= 2:
                 break
@@ -8844,10 +8875,20 @@ class AgentWorkflow:
             image.slot_role = "thumbnail" if index == 0 else "content"
             if image.slot_role == "thumbnail":
                 image.alt = f"Illustration related to {subject}."[:180]
+                alt_key = self._news_image_alt_key(image.alt)
+                if alt_key:
+                    seen_alt_keys.add(alt_key)
             else:
+                if not self._news_inline_image_is_meaningful(image, subject):
+                    continue
                 anchor = re.sub(r"\s+", " ", str(getattr(image, "anchor_text", "") or "")).strip()
                 context = anchor[:72] if anchor else subject
                 image.alt = f"Supporting image related to {context}."[:180]
+                alt_key = self._news_image_alt_key(image.alt)
+                if alt_key and alt_key in seen_alt_keys:
+                    continue
+                if alt_key:
+                    seen_alt_keys.add(alt_key)
             curated.append(image)
         if curated:
             self._optimize_thumbnail_alt(curated, candidate)

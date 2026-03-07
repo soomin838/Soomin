@@ -5,8 +5,10 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-PROMPT_PACK_VERSION = 2
+PROMPT_PACK_VERSION = 3
+PROMPT_PACK_MAX_AGE_DAYS = 14
 _STALE_CACHE_PATTERNS = (
     "deliver maximum engagement and click-through-rate value",
     "write from the reader's lived experience",
@@ -14,6 +16,9 @@ _STALE_CACHE_PATTERNS = (
     "main tradeoff:",
     "keep a one-line status update tied to",
     "patient, approachable tech educator",
+    "viral storyteller",
+    "shocking hook",
+    "impossible not to click",
 )
 
 
@@ -29,6 +34,8 @@ class PromptPack:
     top_p: float
     persona_id: str = ""
     version: int = PROMPT_PACK_VERSION
+    build_signature: str = ""
+    created_at_utc: str = ""
 
 
 _PERSONA_POOL = [
@@ -92,6 +99,21 @@ _GLOBAL_BAN_TOKENS = [
 ]
 
 
+def _prompt_pack_build_signature() -> str:
+    payload = {
+        "version": PROMPT_PACK_VERSION,
+        "stale_markers": list(_STALE_CACHE_PATTERNS),
+        "personas": list(_PERSONA_POOL),
+        "global_bans": list(_GLOBAL_BAN_TOKENS),
+    }
+    return hashlib.sha1(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8", errors="ignore")
+    ).hexdigest()[:16]
+
+
+PROMPT_PACK_BUILD_SIGNATURE = _prompt_pack_build_signature()
+
+
 class PromptFactory:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -106,7 +128,10 @@ class PromptFactory:
             try:
                 data = json.loads(pack_path.read_text(encoding="utf-8"))
                 if self._is_valid_cached_pack(data):
-                    return PromptPack(**data)
+                    normalized = dict(data)
+                    normalized.setdefault("build_signature", PROMPT_PACK_BUILD_SIGNATURE)
+                    normalized.setdefault("created_at_utc", "")
+                    return PromptPack(**normalized)
                 pack_path.unlink(missing_ok=True)
             except Exception:
                 pass
@@ -124,12 +149,25 @@ class PromptFactory:
             pass
         return pack
 
-    def _is_valid_cached_pack(self, data: dict[str, object]) -> bool:
+    def _is_valid_cached_pack(self, data: dict[str, Any]) -> bool:
         if not isinstance(data, dict):
             return False
         if int(data.get("version", 0) or 0) != PROMPT_PACK_VERSION:
             return False
-        required = {"purpose", "system", "user", "style_variant_id", "must_include", "ban_tokens", "temperature", "top_p"}
+        if str(data.get("build_signature", "") or "").strip() != PROMPT_PACK_BUILD_SIGNATURE:
+            return False
+        required = {
+            "purpose",
+            "system",
+            "user",
+            "style_variant_id",
+            "must_include",
+            "ban_tokens",
+            "temperature",
+            "top_p",
+            "build_signature",
+            "created_at_utc",
+        }
         if not required.issubset({str(k or "") for k in data.keys()}):
             return False
         merged = " ".join(
@@ -137,6 +175,18 @@ class PromptFactory:
             for key in ("purpose", "system", "user", "style_variant_id", "persona_id")
         ).lower()
         if any(marker in merged for marker in _STALE_CACHE_PATTERNS):
+            return False
+        created_at_utc = str(data.get("created_at_utc", "") or "").strip()
+        if not created_at_utc:
+            return False
+        try:
+            created_at = datetime.fromisoformat(created_at_utc.replace("Z", "+00:00"))
+        except Exception:
+            return False
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - created_at.astimezone(timezone.utc)).days
+        if age_days > PROMPT_PACK_MAX_AGE_DAYS:
             return False
         return True
 
@@ -219,4 +269,6 @@ class PromptFactory:
             temperature=temperature,
             top_p=top_p,
             persona_id=persona_id,
+            build_signature=PROMPT_PACK_BUILD_SIGNATURE,
+            created_at_utc=datetime.now(timezone.utc).isoformat(),
         )

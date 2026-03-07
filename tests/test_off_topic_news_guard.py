@@ -89,6 +89,20 @@ class OffTopicNewsGuardTests(unittest.TestCase):
         )
         self.assertEqual(filtered, [])
 
+    def test_relevant_developer_docs_are_kept_for_software_story(self) -> None:
+        filtered = filter_relevant_authority_links(
+            [
+                "https://docs.python.org/3/whatsnew/3.14.html",
+                "https://github.com/python/cpython/releases",
+            ],
+            title="Python 3.14 release notes add new free-threading improvements for developers",
+            snippet="The latest Python release notes highlight runtime and packaging updates for software teams.",
+            category="platform",
+            source_url="https://www.python.org/downloads/release/python-3140/",
+            topic="python release notes",
+        )
+        self.assertIn("https://docs.python.org/3/whatsnew/3.14.html", filtered)
+
     def test_news_images_are_trimmed_and_rewritten(self) -> None:
         workflow = self._workflow()
         candidate = TopicCandidate(
@@ -109,6 +123,26 @@ class OffTopicNewsGuardTests(unittest.TestCase):
         curated = workflow._curate_news_images(images, candidate)
         self.assertLessEqual(len(curated), 2)
         self.assertTrue(all("related to" in str(image.alt or "").lower() for image in curated))
+
+    def test_generic_inline_without_context_is_dropped(self) -> None:
+        workflow = self._workflow()
+        candidate = TopicCandidate(
+            source="news_pool",
+            title="Browser privacy update changes default tracking protections",
+            body="The browser vendor changed default privacy protections in the latest update.",
+            score=91,
+            url="https://example.com/browser-privacy-update",
+            main_entity="Browser vendor",
+            long_tail_keywords=["browser privacy update"],
+            meta={"news_category": "policy", "news_topic": "privacy"},
+        )
+        images = [
+            ImageAsset(path=Path("thumb.png"), alt="Illustration related to the article topic", source_url="https://r2/thumb.png"),
+            ImageAsset(path=Path("inline1.png"), alt="Editorial support image for this tech news article", source_url="https://r2/inline1.png"),
+        ]
+        curated = workflow._curate_news_images(images, candidate)
+        self.assertEqual(len(curated), 1)
+        self.assertEqual(str(curated[0].slot_role or ""), "thumbnail")
 
 
 if __name__ == "__main__":

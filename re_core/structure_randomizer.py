@@ -24,6 +24,19 @@ NEWS_SECTION_TITLES = {
     "sources": "Sources",
 }
 
+NEWS_SECTION_TITLE_VARIANTS = {
+    "quick_take": ["Quick Take", "The Short Version", "What To Know First"],
+    "what_happened": ["What Happened", "What Changed", "The Update"],
+    "why_it_matters": ["Why It Matters", "Why This Matters", "Why Readers Care"],
+    "what_to_do_now": ["What To Do Now", "What To Watch For", "How To Respond"],
+    "key_details": ["Key Details", "The Important Details", "What Stands Out"],
+    "what_to_watch_next": ["What To Watch Next", "What Comes Next", "What To Monitor Next"],
+    "background_context": ["Background Context", "The Backdrop", "The Bigger Context"],
+    "risks": ["Risks", "Where The Risk Sits", "Potential Risks"],
+    "timeline": ["Timeline", "How This Unfolded", "The Sequence"],
+    "sources": ["Sources"],
+}
+
 INTRO_TEMPLATES = (
     "Lead with the concrete change before broad context.",
     "Open with the reader consequence first, then explain the event.",
@@ -80,6 +93,7 @@ class OutlinePlan:
     paragraph_lengths: list[str]
     fingerprint: str
     best_similarity: float
+    heading_signature: str = ""
 
 
 class StructureRandomizer:
@@ -123,9 +137,12 @@ class StructureRandomizer:
             intro_id = rng.randrange(0, len(INTRO_TEMPLATES))
             conclusion_id = rng.randrange(0, len(CONCLUSION_TEMPLATES))
             paragraph_lengths = [rng.choice(["short", "medium", "long"]) if sid != "sources" else "short" for sid in section_ids]
+            section_titles = self._select_section_titles(section_ids=section_ids, rng=rng)
+            heading_signature = self._heading_signature(section_titles)
             fingerprint_text = self._fingerprint_text(
                 archetype=archetype,
                 section_ids=section_ids,
+                section_titles=section_titles,
                 intro_id=intro_id,
                 conclusion_id=conclusion_id,
                 paragraph_lengths=paragraph_lengths,
@@ -143,16 +160,24 @@ class StructureRandomizer:
                     section_ids,
                     list(row.get("section_ids", []) or []),
                 )
+                row_similarity = max(
+                    row_similarity,
+                    self._heading_similarity(
+                        heading_signature,
+                        str(row.get("heading_signature", "") or ""),
+                    ),
+                )
                 similarity = max(similarity, row_similarity)
             plan = OutlinePlan(
                 archetype=archetype,
                 section_ids=section_ids,
-                section_titles=[NEWS_SECTION_TITLES.get(sid, sid.replace("_", " ").title()) for sid in section_ids],
+                section_titles=section_titles,
                 intro_template=INTRO_TEMPLATES[intro_id],
                 conclusion_template=CONCLUSION_TEMPLATES[conclusion_id],
                 paragraph_lengths=paragraph_lengths,
                 fingerprint=fingerprint_text,
                 best_similarity=float(round(similarity, 4)),
+                heading_signature=heading_signature,
             )
             best_similarity = min(best_similarity, similarity)
             best_plan = plan
@@ -170,6 +195,7 @@ class StructureRandomizer:
         *,
         archetype: str,
         section_ids: list[str],
+        section_titles: list[str],
         intro_id: int,
         conclusion_id: int,
         paragraph_lengths: list[str],
@@ -183,6 +209,7 @@ class StructureRandomizer:
         return (
             f"archetype={archetype};"
             f"sections={'|'.join(section_ids)};"
+            f"headings={'|'.join(self._normalize(title) for title in section_titles)};"
             f"intro={intro_id};"
             f"conclusion={conclusion_id};"
             f"lengths={'|'.join(paragraph_lengths)};"
@@ -203,6 +230,35 @@ class StructureRandomizer:
         sec = self._jaccard(set(section_ids), set(other_sections))
         tok = self._jaccard(self._tokenize(fingerprint_text), self._tokenize(other_text))
         return max(0.0, min(1.0, (0.5 * sec) + (0.5 * tok)))
+
+    def _select_section_titles(self, *, section_ids: list[str], rng: random.Random) -> list[str]:
+        titles: list[str] = []
+        for index, sid in enumerate(section_ids):
+            variants = list(NEWS_SECTION_TITLE_VARIANTS.get(sid, [NEWS_SECTION_TITLES.get(sid, sid.replace("_", " ").title())]))
+            if not variants:
+                variants = [sid.replace("_", " ").title()]
+            pick = variants[(rng.randrange(0, len(variants)) + index) % len(variants)]
+            titles.append(str(pick or sid.replace("_", " ").title()))
+        return titles
+
+    def _heading_signature(self, section_titles: list[str]) -> str:
+        normalized = [self._normalize(title) for title in (section_titles or []) if self._normalize(title)]
+        return "|".join(normalized)
+
+    def _heading_similarity(self, current: str, other: str) -> float:
+        left = [seg for seg in str(current or "").split("|") if seg]
+        right = [seg for seg in str(other or "").split("|") if seg]
+        if not left and not right:
+            return 1.0
+        if not left or not right:
+            return 0.0
+        if left == right:
+            return 1.0
+        left_pairs = {f"{left[idx]}->{left[idx + 1]}" for idx in range(len(left) - 1)}
+        right_pairs = {f"{right[idx]}->{right[idx + 1]}" for idx in range(len(right) - 1)}
+        pair_score = self._jaccard(left_pairs, right_pairs) if left_pairs or right_pairs else 0.0
+        token_score = self._jaccard(set(left), set(right))
+        return max(0.0, min(1.0, (0.6 * token_score) + (0.4 * pair_score)))
 
     def _load_recent(self) -> list[dict]:
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.fingerprint_ttl_days)
@@ -230,6 +286,8 @@ class StructureRandomizer:
                 "created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "archetype": plan.archetype,
                 "section_ids": list(plan.section_ids),
+                "section_titles": list(plan.section_titles),
+                "heading_signature": str(plan.heading_signature or ""),
                 "fingerprint_text": plan.fingerprint,
             }
         )

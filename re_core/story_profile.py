@@ -189,6 +189,33 @@ _DOMAIN_TOPIC_HINTS: dict[str, tuple[str, ...]] = {
     "stackexchange.com": ("developer", "software", "python", "programming", "stack overflow", "api"),
 }
 
+_GENERIC_DEV_REFERENCE_DOMAINS = (
+    "docs.python.org",
+    "github.com",
+    "stackexchange.com",
+    "stackoverflow.com",
+    "developer.mozilla.org",
+    "pypi.org",
+    "readthedocs.io",
+)
+
+_SOFTWARE_REFERENCE_TOKENS = (
+    "developer",
+    "software",
+    "python",
+    "package",
+    "library",
+    "api",
+    "sdk",
+    "release notes",
+    "release",
+    "repo",
+    "repository",
+    "open source",
+    "programming",
+    "framework",
+)
+
 
 def extract_source_domain(value: str) -> str:
     raw = _clean(value)
@@ -211,6 +238,11 @@ def _matching_groups(text: str, groups: dict[str, tuple[str, ...]]) -> list[str]
         if any(str(token).lower() in lower for token in tokens):
             hits.append(label)
     return hits
+
+
+def _has_software_reference_context(text: str) -> bool:
+    lower = _lower_blob(text)
+    return any(token in lower for token in _SOFTWARE_REFERENCE_TOKENS)
 
 
 def assess_tech_news_topic(
@@ -293,17 +325,23 @@ def is_relevant_source_domain_for_story(
     if any(domain == host or domain.endswith("." + host) for host in _IRRELEVANT_NEWS_REFERENCE_DOMAINS):
         return False
     topic_blob = _lower_blob(title, snippet, category, topic)
+    assessment = assess_tech_news_topic(
+        title=title,
+        snippet=snippet,
+        category=category,
+        source_url=url,
+        topic=topic,
+    )
+    if any(domain == host or domain.endswith("." + host) for host in _GENERIC_DEV_REFERENCE_DOMAINS):
+        if not _has_software_reference_context(topic_blob):
+            return False
+        if "software" not in set(assessment.tech_hits) and "platform" not in set(assessment.tech_hits):
+            return False
     for host, required_tokens in _DOMAIN_TOPIC_HINTS.items():
         if domain == host or domain.endswith("." + host):
             return any(token in topic_blob for token in required_tokens)
     if any(domain == host or domain.endswith("." + host) for host in _TECH_SOURCE_DOMAINS):
-        return assess_tech_news_topic(
-            title=title,
-            snippet=snippet,
-            category=category,
-            source_url=url,
-            topic=topic,
-        ).allow
+        return assessment.allow
     domain_parts = [p for p in re.split(r"[.-]", domain) if p and p not in {"com", "org", "net", "co", "www"}]
     if any(part in topic_blob for part in domain_parts[:2]):
         return True

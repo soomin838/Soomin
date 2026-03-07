@@ -124,6 +124,28 @@ class MediaManagerService:
                 anchors.append(str(getattr(draft, "title", "") or "article context").strip())
         return anchors[: max(0, int(count))]
 
+    def _news_image_subject(self, *, title: str, category: str, anchor_text: str = "") -> str:
+        anchor = re.sub(r"\s+", " ", str(anchor_text or "").strip())
+        if anchor:
+            cleaned_anchor = re.sub(r"[^A-Za-z0-9 .,:'&()/+-]", " ", anchor)
+            cleaned_anchor = re.sub(r"\s+", " ", cleaned_anchor).strip(" -")
+            if cleaned_anchor:
+                return cleaned_anchor[:72]
+        fallback = re.sub(r"\s+", " ", str(title or "").strip())
+        fallback = re.sub(r"[^A-Za-z0-9 .,:'&()/+-]", " ", fallback)
+        fallback = re.sub(r"\s+", " ", fallback).strip(" -")
+        if fallback:
+            return fallback[:110]
+        label = overlay_label_for_story(title=title, snippet="", category=category)
+        return f"{label.title()} article topic"
+
+    def _news_image_alt(self, *, title: str, category: str, kind: str, anchor_text: str = "") -> str:
+        subject = self._news_image_subject(title=title, category=category, anchor_text=anchor_text)
+        role = str(kind or "").strip().lower()
+        if role in {"thumbnail", "thumb", "thumb_final"}:
+            return f"Illustration related to {subject}."[:180]
+        return f"Supporting image related to {subject}."[:180]
+
     def _news_inline_prompt(self, *, story_profile: Any, title: str, anchor_text: str, index: int) -> str:
         prompt = (
             f"{story_profile.scene_hint}. Article title: {title}. "
@@ -159,12 +181,12 @@ class MediaManagerService:
                 title=title,
             )
             if thumb_asset is None:
-                thumb_asset = self._news_pack_record_to_asset(thumb_row, 0)
+                thumb_asset = self._news_pack_record_to_asset(thumb_row, 0, title=title, category=category)
             if thumb_asset is not None:
                 images.append(thumb_asset)
                 notes.append("thumb_pack_fallback=1")
         for idx, row in enumerate(list(getattr(packed, "inline_bg", []) or []), start=1):
-            asset = self._news_pack_record_to_asset(row, 1000 + idx)
+            asset = self._news_pack_record_to_asset(row, 1000 + idx, title=title, category=category)
             if asset is None:
                 continue
             images.append(asset)
@@ -385,7 +407,12 @@ class MediaManagerService:
                     
                     images.append(ImageAsset(
                         path=inline_path, 
-                        alt=f"Editorial support image for {draft.title[:120]}",
+                        alt=self._news_image_alt(
+                            title=draft.title,
+                            category=category,
+                            kind="content",
+                            anchor_text=anchor_text,
+                        ),
                         anchor_text=str(anchor_text or ""),
                         source_kind=f"generated_{provider_used or 'inline'}",
                         slot_role="content",
@@ -468,26 +495,36 @@ class MediaManagerService:
 
 
 
-    def _news_pack_record_to_asset(self, row: dict[str, Any], index: int, materialize_remote: bool = False) -> ImageAsset | None:
+    def _news_pack_record_to_asset(
+        self,
+        row: dict[str, Any],
+        index: int,
+        materialize_remote: bool = False,
+        title: str = "",
+        category: str = "",
+    ) -> ImageAsset | None:
         if not isinstance(row, dict):
             return None
         src_url = str(row.get("r2_url", "") or "").strip()
+        kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
+        slot_role = "thumbnail" if "thumb" in kind else "content"
+        anchor_text = str(row.get("anchor_text", "") or row.get("overlay_hook_used", "") or "").strip()
+        alt = self._news_image_alt(
+            title=title,
+            category=category,
+            kind=kind,
+            anchor_text=anchor_text,
+        )
         
         # Using publisher's helper (passed in)
         if src_url and self.publisher._is_allowed_image_url(src_url, allow_data_uri=False):
             if materialize_remote:
                 local_copy = self._download_remote_asset(src_url=src_url, index=index)
                 if local_copy is not None:
-                    kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
-                    alt = "Illustration related to the article topic" if kind == "thumb_final" else "Supporting image related to the article topic"
-                    slot_role = "thumbnail" if "thumb" in kind else "content"
                     return ImageAsset(path=local_copy, alt=alt, source_kind="news_pack", source_url=src_url, slot_role=slot_role)
-            kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
-            alt = "Illustration related to the article topic" if kind == "thumb_final" else "Supporting image related to the article topic"
             virtual = (self.root / "storage" / "temp_images" / f"news_pack_virtual_{int(index):02d}.png").resolve()
             virtual.parent.mkdir(parents=True, exist_ok=True)
             virtual.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="))
-            slot_role = "thumbnail" if "thumb" in kind else "content"
             return ImageAsset(path=virtual, alt=alt, source_kind="news_pack", source_url=src_url, slot_role=slot_role)
             
         local_raw = str(row.get("local_path", "") or "").strip()
@@ -500,9 +537,6 @@ class MediaManagerService:
         if not local.exists():
             return None
             
-        kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
-        alt = "Illustration related to the article topic" if kind == "thumb_final" else "Supporting image related to the article topic"
-        slot_role = "thumbnail" if "thumb" in kind else "content"
         return ImageAsset(path=local, alt=alt, source_kind="news_pack", source_url=src_url, slot_role=slot_role)
 
     def _download_remote_asset(self, *, src_url: str, index: int) -> Path | None:
@@ -536,9 +570,15 @@ class MediaManagerService:
     ) -> ImageAsset | None:
         started_at = time.perf_counter()
         if not bool(getattr(self.settings.news_pack, "thumb_overlay_enabled", True)):
-            return self._news_pack_record_to_asset(thumb_row, 0)
+            return self._news_pack_record_to_asset(thumb_row, 0, title=title, category=category)
             
-        base_asset = self._news_pack_record_to_asset(thumb_row, 0, materialize_remote=True)
+        base_asset = self._news_pack_record_to_asset(
+            thumb_row,
+            0,
+            materialize_remote=True,
+            title=title,
+            category=category,
+        )
         if not base_asset:
             return None
             
@@ -608,7 +648,7 @@ class MediaManagerService:
             )
             return ImageAsset(
                 path=rendered,
-                alt="Editorial thumbnail illustration for this tech news article.",
+                alt=self._news_image_alt(title=title, category=category, kind="thumb_final"),
                 source_kind="generated_thumb_overlay",
                 source_url="",
                 license_note="NewsPack overlay thumbnail (Local Fallback)",
@@ -628,7 +668,7 @@ class MediaManagerService:
             # Fallback to local if R2 fails validation
             return ImageAsset(
                 path=rendered, 
-                alt="Editorial thumbnail illustration for this tech news article.",
+                alt=self._news_image_alt(title=title, category=category, kind="thumb_final"),
                 source_kind="generated_thumb_overlay",
                 source_url="",
                 license_note="NewsPack overlay thumbnail (Local Fallback)",
@@ -656,7 +696,7 @@ class MediaManagerService:
                 "used_by": "",
                 "used_count": 0,
                 "source_mode": "thumb_overlay",
-                "alt_text_template": "Editorial thumbnail illustration for this tech news article.",
+                "alt_text_template": self._news_image_alt(title=title, category=category, kind="thumb_final"),
                 "caption_template": "",
                 "overlay_hook_used": str(hook or "")[:80],
                 "hook_candidates": hooks[:3],
@@ -682,7 +722,7 @@ class MediaManagerService:
             
         return ImageAsset(
             path=virtual_path,
-            alt="Editorial thumbnail illustration for this tech news article.",
+            alt=self._news_image_alt(title=title, category=category, kind="thumb_final"),
             anchor_text="",
             source_kind="generated_thumb_overlay",
             source_url=str(r2_url),

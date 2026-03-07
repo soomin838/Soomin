@@ -2285,12 +2285,16 @@ class Publisher:
                 flags=re.IGNORECASE | re.DOTALL,
             )
         )
+        if is_news_layout:
+            records = self._prune_repetitive_news_records(records)
+            if not records:
+                return html
         intro_text = self._first_paragraph_text(html)
         banner = records[0]
         if is_news_layout:
             safe_banner_alt = self._regen_alt_if_too_similar(str(banner.get("alt", "") or ""), intro_text)
             if not safe_banner_alt:
-                safe_banner_alt = "Illustration related to the article topic."
+                safe_banner_alt = "Illustration related to the main article subject."
         else:
             safe_banner_alt = self._regen_alt_if_too_similar(str(banner.get("alt", "") or ""), intro_text)
         banner_block = self._image_block(str(banner.get("src", "") or ""), safe_banner_alt)
@@ -2335,6 +2339,50 @@ class Publisher:
                         "slot_role": "thumbnail" if idx == 0 else "content",
                     }
                 )
+        return out
+
+    def _normalized_image_alt_key(self, text: str) -> str:
+        clean = re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())
+        clean = re.sub(
+            r"\b(illustration|supporting|image|related|article|topic|editorial|thumbnail|this|tech|news)\b",
+            " ",
+            clean,
+        )
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return clean[:120]
+
+    def _looks_generic_news_alt(self, alt: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(editorial support image|editorial thumbnail illustration|illustration related to the article topic|supporting image related to the article topic)\b",
+                str(alt or "").lower(),
+            )
+        )
+
+    def _prune_repetitive_news_records(self, records: list[dict[str, str]]) -> list[dict[str, str]]:
+        if not records:
+            return []
+        banner = dict(records[0])
+        out = [banner]
+        seen_src = {str(banner.get("src", "") or "").strip().lower()}
+        seen_alt = {self._normalized_image_alt_key(str(banner.get("alt", "") or ""))}
+        for record in records[1:]:
+            if len(out) >= 2:
+                break
+            src = str(record.get("src", "") or "").strip().lower()
+            if not src or src in seen_src:
+                continue
+            alt = str(record.get("alt", "") or "").strip()
+            anchor = str(record.get("anchor_text", "") or "").strip()
+            alt_key = self._normalized_image_alt_key(anchor or alt)
+            if self._looks_generic_news_alt(alt) and (not anchor):
+                continue
+            if alt_key and alt_key in seen_alt:
+                continue
+            seen_src.add(src)
+            if alt_key:
+                seen_alt.add(alt_key)
+            out.append(dict(record))
         return out
 
     def _extract_h2_sections(self, html: str) -> list[dict[str, Any]]:
@@ -2440,7 +2488,7 @@ class Publisher:
                 else self._regen_alt_if_too_similar(str(record.get("alt", "") or ""), intro_text)
             )
             if not safe_alt:
-                safe_alt = "Supporting image related to the article topic."
+                safe_alt = "Supporting image related to the surrounding section."
             block = self._image_block(str(record.get("src", "") or ""), safe_alt)
             insertions.append((self._section_insert_offset(section), block))
             used_records.add(id(record))
@@ -2458,7 +2506,7 @@ class Publisher:
                 else self._regen_alt_if_too_similar(str(record.get("alt", "") or ""), intro_text)
             )
             if not safe_alt:
-                safe_alt = "Supporting image related to the article topic."
+                safe_alt = "Supporting image related to the surrounding section."
             block = self._image_block(str(record.get("src", "") or ""), safe_alt)
             out = self._insert_after_paragraph_slot(out, block, inserted_count + idx, max(1, len(records)))
         return self._rebalance_adjacent_image_blocks(out)
