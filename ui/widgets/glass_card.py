@@ -15,9 +15,9 @@ class GlassCard(QFrame):
         self._state = ""
 
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(34)
-        shadow.setOffset(0, 12)
-        shadow.setColor(QColor(10, 14, 20, 46))
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(10, 14, 20, 28))
         self.setGraphicsEffect(shadow)
 
     def set_state(self, state: str = "") -> None:

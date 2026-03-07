@@ -11,67 +11,55 @@ class LogPanel(GlassCard):
         super().__init__(parent=parent)
         self._hide_error_lines = False
         self._entries: list[tuple[str, bool]] = []
-        self._stage_labels: list[QLabel] = []
-        self._phase_index = -1
+        self._phase_key = "idle"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(10)
+        root.setSpacing(12)
 
         top = QHBoxLayout()
         top.setSpacing(8)
         self.title = QLabel("실행 로그")
         self.title.setObjectName("PanelTitle")
-        top.addWidget(self.title)
+        self.phase_chip = QLabel("대기")
+        self.phase_chip.setObjectName("StatusChip")
+        self.phase_chip.setProperty("tone", "neutral")
+        self.phase_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        top.addWidget(self.title, 1)
+        top.addWidget(self.phase_chip, 0)
         root.addLayout(top)
-
-        stage_row = QHBoxLayout()
-        stage_row.setSpacing(6)
-        for name in ["수집", "초안", "앵글", "QA", "이미지", "예약", "발행"]:
-            dot = QLabel(name)
-            dot.setProperty("stepState", "pending")
-            dot.setObjectName("TimelineDot")
-            dot.setMinimumHeight(26)
-            dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._stage_labels.append(dot)
-            stage_row.addWidget(dot, 1)
-        root.addLayout(stage_row)
 
         self.viewer = QTextEdit()
         self.viewer.setObjectName("LogViewer")
         self.viewer.setReadOnly(True)
-        self.viewer.setMinimumHeight(98)
+        self.viewer.setMinimumHeight(150)
         root.addWidget(self.viewer, 1)
 
     def set_phase(self, phase_key: str) -> None:
-        order = {
-            "preflight": 0,
-            "collect": 0,
-            "select": 1,
-            "draft": 1,
-            "headline": 2,
-            "qa": 3,
-            "visual": 4,
-            "schedule": 5,
-            "publish": 6,
-            "indexing": 6,
-            "done": 6,
-            "idle": 0,
-        }
-        idx = int(order.get(str(phase_key or "idle").lower(), 0))
-        if idx == self._phase_index:
+        clean = str(phase_key or "idle").lower()
+        if clean == self._phase_key:
             return
-        self._phase_index = idx
-        for i, lab in enumerate(self._stage_labels):
-            if i < idx:
-                state = "done"
-            elif i == idx:
-                state = "active"
-            else:
-                state = "pending"
-            lab.setProperty("stepState", state)
-            lab.style().unpolish(lab)
-            lab.style().polish(lab)
+        self._phase_key = clean
+        mapping = {
+            "preflight": ("사전점검", "neutral"),
+            "collect": ("수집", "neutral"),
+            "select": ("수집", "neutral"),
+            "draft": ("초안", "active"),
+            "headline": ("앵글", "active"),
+            "qa": ("QA", "active"),
+            "visual": ("이미지", "active"),
+            "schedule": ("예약", "warning"),
+            "publish": ("발행", "good"),
+            "indexing": ("후속반영", "good"),
+            "done": ("완료", "good"),
+            "error": ("오류", "danger"),
+            "idle": ("대기", "neutral"),
+        }
+        text, tone = mapping.get(clean, (clean or "대기", "neutral"))
+        self.phase_chip.setText(text)
+        self.phase_chip.setProperty("tone", tone)
+        self.phase_chip.style().unpolish(self.phase_chip)
+        self.phase_chip.style().polish(self.phase_chip)
 
     def append_line(self, line: str) -> None:
         text = str(line or "")

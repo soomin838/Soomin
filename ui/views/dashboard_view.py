@@ -22,9 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.widgets.glass_card import GlassCard
-from ui.widgets.kpi_card import KpiCard
 from ui.widgets.log_panel import LogPanel
-from ui.widgets.timeline_step import TimelineStep
 
 
 class SectionCard(GlassCard):
@@ -104,10 +102,8 @@ class MainWindow(QMainWindow):
 
         self.command_pane = self._build_command_rail()
         self.focus_pane = self._build_focus_column()
-        self.insight_pane = self._build_insight_column()
         self.command_pane.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.focus_pane.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.insight_pane.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
         self.support_pane = QWidget()
         self.support_pane.setObjectName("DashboardPane")
@@ -115,8 +111,7 @@ class MainWindow(QMainWindow):
         support_root = QVBoxLayout(self.support_pane)
         support_root.setContentsMargins(0, 0, 0, 0)
         support_root.setSpacing(10)
-        support_root.addWidget(self.command_pane, 3)
-        support_root.addWidget(self.insight_pane, 4)
+        support_root.addWidget(self.command_pane, 1)
 
         self.board = QWidget()
         self.board.setObjectName("DashboardBoard")
@@ -131,16 +126,16 @@ class MainWindow(QMainWindow):
     def _build_top_nav(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("TopNav")
-        bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        bar.setMinimumHeight(112)
-        bar.setMaximumHeight(168)
+        bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        bar.setMinimumHeight(72)
+        bar.setMaximumHeight(94)
         self.top_nav = bar
         self.top_nav_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, bar)
-        self.top_nav_layout.setContentsMargins(16, 12, 16, 12)
+        self.top_nav_layout.setContentsMargins(0, 0, 0, 0)
         self.top_nav_layout.setSpacing(12)
 
         brand = QVBoxLayout()
-        brand.setSpacing(1)
+        brand.setSpacing(0)
         eyebrow = QLabel("REZEROAGENT")
         eyebrow.setObjectName("HeroEyebrow")
         self.top_brand_title = QLabel("발행 관제실")
@@ -157,14 +152,12 @@ class MainWindow(QMainWindow):
 
         self.header_chip_grid = QGridLayout()
         self.header_chip_grid.setHorizontalSpacing(8)
-        self.header_chip_grid.setVerticalSpacing(6)
+        self.header_chip_grid.setVerticalSpacing(8)
         self.engine_chip = self._make_chip("엔진 대기", "neutral")
-        self.theme_chip = self._make_chip("테마 자동", "neutral")
-        self.local_chip = self._make_chip("로컬 확인", "neutral")
+        self.local_chip = self._make_chip("이미지 미확인", "neutral")
         self.queue_chip = self._make_chip("예약 0건", "neutral")
         self.header_chips = [
             self.engine_chip,
-            self.theme_chip,
             self.local_chip,
             self.queue_chip,
         ]
@@ -176,14 +169,13 @@ class MainWindow(QMainWindow):
         self.top_nav_layout.addLayout(left, 1)
 
         meta = QVBoxLayout()
-        meta.setSpacing(4)
-        session_label = QLabel("빌드")
-        session_label.setObjectName("DataLabel")
+        meta.setSpacing(2)
         build_value = getattr(self.controller, "running_version", "unknown")
         build_short = build_value[:18] + "..." if len(build_value) > 18 else build_value
-        self.version_chip = self._make_chip(f"빌드 {build_short}", "neutral")
-        meta.addWidget(session_label, 0, Qt.AlignmentFlag.AlignRight)
-        meta.addWidget(self.version_chip, 0, Qt.AlignmentFlag.AlignRight)
+        self.version_chip = QLabel(f"빌드 {build_short}")
+        self.version_chip.setObjectName("HeaderMeta")
+        meta.addStretch(1)
+        meta.addWidget(self.version_chip, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
         self.top_nav_layout.addLayout(meta)
         return bar
 
@@ -218,30 +210,18 @@ class MainWindow(QMainWindow):
 
     def _build_mission_card(self) -> GlassCard:
         card = GlassCard()
-        card.setObjectName("MissionCard")
+        card.setObjectName("SideCard")
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         root = QVBoxLayout(card)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
 
-        eyebrow = QLabel("운영 요약")
+        eyebrow = QLabel("CONTROL")
         eyebrow.setObjectName("HeroEyebrow")
         title = QLabel("바로 실행")
         title.setObjectName("PanelTitle")
         root.addWidget(eyebrow)
         root.addWidget(title)
-
-        chip_grid = QGridLayout()
-        chip_grid.setHorizontalSpacing(6)
-        chip_grid.setVerticalSpacing(6)
-        self.mission_chip_grid = chip_grid
-        self.phase_badge = self._make_chip("단계 대기", "neutral")
-        self.next_run_badge = self._make_chip("다음 실행 -", "neutral")
-        self.resume_badge = self._make_chip("재개 없음", "good")
-        chip_grid.addWidget(self.phase_badge, 0, 0)
-        chip_grid.addWidget(self.next_run_badge, 0, 1)
-        chip_grid.addWidget(self.resume_badge, 1, 0, 1, 2)
-        root.addLayout(chip_grid)
 
         action_grid = QGridLayout()
         action_grid.setHorizontalSpacing(8)
@@ -259,8 +239,6 @@ class MainWindow(QMainWindow):
         self.btn_settings.clicked.connect(self._open_settings)
 
         self.action_buttons = [self.btn_run, self.btn_force, self.btn_settings]
-        for idx, btn in enumerate(self.action_buttons):
-            action_grid.addWidget(btn, idx // 2, idx % 2)
         root.addLayout(action_grid)
 
         self.command_summary = QLabel("소스, 로컬, 예약 상태를 한 줄로 확인합니다.")
@@ -270,18 +248,64 @@ class MainWindow(QMainWindow):
         self.command_summary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         root.addWidget(self.command_summary)
 
+        self.mission_chip_grid = QGridLayout()
+        self.mission_chip_grid.setHorizontalSpacing(8)
+        self.mission_chip_grid.setVerticalSpacing(8)
+        self.phase_badge = self._make_chip("단계 대기", "neutral")
+        self.next_run_badge = self._make_chip("다음 실행 -", "neutral")
+        self.resume_badge = self._make_chip("재개 없음", "good")
+        root.addWidget(self._make_divider())
+        root.addLayout(self.mission_chip_grid)
+
+        self.metric_grid = QGridLayout()
+        self.metric_grid.setHorizontalSpacing(10)
+        self.metric_grid.setVerticalSpacing(10)
+        self.metric_rows = {
+            "api": self._make_metric_pair("API 사용"),
+            "output": self._make_metric_pair("오늘 발행"),
+            "queue": self._make_metric_pair("예약 큐"),
+            "image": self._make_metric_pair("이미지"),
+        }
+        metric_items = [
+            self.metric_rows["api"],
+            self.metric_rows["output"],
+            self.metric_rows["queue"],
+            self.metric_rows["image"],
+        ]
+        for idx, pair in enumerate(metric_items):
+            self.metric_grid.addWidget(pair[0], idx, 0)
+            self.metric_grid.addWidget(pair[1], idx, 1)
+        root.addWidget(self._make_divider())
+        root.addLayout(self.metric_grid)
+
         self.schedule_title = QLabel("다음 예약")
         self.schedule_title.setObjectName("DataLabel")
+        root.addWidget(self._make_divider())
         root.addWidget(self.schedule_title)
 
         self.schedule_lines = []
-        for _ in range(1):
+        for _ in range(2):
             line = QLabel("예약된 글이 없습니다.")
             line.setObjectName("ScheduleLine")
             line.setWordWrap(False)
             line.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
             line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             self.schedule_lines.append(line)
+            root.addWidget(line)
+
+        self.alert_title = QLabel("최근 경고")
+        self.alert_title.setObjectName("DataLabel")
+        root.addWidget(self._make_divider())
+        root.addWidget(self.alert_title)
+
+        self.alert_lines = []
+        for _ in range(2):
+            line = QLabel("경고 없음")
+            line.setObjectName("AlertLine")
+            line.setWordWrap(False)
+            line.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            self.alert_lines.append(line)
             root.addWidget(line)
         return card
 
@@ -525,6 +549,21 @@ class MainWindow(QMainWindow):
         chip.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         return chip
 
+    def _make_metric_pair(self, label_text: str):
+        label = QLabel(label_text)
+        label.setObjectName("SummaryLabel")
+        value = QLabel("-")
+        value.setObjectName("SummaryValue")
+        value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return label, value
+
+    def _make_divider(self) -> QFrame:
+        line = QFrame()
+        line.setObjectName("SectionDivider")
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        return line
+
     def _make_stat_block(self, label_text: str):
         wrapper = QVBoxLayout()
         wrapper.setSpacing(4)
@@ -544,9 +583,9 @@ class MainWindow(QMainWindow):
 
     def _apply_responsive_layout(self, force: bool = False) -> None:
         width = max(1, self.width())
-        if width >= 1500:
+        if width >= 1450:
             mode = "wide"
-        elif width >= 1320:
+        elif width >= 1260:
             mode = "balanced"
         else:
             mode = "compact"
@@ -574,7 +613,7 @@ class MainWindow(QMainWindow):
         self.top_nav_layout.setDirection(QBoxLayout.Direction.LeftToRight)
         self.top_nav_layout.setSpacing(12 if mode == "wide" else 10)
         self.top_brand_copy.setVisible(mode != "compact")
-        self.top_nav.setMaximumHeight(160 if mode == "wide" else 148 if mode == "balanced" else 132)
+        self.top_nav.setMaximumHeight(94 if mode == "wide" else 90 if mode == "balanced" else 86)
         self.hero_header.setDirection(
             QBoxLayout.Direction.LeftToRight if mode == "wide" else QBoxLayout.Direction.TopToBottom
         )
@@ -583,8 +622,6 @@ class MainWindow(QMainWindow):
         self._reflow_mission_chips(mode)
         self._reflow_action_grid(mode)
         self._reflow_hero_stats(mode)
-        self._reflow_timeline_grid(mode)
-        self._reflow_metrics_grid(mode)
         self._apply_type_scale(mode)
         self._refresh_dynamic_heights()
         self._schedule_dynamic_height_refresh()
@@ -597,16 +634,11 @@ class MainWindow(QMainWindow):
 
     def _reflow_header_chips(self, mode: str) -> None:
         self._clear_layout(self.header_chip_grid)
-        if mode == "wide":
-            positions = [(0, 0), (0, 1), (0, 2), (0, 3)]
-        else:
-            positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
+        positions = [(0, 0), (0, 1), (0, 2)] if mode == "wide" else [(0, 0), (0, 1), (1, 0)]
         for chip, (row, col) in zip(self.header_chips, positions):
             self.header_chip_grid.addWidget(chip, row, col)
-        for col in range(4):
+        for col in range(3):
             self.header_chip_grid.setColumnStretch(col, 0)
-        if mode == "wide":
-            self.header_chip_grid.setColumnStretch(3, 1)
 
     def _reflow_mission_chips(self, mode: str) -> None:
         self._clear_layout(self.mission_chip_grid)
@@ -653,6 +685,8 @@ class MainWindow(QMainWindow):
             self.timeline_grid.addWidget(self.timeline_steps[key], row, col)
 
     def _reflow_metrics_grid(self, mode: str) -> None:
+        if not hasattr(self, "metrics_grid"):
+            return
         self._clear_layout(self.metrics_grid)
         columns = 2
         for idx, card in enumerate(self.kpi_cards):
@@ -660,9 +694,9 @@ class MainWindow(QMainWindow):
 
     def _apply_type_scale(self, mode: str) -> None:
         scale_map = {
-            "wide": {"brand": 24, "hero": 22, "panel": 16, "phase": 19, "kpi": 18, "meta": 12, "body": 11, "chip": 10, "button": 11},
-            "balanced": {"brand": 22, "hero": 20, "panel": 15, "phase": 18, "kpi": 17, "meta": 11, "body": 10, "chip": 9, "button": 10},
-            "compact": {"brand": 20, "hero": 18, "panel": 14, "phase": 16, "kpi": 16, "meta": 10, "body": 9, "chip": 9, "button": 9},
+            "wide": {"brand": 22, "hero": 22, "phase": 19, "meta": 11, "body": 11, "chip": 10, "button": 10, "summary": 14, "stat": 12},
+            "balanced": {"brand": 20, "hero": 20, "phase": 18, "meta": 10, "body": 10, "chip": 9, "button": 10, "summary": 13, "stat": 11},
+            "compact": {"brand": 18, "hero": 18, "phase": 16, "meta": 9, "body": 9, "chip": 9, "button": 9, "summary": 12, "stat": 10},
         }
         scale = scale_map.get(mode, scale_map["wide"])
         self._set_point_size(self.top_brand_title, scale["brand"])
@@ -670,23 +704,22 @@ class MainWindow(QMainWindow):
         self._set_point_size(self.phase_value, scale["phase"])
         self._set_point_size(self.top_brand_copy, scale["body"])
         self._set_point_size(self.hero_body, scale["body"])
-        self._set_point_size(self.focus_note, scale["body"])
         self._set_point_size(self.command_summary, scale["body"])
         self._set_point_size(self.phase_detail, scale["body"])
-        self._set_point_size(self.orbit_detail, scale["body"])
-        self._set_point_size(self.schedule_title, scale["chip"])
-        self._set_point_size(self.progress_percent, scale["chip"])
+        self._set_point_size(self.schedule_title, scale["meta"])
+        self._set_point_size(self.alert_title, scale["meta"])
+        self._set_point_size(self.progress_percent, scale["meta"])
         for chip in getattr(self, "header_chips", []):
             self._set_point_size(chip, scale["chip"])
         for chip in [self.version_chip, self.phase_badge, self.next_run_badge, self.resume_badge]:
-            self._set_point_size(chip, scale["chip"])
+            self._set_point_size(chip, scale["chip"] if isinstance(chip, QLabel) and chip.objectName() == "StatusChip" else scale["meta"])
         for value in [
             self.hero_stat_source[1],
             self.hero_stat_output[1],
             self.hero_stat_visual[1],
             self.hero_stat_llm[1],
         ]:
-            self._set_point_size(value, scale["meta"])
+            self._set_point_size(value, scale["stat"])
         for label in self.schedule_lines + self.alert_lines:
             self._set_point_size(label, scale["body"])
         for btn in self.action_buttons:
@@ -694,13 +727,9 @@ class MainWindow(QMainWindow):
             font.setPointSize(int(scale["button"]))
             btn.setFont(font)
             btn.updateGeometry()
-        for card in getattr(self, "kpi_cards", []):
-            self._set_point_size(card.title_label, scale["body"] + 1)
-            self._set_point_size(card.value_label, scale["kpi"])
-            self._set_point_size(card.sub_label, scale["body"])
-        for step in getattr(self, "timeline_steps", {}).values():
-            self._set_point_size(step.title_label, scale["body"] + 1)
-            self._set_point_size(step.message_label, scale["body"])
+        for pair in getattr(self, "metric_rows", {}).values():
+            self._set_point_size(pair[0], scale["meta"])
+            self._set_point_size(pair[1], scale["summary"])
 
     def _refresh_dynamic_heights(self) -> None:
         changed = False
@@ -773,7 +802,6 @@ class MainWindow(QMainWindow):
         msg = str(ui.get("phase_message", "") or "")
 
         self._set_chip(self.engine_chip, f"엔진 {self._engine_label(status_raw)}", self._engine_tone(status_raw))
-        self._set_chip(self.theme_chip, f"테마 {self._theme_label()}", "neutral")
         queue_72h = int(usage.get("scheduled_72h", 0) or 0)
         self._set_chip(self.queue_chip, f"예약 {queue_72h}건", "neutral" if queue_72h > 0 else "warning")
 
@@ -782,80 +810,57 @@ class MainWindow(QMainWindow):
         local_tone = "good" if local_llm_used or local_llm_ready else "warning"
         local_text = "로컬 사용" if local_llm_used else ("로컬 준비" if local_llm_ready else "백업 모드")
         self._set_chip(self.local_chip, local_text, local_tone)
+        build_value = getattr(self.controller, "running_version", "unknown")
+        build_short = build_value[:18] + "..." if len(build_value) > 18 else build_value
+        self.version_chip.setText(f"빌드 {build_short}")
 
         self.hero_title.setText(self._headline_for(status_raw, phase, usage))
         self.hero_title.updateGeometry()
-        self.hero_body.setText(self._compact_text(self._summary_for(ui, usage), 72))
-        self.focus_note.setText(self._compact_text(msg or str(ui.get("last_message", "") or "단계 메모가 아직 없습니다."), 52))
+        self.hero_body.setText(self._compact_text(self._summary_for(ui, usage), self._mode_limit(72, 62, 52)))
         self.phase_value.setText(self._phase_display(phase))
-        self.phase_detail.setText(self._compact_text(msg or str(ui.get("last_message", "") or "단계 메모가 아직 없습니다."), 52))
+        self.phase_detail.setText(self._compact_text(msg or str(ui.get("last_message", "") or "단계 메모가 아직 없습니다."), self._mode_limit(68, 58, 48)))
         self.progress_percent.setText(f"{pct}%")
         self._fit_wrapped_label(self.hero_title, padding=10)
         self._animate_progress(pct)
 
         phase_tone = "good" if pct >= 100 and phase in {"done", "publish", "indexing"} else "neutral"
         self._set_chip(self.phase_badge, f"단계 {self._phase_display(phase)}", phase_tone)
-        self._set_chip(self.next_run_badge, f"다음 {self._compact_text(str(ui.get('next_run_text', '-') or '-'), 20)}", "neutral")
+        self._set_chip(self.next_run_badge, f"다음 {self._compact_text(str(ui.get('next_run_text', '-') or '-'), self._mode_limit(20, 18, 15))}", "neutral")
         resume_text = str(ui.get("resume_text", "") or "")
         resume_tone = "warning" if resume_text != "없음" and resume_text.lower() != "none" else "good"
-        resume_clean = "없음" if resume_tone == "good" else self._compact_text(resume_text, 16)
+        resume_clean = "없음" if resume_tone == "good" else self._compact_text(resume_text, self._mode_limit(16, 14, 12))
         self._set_chip(self.resume_badge, f"재개 {resume_clean}", resume_tone)
 
         source = str(usage.get("source", "local") or "local")
         today_posts = int(usage.get("today_posts", 0) or 0)
         today_runs = int(usage.get("today_runs", 0) or 0)
         today_scheduled = int(usage.get("today_scheduled", 0) or 0)
-        published_total = int(usage.get("blogger_live_total", 0) or 0)
         scheduled_total = int(usage.get("blogger_scheduled_total", 0) or 0)
-        image_ok = bool(usage.get("image_pipeline_passed", False))
         image_target = int(usage.get("image_pipeline_target", 0) or 0)
-        image_message = str(usage.get("image_pipeline_message", "") or "")
         image_state = str(usage.get("image_pipeline_status", "unknown") or "unknown")
-        buffer_days = int(usage.get("buffer_target_days", 0) or 0)
         timezone_name = str(usage.get("publish_timezone", "") or "")
         local_reason = str(usage.get("local_llm_reason", "") or "")
-        resume_stage = str(usage.get("resume_stage", "") or "")
-        resume_title = str(usage.get("resume_title", "") or "")
 
         api_calls = self._get_today_api_calls()
         call_cap = int(self.controller.settings.budget.daily_gemini_call_limit)
-        api_state = "warning" if api_calls >= max(call_cap - 3, 1) else "success"
-        kpi_meta_limit = self._mode_limit(34, 30, 26)
-        self.kpi_api.set_value(
-            f"{api_calls}/{call_cap}",
-            self._compact_text(f"모델 {self.controller.settings.gemini.model}", kpi_meta_limit),
-            api_state,
-        )
-        self.kpi_output.set_value(
-            f"{today_posts}건",
-            self._compact_text(f"실행 {today_runs}회 · 오늘 예약 {today_scheduled}건", kpi_meta_limit),
-            "success" if today_posts > 0 else "",
-        )
-        self.kpi_queue.set_value(
-            f"{queue_72h}건",
-            self._compact_text(f"목표 버퍼 {buffer_days}일 · 전체 예약 {scheduled_total}건", kpi_meta_limit),
-            "success" if queue_72h >= 3 else "warning",
-        )
-        image_card_state = "success" if image_ok else "warning"
-        self.kpi_image.set_value(
-            f"{self._image_state_label(image_state)} {image_target}",
-            self._compact_text(image_message or "다음 이미지 배치를 기다리는 중입니다.", self._mode_limit(38, 32, 28)),
-            image_card_state,
-        )
+        self.metric_rows["api"][1].setText(f"{api_calls}/{call_cap}")
+        self.metric_rows["output"][1].setText(f"발행 {today_posts}건")
+        self.metric_rows["queue"][1].setText(f"72시간 {queue_72h}건")
+        self.metric_rows["image"][1].setText(f"{self._image_state_label(image_state)} · {image_target}장")
         self.command_summary.setText(
-            f"소스 {('Blogger' if source == 'blogger' else '로컬')} · 예약 {queue_72h}건 · "
-            f"재개 {resume_stage or '없음'} · 로컬 {self._compact_text(local_reason or local_text, 34)}"
+            f"소스 {('Blogger' if source == 'blogger' else '로컬')} · 실행 {today_runs}회 · "
+            f"표준시 {timezone_name or '-'} · 로컬 {self._compact_text(local_reason or local_text, self._mode_limit(28, 24, 18))}"
         )
 
         self.hero_stat_source[1].setText("Blogger 연동" if source == "blogger" else "로컬 추정")
         self.hero_stat_output[1].setText(f"발행 {today_posts}건 / 예약 {today_scheduled}건")
         self.hero_stat_visual[1].setText(f"{self._image_state_label(image_state)} · 목표 {image_target}")
-        self.hero_stat_llm[1].setText(self._compact_text(local_reason or local_text, 28))
+        self.hero_stat_llm[1].setText(self._compact_text(local_reason or local_text, self._mode_limit(28, 24, 18)))
 
-        self.schedule_title.setText(f"다음 예약 · {queue_72h}건 · 표준시 {timezone_name or '-'}")
-        items = list(usage.get("today_schedule_items", []) or [])[:3]
+        self.schedule_title.setText(f"다음 예약 · {queue_72h}건")
+        items = list(usage.get("today_schedule_items", []) or [])[:2]
         if not items:
-            items = self._safe_schedule_fallback(limit=3)
+            items = self._safe_schedule_fallback(limit=2)
         self._render_schedule(items)
 
         self.log_panel.set_phase(phase)
@@ -866,12 +871,7 @@ class MainWindow(QMainWindow):
             self._last_log_msg = msg
 
         self._render_watchlist(recent_errors, usage)
-        self.orbit_detail.setText(
-            f"누적 발행 {published_total}건 · 누적 예약 {scheduled_total}건 · "
-            f"로컬 메모 {self._compact_text(local_reason or '특이사항 없음', 42)}"
-        )
         self._fit_wrapped_label(self.command_summary, padding=10)
-        self._fit_wrapped_label(self.orbit_detail, padding=10)
         self._refresh_dynamic_heights()
         self._schedule_dynamic_height_refresh()
 
@@ -1098,8 +1098,6 @@ class MainWindow(QMainWindow):
         clipboard: QClipboard = QApplication.clipboard()
         header = f"--- REZERO LOG SNAPSHOT {datetime.now().isoformat()} ---\n"
         clipboard.setText(header + self.log_panel.viewer.toPlainText())
-        self.btn_copy_logs.setText("Copied")
-        QTimer.singleShot(1800, lambda: self.btn_copy_logs.setText("Copy logs"))
 
     def _open_usage_dashboard(self):
         if self.gemini_usage_dashboard:
