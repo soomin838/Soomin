@@ -88,6 +88,29 @@ class NewsPoolStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _row_to_item(row: sqlite3.Row) -> NewsPoolItem:
+        return NewsPoolItem(
+            id=int(row["id"]),
+            url=str(row["url"] or ""),
+            title=str(row["title"] or ""),
+            source=str(row["source"] or ""),
+            provider=str(row["provider"] or ""),
+            topic=str(row["topic"] or ""),
+            collected_at=str(row["collected_at"] or ""),
+            published_at=str(row["published_at"] or ""),
+            snippet=str(row["snippet"] or ""),
+            category=str(row["category"] or ""),
+            status=str(row["status"] or ""),
+            score=int(row["score"] or 0),
+            claimed_at=str(row["claimed_at"] or ""),
+            used_at=str(row["used_at"] or ""),
+            published_url=str(row["published_url"] or ""),
+            skip_reason=str(row["skip_reason"] or ""),
+            created_at=str(row["created_at"] or ""),
+            topic_fp=str(row["topic_fp"] or ""),
+        )
+
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -219,6 +242,43 @@ class NewsPoolStore:
                 (cutoff,),
             ).fetchone()
         return int(row[0] if row else 0)
+
+    def recent_items(
+        self,
+        *,
+        days: int = 14,
+        limit: int = 40,
+        min_score: int = 60,
+        statuses: tuple[str, ...] = ("queued", "used"),
+    ) -> list[dict[str, Any]]:
+        cutoff = _iso(_utc_now() - timedelta(days=max(1, int(days))))
+        safe_limit = max(1, int(limit))
+        safe_score = max(0, int(min_score))
+        norm_statuses = [
+            str(item or "").strip().lower()
+            for item in (statuses or ())
+            if str(item or "").strip()
+        ]
+        if not norm_statuses:
+            norm_statuses = ["queued", "used"]
+        placeholders = ",".join("?" for _ in norm_statuses)
+        sql = f"""
+            SELECT id, url, title, source, provider, topic, collected_at, published_at, snippet, category, status, score, claimed_at, used_at, published_url, skip_reason, created_at, topic_fp
+            FROM news_items
+            WHERE status IN ({placeholders})
+              AND score >= ?
+              AND (
+                    (published_at != '' AND published_at >= ?)
+                 OR (created_at != '' AND created_at >= ?)
+              )
+            ORDER BY score DESC, published_at DESC, created_at DESC
+            LIMIT ?
+        """
+        params: list[Any] = list(norm_statuses)
+        params.extend([safe_score, cutoff, cutoff, safe_limit])
+        with self._connect() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [self._row_to_item(row).as_dict() for row in rows or []]
 
     def _release_stale_claims(self, stale_minutes: int = 90) -> None:
         cutoff = _iso(_utc_now() - timedelta(minutes=max(10, int(stale_minutes))))
@@ -489,23 +549,4 @@ class NewsPoolStore:
             ).fetchone()
         if row is None:
             return None
-        return NewsPoolItem(
-            id=int(row["id"]),
-            url=str(row["url"] or ""),
-            title=str(row["title"] or ""),
-            source=str(row["source"] or ""),
-            provider=str(row["provider"] or ""),
-            topic=str(row["topic"] or ""),
-            collected_at=str(row["collected_at"] or ""),
-            published_at=str(row["published_at"] or ""),
-            snippet=str(row["snippet"] or ""),
-            category=str(row["category"] or ""),
-            status=str(row["status"] or ""),
-            score=int(row["score"] or 0),
-            claimed_at=str(row["claimed_at"] or ""),
-            used_at=str(row["used_at"] or ""),
-            published_url=str(row["published_url"] or ""),
-            skip_reason=str(row["skip_reason"] or ""),
-            created_at=str(row["created_at"] or ""),
-            topic_fp=str(row["topic_fp"] or ""),
-        ).as_dict()
+        return self._row_to_item(row).as_dict()

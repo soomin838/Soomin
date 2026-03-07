@@ -336,6 +336,13 @@ content_allocation:
   mix_hot: 2
   mix_search_derived: 2
   mix_evergreen: 1
+content_lengths:
+  hot_news_min: 700
+  hot_news_max: 1000
+  search_derived_min: 1100
+  search_derived_max: 1500
+  evergreen_min: 1600
+  evergreen_max: 2200
 sources:
   mode: news_pool
   seeds_path: storage/seeds/seeds.json

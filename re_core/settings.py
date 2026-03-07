@@ -579,6 +579,16 @@ class ContentModeSettings:
     )
 
 
+@dataclass
+class ContentLengthsSettings:
+    hot_news_min: int = 700
+    hot_news_max: int = 1000
+    search_derived_min: int = 1100
+    search_derived_max: int = 1500
+    evergreen_min: int = 1600
+    evergreen_max: int = 2200
+
+
 def is_news_mode(settings: "AppSettings | None") -> bool:
     try:
         mode = str(getattr(getattr(settings, "content_mode", None), "mode", "") or "").strip().lower()
@@ -711,6 +721,7 @@ class AppSettings:
     blogger: BloggerSettings = field(default_factory=BloggerSettings)
     indexing: IndexingSettings = field(default_factory=IndexingSettings)
     content: ContentPolicySettings = field(default_factory=ContentPolicySettings)
+    content_lengths: ContentLengthsSettings = field(default_factory=ContentLengthsSettings)
     content_mode: ContentModeSettings = field(default_factory=ContentModeSettings)
     topics: TopicsPolicySettings = field(default_factory=TopicsPolicySettings)
     llm: LLMPolicySettings = field(default_factory=LLMPolicySettings)
@@ -750,6 +761,7 @@ def load_settings(path: Path) -> AppSettings:
     structure_randomization_raw = dict(raw.get("structure_randomization", {}) or {})
     content_allocation_raw = dict(raw.get("content_allocation", {}) or {})
     content_raw = dict(raw.get("content", {}) or {})
+    content_lengths_raw = dict(raw.get("content_lengths", {}) or {})
     content_mode_raw = dict(raw.get("content_mode", {}) or {})
     topics_raw = dict(raw.get("topics", {}) or {})
     monthly_scheduler_raw = dict(raw.get("monthly_scheduler", {}) or {})
@@ -1035,6 +1047,7 @@ def load_settings(path: Path) -> AppSettings:
         blogger=_construct_dc(BloggerSettings, raw.get("blogger", {})),
         indexing=_construct_dc(IndexingSettings, raw.get("indexing", {})),
         content=_construct_dc(ContentPolicySettings, content_raw),
+        content_lengths=_construct_dc(ContentLengthsSettings, content_lengths_raw),
         content_mode=_construct_dc(ContentModeSettings, content_mode_raw),
         topics=_construct_dc(TopicsPolicySettings, topics_raw),
         llm=_construct_dc(LLMPolicySettings, llm_raw),

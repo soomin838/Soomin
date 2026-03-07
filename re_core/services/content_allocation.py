@@ -18,6 +18,8 @@ class AllocationPlan:
 @dataclass(frozen=True)
 class ContentPolicy:
     content_type: str
+    source_type: str
+    generation_mode_hint: str
     min_words: int
     max_words: int
     title_strategy: str
@@ -27,41 +29,16 @@ class ContentPolicy:
     max_images: int
 
 
+@dataclass(frozen=True)
+class AllocationSlot:
+    content_type: str
+    source_type: str
+    generation_mode_hint: str
+    target_word_range: tuple[int, int]
+
+
 class ContentAllocationEngine:
     _DEFAULT_PRIORITY = ("hot", "search_derived", "evergreen")
-    _POLICY_MAP = {
-        "hot": ContentPolicy(
-            content_type="hot",
-            min_words=700,
-            max_words=1000,
-            title_strategy="timely_explainer",
-            source_strategy="news_source_plus_corroboration",
-            image_strategy="hero_plus_one_inline",
-            min_images=1,
-            max_images=2,
-        ),
-        "search_derived": ContentPolicy(
-            content_type="search_derived",
-            min_words=1100,
-            max_words=1500,
-            title_strategy="query_match",
-            source_strategy="authority_first",
-            image_strategy="hero_plus_one_inline",
-            min_images=1,
-            max_images=2,
-        ),
-        "evergreen": ContentPolicy(
-            content_type="evergreen",
-            min_words=1600,
-            max_words=2200,
-            title_strategy="evergreen_utility",
-            source_strategy="authority_first",
-            image_strategy="single_meaningful_visual",
-            min_images=1,
-            max_images=1,
-        ),
-    }
-
     def __init__(
         self,
         *,
@@ -69,6 +46,7 @@ class ContentAllocationEngine:
         mix_hot: int = 2,
         mix_search_derived: int = 2,
         mix_evergreen: int = 1,
+        content_lengths: object | None = None,
         log_path: Path | None = None,
     ) -> None:
         self.enabled = bool(enabled)
@@ -76,6 +54,54 @@ class ContentAllocationEngine:
         self.mix_search_derived = max(0, int(mix_search_derived))
         self.mix_evergreen = max(0, int(mix_evergreen))
         self.log_path = Path(log_path).resolve() if log_path else None
+        self.content_lengths = content_lengths
+        self._policy_map = self._build_policy_map(content_lengths)
+
+    def _build_policy_map(self, content_lengths: object | None) -> dict[str, ContentPolicy]:
+        hot_min = max(500, int(getattr(content_lengths, "hot_news_min", 700) or 700))
+        hot_max = max(hot_min, int(getattr(content_lengths, "hot_news_max", 1000) or 1000))
+        search_min = max(700, int(getattr(content_lengths, "search_derived_min", 1100) or 1100))
+        search_max = max(search_min, int(getattr(content_lengths, "search_derived_max", 1500) or 1500))
+        evergreen_min = max(900, int(getattr(content_lengths, "evergreen_min", 1600) or 1600))
+        evergreen_max = max(evergreen_min, int(getattr(content_lengths, "evergreen_max", 2200) or 2200))
+        return {
+            "hot": ContentPolicy(
+                content_type="hot",
+                source_type="news_pool",
+                generation_mode_hint="news_explainer_fast",
+                min_words=hot_min,
+                max_words=hot_max,
+                title_strategy="timely_explainer",
+                source_strategy="news_source_plus_corroboration",
+                image_strategy="hero_plus_one_inline",
+                min_images=1,
+                max_images=2,
+            ),
+            "search_derived": ContentPolicy(
+                content_type="search_derived",
+                source_type="search_console_or_news_seed",
+                generation_mode_hint="search_answer",
+                min_words=search_min,
+                max_words=search_max,
+                title_strategy="query_match",
+                source_strategy="authority_first",
+                image_strategy="hero_plus_one_inline",
+                min_images=1,
+                max_images=2,
+            ),
+            "evergreen": ContentPolicy(
+                content_type="evergreen",
+                source_type="evergreen_seed_pool",
+                generation_mode_hint="evergreen_hub",
+                min_words=evergreen_min,
+                max_words=evergreen_max,
+                title_strategy="evergreen_utility",
+                source_strategy="authority_first",
+                image_strategy="single_meaningful_visual",
+                min_images=1,
+                max_images=1,
+            ),
+        }
 
     def targets(self) -> dict[str, int]:
         return {
@@ -112,11 +138,23 @@ class ContentAllocationEngine:
 
     def policy_for(self, content_type: str) -> ContentPolicy:
         key = str(content_type or "hot").strip().lower()
-        if key not in self._POLICY_MAP:
+        if key not in self._policy_map:
             key = "hot"
-        return self._POLICY_MAP[key]
+        return self._policy_map[key]
+
+    def slot_for(self, content_type: str) -> AllocationSlot:
+        policy = self.policy_for(content_type)
+        return AllocationSlot(
+            content_type=policy.content_type,
+            source_type=policy.source_type,
+            generation_mode_hint=policy.generation_mode_hint,
+            target_word_range=(int(policy.min_words), int(policy.max_words)),
+        )
 
     def next_content_types(self, *, day: date | str, published_counts: dict[str, int] | None = None) -> list[str]:
+        return [slot.content_type for slot in self.next_slots(day=day, published_counts=published_counts)]
+
+    def next_slots(self, *, day: date | str, published_counts: dict[str, int] | None = None) -> list[AllocationSlot]:
         counts = {key: max(0, int((published_counts or {}).get(key, 0) or 0)) for key in self.targets()}
         sequence = self.daily_sequence()
         used_slots = 0
@@ -142,6 +180,7 @@ class ContentAllocationEngine:
         for key in self._DEFAULT_PRIORITY:
             if key not in order:
                 order.append(key)
+        slots = [self.slot_for(key) for key in order]
         self._log(
             {
                 "ts_utc": datetime.now(timezone.utc).isoformat(),
@@ -151,9 +190,10 @@ class ContentAllocationEngine:
                 "targets": targets,
                 "sequence": sequence,
                 "selected_order": order,
+                "selected_slots": [asdict(slot) for slot in slots],
             }
         )
-        return order
+        return slots
 
     def plan(self, *, day: date | str, slots: int = 5) -> AllocationPlan:
         plan = AllocationPlan(

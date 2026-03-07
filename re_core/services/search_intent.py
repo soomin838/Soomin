@@ -20,6 +20,18 @@ class IntentBundle:
     negative_angles: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class SearchIntentCandidateSpec:
+    content_type: str
+    candidate_kind: str
+    title: str
+    body: str
+    primary_query: str
+    source_url: str = ""
+    title_strategy: str = "query_match"
+    source_strategy: str = "authority_first"
+
+
 class SearchIntentGenerator:
     def __init__(
         self,
@@ -318,3 +330,112 @@ class SearchIntentGenerator:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         except Exception:
             return
+
+    def build_search_candidates(
+        self,
+        *,
+        bundle: IntentBundle,
+        headline: str,
+        category: str,
+        source_url: str = "",
+        max_candidates: int = 3,
+    ) -> list[SearchIntentCandidateSpec]:
+        query = re.sub(r"\s+", " ", str(bundle.primary_query or headline or "").strip())
+        if not query:
+            return []
+        clean_headline = re.sub(r"\s+", " ", str(headline or "").strip())
+        cat = str(category or "").strip().lower()
+        candidate_kinds = self._candidate_kinds(bundle, cat)
+        out: list[SearchIntentCandidateSpec] = []
+        seen_titles: set[str] = set()
+        for kind in candidate_kinds:
+            title = self._candidate_title(kind=kind, query=query, headline=clean_headline, category=cat)
+            key = title.lower().strip()
+            if not title or key in seen_titles:
+                continue
+            seen_titles.add(key)
+            out.append(
+                SearchIntentCandidateSpec(
+                    content_type="search_derived",
+                    candidate_kind=kind,
+                    title=title[:110],
+                    body=self._candidate_body(
+                        kind=kind,
+                        query=query,
+                        headline=clean_headline,
+                        bundle=bundle,
+                    )[:900],
+                    primary_query=query[:160],
+                    source_url=str(source_url or "").strip()[:300],
+                )
+            )
+            if len(out) >= max(1, int(max_candidates)):
+                break
+        return out
+
+    def _candidate_kinds(self, bundle: IntentBundle, category: str) -> list[str]:
+        cat = str(category or "").strip().lower()
+        out = ["what-changed", "should-you", "comparison", "alternatives", "how-to"]
+        if cat in {"security", "policy"}:
+            out = ["what-changed", "how-to", "should-you", "alternatives"]
+        elif cat in {"consumer", "home", "wellness"}:
+            out = ["comparison", "should-you", "alternatives", "what-changed"]
+        elif cat in {"ai", "chips", "platform"}:
+            out = ["what-changed", "should-you", "comparison", "alternatives"]
+        if str(bundle.content_kind or "").strip().lower() == "supporting":
+            out = ["should-you", "comparison", "alternatives", "how-to"]
+        return out
+
+    def _candidate_title(self, *, kind: str, query: str, headline: str, category: str) -> str:
+        base = re.sub(r"[?]+$", "", query).strip()
+        if kind == "how-to":
+            return f"How to make sense of {base}"
+        if kind == "comparison":
+            return f"{base}: what actually matters when you compare it"
+        if kind == "what-changed":
+            return f"What changed with {base} and why it matters"
+        if kind == "should-you":
+            return f"Should you care about {base} right now?"
+        if kind == "alternatives":
+            return f"{base}: better alternatives and tradeoffs to consider"
+        return headline or base
+
+    def _candidate_body(
+        self,
+        *,
+        kind: str,
+        query: str,
+        headline: str,
+        bundle: IntentBundle,
+    ) -> str:
+        supporting = ", ".join(list(bundle.supporting_queries or [])[:3])
+        questions = " ".join(list(bundle.questions or [])[:2])
+        if kind == "how-to":
+            return (
+                f"Search-derived support article for '{query}'. "
+                f"Use the source event '{headline}' only as context, then answer the practical reader problem directly. "
+                f"Relevant supporting angles: {supporting}. Key reader questions: {questions}"
+            )
+        if kind == "comparison":
+            return (
+                f"Search-derived comparison article for '{query}'. "
+                f"Use the source event '{headline}' as the trigger, but structure the article around real buyer or user tradeoffs. "
+                f"Compare practical variables, not generic summaries. Supporting angles: {supporting}"
+            )
+        if kind == "what-changed":
+            return (
+                f"Search-derived explainer for '{query}'. "
+                f"Ground the article in what actually changed in '{headline}', then explain who is affected, what changed from before, and what to watch next. "
+                f"Questions to answer: {questions}"
+            )
+        if kind == "should-you":
+            return (
+                f"Search-derived decision article for '{query}'. "
+                f"Translate '{headline}' into a clear yes/no or maybe-it-depends decision framework for mainstream readers. "
+                f"Use practical consequences and limits. Supporting angles: {supporting}"
+            )
+        return (
+            f"Search-derived alternatives article for '{query}'. "
+            f"Use '{headline}' as the context, then show realistic alternatives, tradeoffs, and fallback choices. "
+            f"Questions to answer: {questions}"
+        )

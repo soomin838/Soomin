@@ -32,7 +32,7 @@ from re_core.news_rss import fetch_feed_detailed
 from re_core.news_score import contains_allow_keywords, has_blocked_keywords, score_news_item
 from re_core.safety_filter import SafetyFilter
 from re_core.services.news_collector import fetch_trending_topics
-from re_core.services.search_intent import IntentBundle, SearchIntentGenerator
+from re_core.services.search_intent import IntentBundle, SearchIntentCandidateSpec, SearchIntentGenerator
 from re_core.services.keyword_discovery import DiscoveryOpportunity, KeywordDiscovery
 from re_core.services.topic_scoring import TopicScoring
 from re_core.services.content_allocation import ContentAllocationEngine, ContentPolicy
@@ -167,6 +167,7 @@ class AgentWorkflow:
             mix_hot=int(getattr(settings.content_allocation, "mix_hot", 2) or 2),
             mix_search_derived=int(getattr(settings.content_allocation, "mix_search_derived", 2) or 2),
             mix_evergreen=int(getattr(settings.content_allocation, "mix_evergreen", 1) or 1),
+            content_lengths=getattr(settings, "content_lengths", None),
             log_path=root / "storage" / "logs" / "content_allocation.jsonl",
         )
         self.keyword_discovery = KeywordDiscovery(
@@ -1754,6 +1755,8 @@ class AgentWorkflow:
                         "opportunity_action": str(item.action_type or ""),
                         "search_console_query": query,
                         "search_console_page": page,
+                        "ctr_score": max(0.0, min(100.0, float(item.ctr or 0.0) * 100.0)),
+                        "position_score": max(0.0, min(100.0, 100.0 - (float(item.position or 100.0) * 4.0))),
                         "cluster_id": cluster_id,
                         "news_category": "search_derived",
                     },
@@ -1862,6 +1865,74 @@ class AgentWorkflow:
             return counts
         return counts
 
+    def _freshness_score(self, value: str) -> float:
+        raw = str(value or "").strip()
+        if not raw:
+            return 40.0
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age_hours = max(0.0, (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 3600.0)
+        except Exception:
+            return 40.0
+        return max(20.0, 100.0 - min(80.0, age_hours * 2.2))
+
+    def _search_derived_score_for_candidate(self, candidate: TopicCandidate) -> int:
+        meta = dict(getattr(candidate, "meta", {}) or {})
+        query = str(meta.get("search_console_query", "") or getattr(candidate, "title", "") or "").strip()
+        opportunity = max(45.0, float(getattr(candidate, "score", 0) or 0))
+        ctr = float(meta.get("ctr_score", 55.0) or 55.0)
+        position = float(meta.get("position_score", 55.0) or 55.0)
+        cluster = 68.0 if str(meta.get("cluster_id", "") or "").strip() else 52.0
+        relevance = min(100.0, 55.0 + (self._keyword_specificity_score(query) * 8.0))
+        scored = self.topic_scoring.score_for_type(
+            query or str(getattr(candidate, "title", "") or ""),
+            content_type="search_derived",
+            search=opportunity,
+            ctr=ctr,
+            position=position,
+            cluster=cluster,
+            relevance=relevance,
+        )
+        return max(60, min(96, int(round(scored.total))))
+
+    def _evergreen_score_for_candidate(self, candidate: TopicCandidate) -> int:
+        meta = dict(getattr(candidate, "meta", {}) or {})
+        query = str(getattr(candidate, "title", "") or "").strip()
+        cluster = 70.0 if str(meta.get("cluster_id", "") or "").strip() else 55.0
+        relevance = min(100.0, 58.0 + (self._keyword_specificity_score(query) * 7.0))
+        durability = 72.0
+        recurring_interest = 68.0 if len(list(getattr(candidate, "long_tail_keywords", []) or [])) >= 2 else 54.0
+        scored = self.topic_scoring.score_for_type(
+            query,
+            content_type="evergreen",
+            search=recurring_interest,
+            ctr=52.0,
+            position=55.0,
+            cluster=cluster,
+            relevance=relevance,
+            durability=durability,
+        )
+        return max(62, min(96, int(round(scored.total))))
+
+    def _hot_score_for_news_item(self, item: dict[str, Any], *, title: str, snippet: str, category: str) -> int:
+        freshness = self._freshness_score(str((item or {}).get("published_at", "") or ""))
+        search = 74.0 if category in {"security", "policy", "platform", "ai", "chips"} else 60.0
+        ctr = max(45.0, float((item or {}).get("score", 70) or 70))
+        cluster = 64.0 if str((item or {}).get("topic_fp", "") or "").strip() else 50.0
+        relevance = min(100.0, 50.0 + (len(build_story_tags(title=title, snippet=snippet, category=category)) * 9.0))
+        scored = self.topic_scoring.score_for_type(
+            title or snippet,
+            content_type="hot",
+            freshness=freshness,
+            search=search,
+            ctr=ctr,
+            cluster=cluster,
+            relevance=relevance,
+        )
+        return max(68, min(98, int(round(scored.total))))
+
     def _resolve_candidate_content_type(self, candidate: TopicCandidate | None) -> str:
         if candidate is None:
             return "hot"
@@ -1899,12 +1970,91 @@ class AgentWorkflow:
         candidate.meta = meta
         return dict(meta)
 
+    def _news_pool_search_seed_candidates(self, limit: int = 6) -> list[TopicCandidate]:
+        seed_rows = self.news_pool_store.recent_items(days=10, limit=max(8, int(limit) * 4), min_score=70, statuses=("queued", "used"))
+        out: list[TopicCandidate] = []
+        seen_titles: set[str] = set()
+        for row in seed_rows:
+            title = str((row or {}).get("title", "") or "").strip()
+            snippet = str((row or {}).get("snippet", "") or "").strip()
+            category = str((row or {}).get("category", "") or "platform").strip().lower() or "platform"
+            source_url = str((row or {}).get("url", "") or "").strip()
+            topic = str((row or {}).get("topic", "") or "").strip()
+            assessment = self._assess_tech_news_candidate(
+                title=title,
+                snippet=snippet,
+                category=category,
+                source_url=source_url,
+                topic=topic,
+            )
+            if not assessment.allow or float(assessment.score) < 2.0:
+                continue
+            base_candidate = TopicCandidate(
+                source="news_pool_seed",
+                title=title,
+                body=snippet,
+                score=max(70, int((row or {}).get("score", 70) or 70)),
+                url=source_url,
+                main_entity=self.scout._extract_main_entity(title),  # noqa: SLF001
+                long_tail_keywords=self._build_news_long_tail_keywords(title, category)[:6],
+                meta={
+                    "news_category": category,
+                    "news_topic": topic,
+                    "news_provider": str((row or {}).get("provider", "") or "").strip().lower(),
+                    "published_at": str((row or {}).get("published_at", "") or ""),
+                    "news_pool_id": int((row or {}).get("id", 0) or 0),
+                    "seed_from_news_pool": True,
+                },
+            )
+            bundle, _ = self._build_search_intent_bundle(candidate=base_candidate, category=category)
+            for spec in self.search_intent_generator.build_search_candidates(
+                bundle=bundle,
+                headline=title,
+                category=category,
+                source_url=source_url,
+                max_candidates=2,
+            ):
+                spec_title = str(spec.title or "").strip()
+                title_key = spec_title.lower()
+                if not spec_title or title_key in seen_titles:
+                    continue
+                seen_titles.add(title_key)
+                cluster_id = self._infer_cluster_id_from_keyword(spec.primary_query or spec.title)
+                candidate = TopicCandidate(
+                    source="news_pool_seed",
+                    title=spec_title,
+                    body=str(spec.body or "").strip(),
+                    score=72,
+                    url="",
+                    long_tail_keywords=[str(spec.primary_query or spec.title or "").strip()],
+                    meta={
+                        "content_type": "search_derived",
+                        "opportunity_source": True,
+                        "opportunity_action": str(spec.candidate_kind or "").strip(),
+                        "search_console_query": str(spec.primary_query or "").strip(),
+                        "seed_headline": title,
+                        "seed_source_url": source_url,
+                        "cluster_id": cluster_id,
+                        "news_category": category,
+                        "news_provider": str((row or {}).get("provider", "") or "").strip().lower(),
+                        "published_at": str((row or {}).get("published_at", "") or ""),
+                    },
+                )
+                candidate.score = self._search_derived_score_for_candidate(candidate)
+                out.append(candidate)
+                if len(out) >= max(1, int(limit)):
+                    break
+            if len(out) >= max(1, int(limit)):
+                break
+        return out
+
     def _search_derived_candidates(self, limit: int = 6) -> list[TopicCandidate]:
         out: list[TopicCandidate] = []
         for candidate in self._supporting_discovery_candidates(limit=max(1, int(limit))):
             meta = self._annotate_candidate_content_policy(candidate, requested_type="search_derived")
             category = str(meta.get("news_category", "") or "platform")
             candidate.url = ""
+            candidate.score = self._search_derived_score_for_candidate(candidate)
             if not self._candidate_matches_content_mode(candidate):
                 continue
             allowed, _, _ = self._policy_gate_candidate(
@@ -1917,6 +2067,25 @@ class AgentWorkflow:
             )
             if allowed:
                 out.append(candidate)
+        for candidate in self._news_pool_search_seed_candidates(limit=max(1, int(limit))):
+            meta = self._annotate_candidate_content_policy(candidate, requested_type="search_derived")
+            category = str(meta.get("news_category", "") or "platform")
+            candidate.url = ""
+            candidate.score = self._search_derived_score_for_candidate(candidate)
+            if not self._candidate_matches_content_mode(candidate):
+                continue
+            allowed, _, _ = self._policy_gate_candidate(
+                title=str(getattr(candidate, "title", "") or ""),
+                snippet=str(getattr(candidate, "body", "") or ""),
+                body_excerpt="",
+                category=category,
+                route="news",
+                source_url="",
+            )
+            if allowed:
+                out.append(candidate)
+            if len(out) >= max(1, int(limit)) * 2:
+                break
         return sorted(out, key=lambda row: int(getattr(row, "score", 0) or 0), reverse=True)
 
     def _evergreen_candidates(self, limit: int = 8) -> list[TopicCandidate]:
@@ -1937,6 +2106,7 @@ class AgentWorkflow:
                 candidate.url = ""
             if not self._candidate_matches_content_mode(candidate):
                 continue
+            candidate.score = self._evergreen_score_for_candidate(candidate)
             allowed, _, _ = self._policy_gate_candidate(
                 title=str(getattr(candidate, "title", "") or ""),
                 snippet=str(getattr(candidate, "body", "") or ""),
@@ -1958,6 +2128,17 @@ class AgentWorkflow:
             day=self._content_day_kst(),
             published_counts=self._today_content_type_counts(),
         )
+
+    def _allocation_candidate_slots(self) -> list[dict[str, Any]]:
+        if not bool(getattr(self.settings.content_allocation, "enabled", False)):
+            return [asdict(self.content_allocator.slot_for("hot"))]
+        return [
+            asdict(slot)
+            for slot in self.content_allocator.next_slots(
+                day=self._content_day_kst(),
+                published_counts=self._today_content_type_counts(),
+            )
+        ]
 
     def _claim_hot_news_candidate(
         self,
@@ -2816,11 +2997,12 @@ class AgentWorkflow:
         if not category:
             category = infer_news_category(f"{title} {snippet}")
         long_tail = self._build_news_long_tail_keywords(title, category)
+        hot_score = self._hot_score_for_news_item(item, title=title, snippet=snippet, category=category)
         candidate = TopicCandidate(
             source=source or "news_pool",
             title=title,
             body=snippet,
-            score=max(70, int((item or {}).get("score", 70) or 70)),
+            score=hot_score,
             url=url,
             main_entity=self.scout._extract_main_entity(title),  # noqa: SLF001
             long_tail_keywords=long_tail[:8],
@@ -3369,8 +3551,10 @@ class AgentWorkflow:
             cluster_skip_count = 0
             retry_event_mismatch_count = 0
             selected_content_type = ""
-            allocation_order = self._allocation_candidate_type_order()
-            for desired_type in allocation_order:
+            selected_slot: dict[str, Any] = {}
+            allocation_slots = self._allocation_candidate_slots()
+            for slot in allocation_slots:
+                desired_type = str((slot or {}).get("content_type", "") or "hot").strip().lower() or "hot"
                 if desired_type == "hot":
                     (
                         selected,
@@ -3387,6 +3571,7 @@ class AgentWorkflow:
                     )
                     if selected is not None:
                         selected_content_type = "hot"
+                        selected_slot = dict(slot or {})
                         degraded_note = self._append_note(degraded_note, "content_slot=hot")
                         break
                 elif desired_type == "search_derived":
@@ -3394,6 +3579,7 @@ class AgentWorkflow:
                     if search_candidates:
                         selected = max(search_candidates, key=lambda row: int(getattr(row, "score", 0) or 0))
                         selected_content_type = "search_derived"
+                        selected_slot = dict(slot or {})
                         cluster_id = self._infer_cluster_id_from_keyword(
                             " ".join(getattr(selected, "long_tail_keywords", [])[:2]) or str(getattr(selected, "title", "") or "")
                         )
@@ -3404,6 +3590,7 @@ class AgentWorkflow:
                     if evergreen_candidates:
                         selected = max(evergreen_candidates, key=lambda row: int(getattr(row, "score", 0) or 0))
                         selected_content_type = "evergreen"
+                        selected_slot = dict(slot or {})
                         cluster_id = self._infer_cluster_id_from_keyword(
                             " ".join(getattr(selected, "long_tail_keywords", [])[:2]) or str(getattr(selected, "title", "") or "")
                         )
@@ -3444,6 +3631,8 @@ class AgentWorkflow:
             reason = (
                 f"content_type={selected_meta.get('content_type', selected_content_type or 'hot')};"
                 f"candidate_source={str(getattr(selected, 'source', '') or '').strip() or 'unknown'};"
+                f"source_type={str(selected_slot.get('source_type', active_policy.get('source_type', 'unknown')) or 'unknown')};"
+                f"generation_mode_hint={str(selected_slot.get('generation_mode_hint', active_policy.get('generation_mode_hint', 'standard')) or 'standard')};"
                 f"claimed_id={claimed_id};category={category};cluster_id={cluster_id or 'none'}"
             )
             if cluster_id:
@@ -3580,6 +3769,8 @@ class AgentWorkflow:
                             "title_strategy": str(active_policy.get("title_strategy", "timely_explainer") or "timely_explainer"),
                             "source_strategy": str(active_policy.get("source_strategy", "news_source_plus_corroboration") or "news_source_plus_corroboration"),
                             "image_strategy": str(active_policy.get("image_strategy", "hero_plus_one_inline") or "hero_plus_one_inline"),
+                            "source_type": str(active_policy.get("source_type", "unknown") or "unknown"),
+                            "generation_mode_hint": str(active_policy.get("generation_mode_hint", "standard") or "standard"),
                             "event_id": event_id,
                             "run_start_minute": str(run_start_minute or "").strip(),
                             "retry_index": retry_index,
@@ -4400,6 +4591,8 @@ class AgentWorkflow:
                                             "title_strategy": str(active_policy.get("title_strategy", "timely_explainer") or "timely_explainer"),
                                             "source_strategy": str(active_policy.get("source_strategy", "news_source_plus_corroboration") or "news_source_plus_corroboration"),
                                             "image_strategy": str(active_policy.get("image_strategy", "hero_plus_one_inline") or "hero_plus_one_inline"),
+                                            "source_type": str(active_policy.get("source_type", "unknown") or "unknown"),
+                                            "generation_mode_hint": str(active_policy.get("generation_mode_hint", "standard") or "standard"),
                                             "event_id": event_id,
                                             "run_start_minute": str(run_start_minute or "").strip(),
                                             "retry_index": int(entropy_retry_index),
@@ -6637,6 +6830,8 @@ class AgentWorkflow:
                 "title_strategy": str(active_policy.get("title_strategy", "timely_explainer") or "timely_explainer"),
                 "source_strategy": str(active_policy.get("source_strategy", "news_source_plus_corroboration") or "news_source_plus_corroboration"),
                 "image_strategy": str(active_policy.get("image_strategy", "hero_plus_one_inline") or "hero_plus_one_inline"),
+                "source_type": str(active_policy.get("source_type", "unknown") or "unknown"),
+                "generation_mode_hint": str(active_policy.get("generation_mode_hint", "standard") or "standard"),
             }
         )
         self._remember_title_fingerprint(draft.title)
