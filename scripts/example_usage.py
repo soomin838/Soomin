@@ -20,13 +20,13 @@ def main() -> None:
     print(expand_keywords("AI"))
 
     print("\n=== Single-topic fetch ===")
-    ai_news = fetch_news("AI", max_records=5)
-    print(json.dumps(ai_news, indent=2, ensure_ascii=False))
+    ai_news = fetch_news("AI", 10)
+    print(json.dumps(ai_news[:3], indent=2, ensure_ascii=False))
 
     print("\n=== Cleaned manual sample ===")
     sample = ai_news + ai_news[:1]
     cleaned = clean_news_data(sample)
-    print(json.dumps(cleaned, indent=2, ensure_ascii=False))
+    print(json.dumps(cleaned[:3], indent=2, ensure_ascii=False))
 
     print("\n=== Trending topics ===")
     trending = fetch_trending_topics()

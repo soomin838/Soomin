@@ -33,6 +33,8 @@ class NewsCollectorTests(unittest.TestCase):
         self.assertEqual(len(cleaned), 1)
         self.assertEqual(cleaned[0]["source"], "example.com")
         self.assertTrue(cleaned[0]["published_date"].startswith("2026-03-07T12:30:00"))
+        self.assertEqual(cleaned[0]["provider"], "gdelt")
+        self.assertEqual(cleaned[0]["topic"], "")
 
     def test_fetch_trending_topics_deduplicates_across_topics(self) -> None:
         fake_results = {
@@ -55,6 +57,8 @@ class NewsCollectorTests(unittest.TestCase):
         self.assertGreaterEqual(len(groups), 2)
         urls = [article["url"] for group in groups for article in group["articles"]]
         self.assertEqual(urls.count("https://example.com/shared"), 1)
+        self.assertTrue(all(article["provider"] == "gdelt" for group in groups for article in group["articles"]))
+        self.assertTrue(all(article["topic"] for group in groups for article in group["articles"]))
 
 
 if __name__ == "__main__":

@@ -174,7 +174,7 @@ def _guess_source(article: dict[str, Any]) -> str:
     return source_country
 
 
-def _normalize_article(article: dict[str, Any]) -> dict[str, str]:
+def _normalize_article(article: dict[str, Any], *, default_topic: str = "") -> dict[str, str]:
     title = str(article.get("title", "") or "").strip()
     url = str(article.get("url", "") or "").strip()
     summary = str(article.get("seendate", "") or "").strip()
@@ -201,6 +201,8 @@ def _normalize_article(article: dict[str, Any]) -> dict[str, str]:
         "source": _guess_source(article),
         "published_date": published,
         "summary": summary,
+        "topic": str(article.get("topic", "") or default_topic).strip(),
+        "provider": "gdelt",
     }
 
 
@@ -218,7 +220,7 @@ def clean_news_data(news_list: Iterable[dict[str, Any]]) -> list[dict[str, str]]
 
     Returns:
         A cleaned list of article dictionaries using the schema:
-        ``title, url, source, published_date, summary``.
+        ``title, url, source, published_date, summary, topic, provider``.
     """
     seen_urls: set[str] = set()
     cleaned: list[dict[str, str]] = []
@@ -228,14 +230,16 @@ def clean_news_data(news_list: Iterable[dict[str, Any]]) -> list[dict[str, str]]
             continue
 
         article = (
-            _normalize_article(item)
-            if any(k not in item for k in ("title", "url", "source", "published_date", "summary"))
+            _normalize_article(item, default_topic=str(item.get("topic", "") or "").strip())
+            if any(k not in item for k in ("title", "url", "source", "published_date", "summary", "topic", "provider"))
             else {
                 "title": str(item.get("title", "") or "").strip(),
                 "url": str(item.get("url", "") or "").strip(),
                 "source": str(item.get("source", "") or "").strip(),
                 "published_date": _normalize_date(item.get("published_date")),
                 "summary": str(item.get("summary", "") or "").strip(),
+                "topic": str(item.get("topic", "") or "").strip(),
+                "provider": str(item.get("provider", "") or "gdelt").strip() or "gdelt",
             }
         )
 
@@ -246,6 +250,8 @@ def clean_news_data(news_list: Iterable[dict[str, Any]]) -> list[dict[str, str]]
         if article["url"] in seen_urls:
             continue
         seen_urls.add(article["url"])
+        if not article["provider"]:
+            article["provider"] = "gdelt"
         cleaned.append(article)
 
     return cleaned
@@ -294,7 +300,9 @@ def fetch_news(query: str, max_records: int = 50) -> list[dict[str, str]]:
               "url": "...",
               "source": "...",
               "published_date": "...",
-              "summary": "..."
+              "summary": "...",
+              "topic": "...",
+              "provider": "gdelt"
             }
 
     Notes:
@@ -324,7 +332,16 @@ def fetch_news(query: str, max_records: int = 50) -> list[dict[str, str]]:
         if len(all_rows) >= target * 2:
             break
 
-    cleaned = clean_news_data(all_rows)
+    tagged_rows = []
+    for row in all_rows:
+        if not isinstance(row, dict):
+            continue
+        tagged = dict(row)
+        tagged["topic"] = str(query or "").strip()
+        tagged["provider"] = "gdelt"
+        tagged_rows.append(tagged)
+
+    cleaned = clean_news_data(tagged_rows)
     return cleaned[:target]
 
 
@@ -361,7 +378,10 @@ def fetch_trending_topics() -> list[dict[str, Any]]:
             if not url or url in global_seen_urls:
                 continue
             global_seen_urls.add(url)
-            filtered.append(article)
+            tagged = dict(article)
+            tagged["topic"] = str(topic or "").strip()
+            tagged["provider"] = "gdelt"
+            filtered.append(tagged)
         if filtered:
             results.append({"topic": topic, "articles": filtered})
 

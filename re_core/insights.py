@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -92,7 +92,6 @@ class GrowthInsights:
             raise RuntimeError(f"google_api_client_missing:{_GOOGLE_CLIENT_IMPORT_ERROR}")
         if not self.credentials_path.exists():
             raise RuntimeError(f"token_missing:{self.credentials_path}")
-        # Keep token's original scope set to avoid invalid_scope refresh errors.
         creds = Credentials.from_authorized_user_file(str(self.credentials_path))
         if getattr(creds, "expired", False) or not getattr(creds, "token", None):
             try:
@@ -101,7 +100,7 @@ class GrowthInsights:
                 msg = str(exc or "").lower()
                 if "invalid_scope" in msg:
                     raise RuntimeError(
-                        "oauth_scope_mismatch: 설정 > Google 로그인에서 토큰을 다시 연결하세요."
+                        "oauth_scope_mismatch: Settings > Google login must be reconnected with webmasters.readonly."
                     ) from exc
                 raise
         return creds
@@ -167,26 +166,42 @@ class GrowthInsights:
             raise RuntimeError("search_console_site_url_missing")
         service = build("searchconsole", "v1", credentials=creds, cache_discovery=False)
         day = datetime.now(timezone.utc).date().isoformat()
-        response = (
-            service.searchanalytics()
-            .query(
-                siteUrl=site_url,
-                body={"startDate": day, "endDate": day, "rowLimit": 1},
+        clicks = 0.0
+        impressions = 0.0
+        start_row = 0
+        row_limit = 250
+        while start_row < 250:
+            response = (
+                service.searchanalytics()
+                .query(
+                    siteUrl=site_url,
+                    body={
+                        "startDate": day,
+                        "endDate": day,
+                        "dimensions": ["query", "page"],
+                        "rowLimit": row_limit,
+                        "startRow": start_row,
+                    },
+                )
+                .execute()
             )
-            .execute()
-        )
-        rows = response.get("rows", []) or []
-        if not rows:
-            return 0.0, 0.0
-        row = rows[0] or {}
-        return self._safe_float(row.get("clicks", 0)), self._safe_float(row.get("impressions", 0))
+            rows = response.get("rows", []) or []
+            if not rows:
+                break
+            for row in rows:
+                clicks += self._safe_float((row or {}).get("clicks", 0.0))
+                impressions += self._safe_float((row or {}).get("impressions", 0.0))
+            start_row += len(rows)
+            if len(rows) < row_limit:
+                break
+        return clicks, impressions
 
     def fetch_search_console_rows(
         self,
         start_date: str,
         end_date: str,
         dimensions: tuple[str, ...] = ("query", "page"),
-        page_size: int = 25000,
+        page_size: int = 250,
         max_rows: int = 50000,
     ) -> list[dict[str, Any]]:
         creds = self._oauth_credentials()
@@ -196,7 +211,7 @@ class GrowthInsights:
         dims = [str(x or "").strip() for x in (dimensions or ()) if str(x or "").strip()]
         if not dims:
             dims = ["query", "page"]
-        safe_page_size = max(1, min(25000, int(page_size)))
+        safe_page_size = max(1, min(250, int(page_size)))
         safe_max_rows = max(1, min(50000, int(max_rows)))
         service = build("searchconsole", "v1", credentials=creds, cache_discovery=False)
         out: list[dict[str, Any]] = []
@@ -271,3 +286,4 @@ class GrowthInsights:
             return float(str(value).replace(",", "").strip())
         except Exception:
             return 0.0
+

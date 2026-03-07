@@ -20,71 +20,66 @@ class PromptPack:
     persona_id: str = ""
 
 
-# ── Persona Pool (5개 로테이션) ───────────────────────
 _PERSONA_POOL = [
     {
         "id": "analyst",
-        "label": "Tech Analyst",
         "system": (
-            "You are a sharp, no-nonsense senior tech analyst writing for a high-traffic blog. "
-            "Break down complex topics into digestible insights with data-backed arguments. "
-            "Use precise language, cite numbers/benchmarks, and include a clear 'bottom line' takeaway. "
-            "Avoid fluff—every sentence must add value."
+            "You are a senior technology analyst. "
+            "Write clearly, use evidence, and explain why the topic matters to a practical reader."
         ),
-        "temperature": 0.80,
+        "temperature": 0.68,
     },
     {
-        "id": "storyteller",
-        "label": "Viral Storyteller",
+        "id": "editor",
         "system": (
-            "You are a brilliant tech storyteller who makes readers feel like they're watching a thriller unfold. "
-            "Use vivid metaphors, dramatic pacing, and cliffhanger transitions. "
-            "Turn dry tech news into gripping narratives. Short paragraphs, rapid-fire sentences, "
-            "occasional one-liners for emphasis. Keep the pacing strong without overselling the story."
+            "You are an experienced blog editor. "
+            "Prefer clean structure, readable flow, and useful context over hype."
         ),
-        "temperature": 0.92,
+        "temperature": 0.64,
     },
     {
-        "id": "educator",
-        "label": "Friendly Educator",
+        "id": "explainer",
         "system": (
-            "You are a patient, approachable tech educator writing for curious minds. "
-            "Explain concepts as if talking to a bright friend over coffee. "
-            "Use analogies, step-by-step breakdowns, and 'Why should I care?' sections. "
-            "Sprinkle in humor to keep things light. Make complex topics feel simple and actionable."
+            "You are a careful explainer. "
+            "Break down complicated topics into plain language without sounding simplistic."
         ),
-        "temperature": 0.85,
-    },
-    {
-        "id": "contrarian",
-        "label": "Devil's Advocate",
-        "system": (
-            "You are a provocative tech commentator who challenges mainstream narratives. "
-            "Start with a bold, counter-intuitive claim and back it up with evidence. "
-            "Use rhetorical questions, strategic sarcasm, and 'unpopular opinion' angles. "
-            "Your goal is to make readers think differently, not just consume passively."
-        ),
-        "temperature": 0.90,
+        "temperature": 0.66,
     },
     {
         "id": "practitioner",
-        "label": "Hands-On Practitioner",
         "system": (
-            "You are a battle-tested developer/engineer sharing real-world experience. "
-            "Focus on practical code snippets, config examples, and 'what I actually did' narratives. "
-            "Use casual dev-speak ('Let me show you the trick...', 'Here's the gotcha...'). "
-            "Include troubleshooting tips and edge cases that only experience reveals."
+            "You are a hands-on practitioner. "
+            "Focus on what changed, what it means, and what a reader can do with the information."
         ),
-        "temperature": 0.82,
+        "temperature": 0.7,
+    },
+    {
+        "id": "reviewer",
+        "system": (
+            "You are a measured reviewer. "
+            "Be specific, fair, and grounded in observable facts instead of dramatic claims."
+        ),
+        "temperature": 0.62,
     },
 ]
 
-
-# ── Ban tokens (AI 감지 회피) ─────────────────────────
 _GLOBAL_BAN_TOKENS = [
-    "in conclusion", "furthermore", "delve", "testament",
-    "tapestry", "seamlessly", "as an AI", "overall", "in summary",
-    "it is important to note", "it's worth noting",
+    "as an ai",
+    "in conclusion",
+    "in summary",
+    "overall",
+    "delve",
+    "testament",
+    "tapestry",
+    "seamlessly",
+    "it's worth noting",
+    "it is important to note",
+    "viral",
+    "shocking",
+    "unbelievable",
+    "detector-evasion language",
+    "hype-first phrasing",
+    "sensational filler",
 ]
 
 
@@ -123,40 +118,49 @@ class PromptFactory:
         return f"v{idx + 1}"
 
     def _select_persona(self, purpose: str, seed: str) -> dict:
-        """날짜+seed 해시 기반으로 5개 페르소나 중 하나를 자동 선택."""
         src = f"persona:{datetime.now(timezone.utc).date().isoformat()}:{purpose}:{seed}".encode("utf-8")
         idx = int(hashlib.sha256(src).hexdigest(), 16) % len(_PERSONA_POOL)
         return _PERSONA_POOL[idx]
 
     def _build_default_pack(self, purpose: str, style_variant_id: str, persona: dict) -> PromptPack:
         system = str(persona.get("system", ""))
-        user = "Deliver specific, useful, evidence-first reader value."
+        user = (
+            "Deliver a clear, useful, practical article in a natural blog tone. "
+            "Prefer informational value, concrete details, and evidence-first framing."
+        )
         must_include: list[str] = []
         ban_tokens = list(_GLOBAL_BAN_TOKENS)
-        temperature = float(persona.get("temperature", 0.85))
-        top_p = 0.95
+        temperature = float(persona.get("temperature", 0.66))
+        top_p = 0.9
         persona_id = str(persona.get("id", ""))
 
         if purpose in {"headline", "choose_best"}:
             system = (
                 "You are a senior editorial headline strategist. "
-                "Write specific, useful, ad-safe headlines that create curiosity without sounding manipulative. "
-                "Prioritize clarity, evidence, and strong reader value."
+                "Write headlines that are clear, useful, specific, and ad-safe."
             )
-            user = "Generate a specific, useful, evidence-first headline for a tech or consumer story."
-            must_include = []
-            temperature = 0.72
-        elif purpose == "rewrite_to_actionable":
             user = (
-                "Rewrite the source material into a practical, readable article. "
-                "Vary sentence rhythm naturally, keep transitions fresh, and avoid boilerplate phrasing. "
-                "Prefer concrete examples, useful detail, and ad-safe wording."
+                "Generate a headline that reflects the real article value. "
+                "Do not exaggerate, sensationalize, or manufacture false urgency."
             )
-            temperature = 0.78
+            temperature = 0.55
+        elif purpose == "rewrite_to_actionable":
+            system = (
+                "You are an editorial rewrite assistant. "
+                "Improve clarity and usefulness while keeping the tone natural and grounded."
+            )
+            user = (
+                "Rewrite the source into a practical, readable article. "
+                "Avoid clickbait phrasing, hype, detector-evasion language, and templated filler."
+            )
+            temperature = 0.64
         elif purpose == "extract_keywords":
-            system = "You are an SEO editor focused on real search demand."
-            user = "Extract specific long-tail keywords and questions that reflect real user search intent."
-            temperature = 0.5
+            system = "You are an SEO editor focused on genuine search intent."
+            user = (
+                "Extract practical long-tail keywords and reader questions. "
+                "Favor terms a real searcher would type."
+            )
+            temperature = 0.4
 
         return PromptPack(
             purpose=purpose,
