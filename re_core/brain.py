@@ -611,7 +611,12 @@ class GeminiBrain:
         category: str,
         plan: dict | None = None,
     ) -> DraftPost:
-        source_link = str(getattr(candidate, "url", "") or "").strip()
+        plan_payload = dict(plan or {})
+        content_type = str(plan_payload.get("content_type", "hot") or "hot").strip().lower() or "hot"
+        target_min_words = max(700, int(plan_payload.get("min_words", 1800) or 1800))
+        target_max_words = max(target_min_words, int(plan_payload.get("max_words", 2200) or 2200))
+        source_strategy = str(plan_payload.get("source_strategy", "news_source_plus_corroboration") or "news_source_plus_corroboration").strip().lower()
+        source_link = "" if source_strategy == "authority_first" else str(getattr(candidate, "url", "") or "").strip()
         safe_authorities = [
             re.sub(r"\s+", " ", str(x or "").strip())
             for x in (authority_links or [])
@@ -651,8 +656,17 @@ class GeminiBrain:
             "what_to_watch_signal_list",
         ]
         selected_modules, _rotation_fallback, _recent_modules = self._select_news_modules(module_pool)
-        plan_payload = dict(plan or {})
         category_norm = normalize_category(category)
+        depth_line = f"Target depth: roughly {target_min_words}-{target_max_words} words."
+        section_depth_line = (
+            "Each major H2 section should contain 1-2 focused paragraphs with concrete implications."
+            if target_max_words <= 1000
+            else (
+                "Each major H2 section should contain 2-3 grounded paragraphs with concrete implications, examples, or tradeoffs."
+                if target_max_words <= 1500
+                else "Each major H2 section should contain 2-4 substantial paragraphs, not placeholder filler."
+            )
+        )
         primary_topic = re.sub(
             r"\s+",
             " ",
@@ -760,14 +774,16 @@ class GeminiBrain:
             for idx, title in enumerate(section_titles)
         )
         specific_actions = category_norm in {"security", "policy", "platform"}
-        what_to_do_rule = (
-            "Include a 'What To Do Now' H2 section near the end, immediately before Sources.\n"
-            f"'What To Do Now' must contain exactly {facet_context.action_count} bullet steps.\n"
-            + (
-                "For security/policy/platform events, each step must be concrete and operationally specific.\n"
-                if specific_actions
-                else "Keep the action steps concise, practical, and verifiable.\n"
-            )
+        what_to_do_rule = "".join(
+            [
+                "Include a 'What To Do Now' H2 section near the end, immediately before Sources.\n",
+                f"'What To Do Now' must contain exactly {facet_context.action_count} bullet steps.\n",
+                (
+                    "For security/policy/platform events, each step must be concrete and operationally specific.\n"
+                    if specific_actions
+                    else "Keep the action steps concise, practical, and verifiable.\n"
+                ),
+            ]
         )
         perspective_hint = facet_emphasis_hint(facet_context.selected_facet)
         plan_payload["retry_index"] = int(facet_context.retry_index_effective)
@@ -827,56 +843,63 @@ class GeminiBrain:
                 extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
             )
 
-        prompt = (
-            "Write a US tech news explainer article in valid HTML body fragment only.\n"
-            "Language policy: US English only. Never output Korean.\n"
-            "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
-            "Tone: factual, natural, ad-safe, and attribution-first.\n"
-            "No defamation. No unverified allegations.\n"
-            "Use attribution phrasing for uncertain claims: reported, may, could, according to.\n"
-            "Apply perspective emphasis implicitly in section focus and sentence priority. "
-            "Never print internal planning labels.\n"
-            f"Perspective emphasis hint: {perspective_hint}\n"
-            "Write like a sharp American news explainer, not like a generic AI summary.\n"
-            "Do not write like a template. Vary transitions and avoid repeated phrases like 'In conclusion'.\n"
-            "Avoid uniform paragraph lengths; mix 1-line punches with longer analysis.\n"
-            "Do not write as a troubleshooting fix guide.\n"
-            "Never use troubleshooting headings such as Symptoms, Why This Happens, Fix 1, Fix 2, Fix 3, If None Worked, or Prevention Checklist.\n"
-            "Do NOT include FAQ section.\n"
-            "Required core H2 sections (must appear exactly once): Quick Take, What Happened, Sources.\n"
-            f"Use exactly {section_count} H2 sections for this run (minimum H2 count: 5).\n"
-            "Do not enforce a rigid template beyond this run plan.\n"
-            "H2 section order for this run (follow exactly):\n"
-            f"{section_order_text}\n"
-            f"Intro pattern for Quick Take: {rendered_structure.get('intro_template', '')}\n"
-            f"Conclusion pattern (place as the final paragraph before Sources): {rendered_structure.get('conclusion_template', '')}\n"
-            f"Paragraph-length rhythm by section: {paragraph_plan}\n"
-            "Under Quick Take, include:\n"
-            "- LEDE: 2-3 short sentences\n"
-            "- NUT GRAF: exactly 1 paragraph explaining why now and why it matters\n"
-            "- Key Facts box as <ul> with exactly 5 short bullets covering Who/What/When/Scope/Risk.\n"
-            "  If unknown, write 'Not confirmed'.\n"
-            f"{what_to_do_rule}"
-            "The article must include at least 2 question sentences and one explicit comparison/example block.\n"
-            "Target depth: roughly 1800-2000 words for editorial completeness.\n"
-            "Each major H2 section should contain 2-4 substantial paragraphs, not placeholder filler.\n"
-            "Give mainstream American readers concrete implications, tradeoffs, and a few realistic examples.\n"
-            f"Use 6-8 diversity modules from this pool: {selected_modules}\n"
-            f"Module placement map (vary rhythm): {module_slots}\n"
-            "In Sources, show publisher-labeled links (not raw URL text).\n"
-            "Sources must include the original source URL exactly once and 1-2 authority links when available.\n"
-            "Never include google.com/search, googleusercontent, or googleapis links.\n"
-            "No screenshots, no logo references, no copyright-sensitive image instructions.\n"
-            "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n"
-            "focus_keywords must be a JSON array.\n"
-            f"News category: {category_norm}\n"
-            f"Primary topic phrase: {primary_topic}\n"
-            f"Original source URL: {source_link}\n"
-            f"Authority links allow-list: {safe_authorities}\n"
-            f"Reference guidance: {reference_guidance}\n"
-            f"Plan JSON: {json.dumps(plan_payload, ensure_ascii=False) if plan_payload else '{}'}\n"
-            f"Source title: {candidate.title}\n"
-            f"Source body: {candidate.body[:9000]}\n"
+        prompt = "".join(
+            [
+                "Write a US tech news explainer article in valid HTML body fragment only.\n",
+                "Language policy: US English only. Never output Korean.\n",
+                "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n",
+                "Tone: factual, natural, ad-safe, and attribution-first.\n",
+                "No defamation. No unverified allegations.\n",
+                "Use attribution phrasing for uncertain claims: reported, may, could, according to.\n",
+                "Apply perspective emphasis implicitly in section focus and sentence priority. "
+                "Never print internal planning labels.\n",
+                f"Perspective emphasis hint: {perspective_hint}\n",
+                "Write like a sharp American news explainer, not like a generic AI summary.\n",
+                "Do not write like a template. Vary transitions and avoid repeated phrases like 'In conclusion'.\n",
+                "Avoid uniform paragraph lengths; mix 1-line punches with longer analysis.\n",
+                "Do not write as a troubleshooting fix guide.\n",
+                "Never use troubleshooting headings such as Symptoms, Why This Happens, Fix 1, Fix 2, Fix 3, If None Worked, or Prevention Checklist.\n",
+                "Do NOT include FAQ section.\n",
+                "Required core H2 sections (must appear exactly once): Quick Take, What Happened, Sources.\n",
+                f"Use exactly {section_count} H2 sections for this run (minimum H2 count: 5).\n",
+                "Do not enforce a rigid template beyond this run plan.\n",
+                "H2 section order for this run (follow exactly):\n",
+                f"{section_order_text}\n",
+                f"Intro pattern for Quick Take: {rendered_structure.get('intro_template', '')}\n",
+                f"Conclusion pattern (place as the final paragraph before Sources): {rendered_structure.get('conclusion_template', '')}\n",
+                f"Paragraph-length rhythm by section: {paragraph_plan}\n",
+                "Under Quick Take, include:\n",
+                "- LEDE: 2-3 short sentences\n",
+                "- NUT GRAF: exactly 1 paragraph explaining why now and why it matters\n",
+                "- Key Facts box as <ul> with exactly 5 short bullets covering Who/What/When/Scope/Risk.\n",
+                "  If unknown, write 'Not confirmed'.\n",
+                f"{what_to_do_rule}",
+                "The article must include at least 2 question sentences and one explicit comparison/example block.\n",
+                f"{depth_line}\n",
+                f"{section_depth_line}\n",
+                "Give mainstream American readers concrete implications, tradeoffs, and a few realistic examples.\n",
+                f"Use 6-8 diversity modules from this pool: {selected_modules}\n",
+                f"Module placement map (vary rhythm): {module_slots}\n",
+                "In Sources, show publisher-labeled links (not raw URL text).\n",
+                (
+                    "Sources must use relevant authority links only. Do not invent a placeholder source URL.\n"
+                    if source_strategy == "authority_first"
+                    else "Sources must include the original source URL exactly once and 1-2 authority links when available.\n"
+                ),
+                "Never include google.com/search, googleusercontent, or googleapis links.\n",
+                "No screenshots, no logo references, no copyright-sensitive image instructions.\n",
+                "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n",
+                "focus_keywords must be a JSON array.\n",
+                f"News category: {category_norm}\n",
+                f"Content type: {content_type}\n",
+                f"Primary topic phrase: {primary_topic}\n",
+                f"Original source URL: {source_link}\n",
+                f"Authority links allow-list: {safe_authorities}\n",
+                f"Reference guidance: {reference_guidance}\n",
+                f"Plan JSON: {json.dumps(plan_payload, ensure_ascii=False) if plan_payload else '{}'}\n",
+                f"Source title: {candidate.title}\n",
+                f"Source body: {candidate.body[:9000]}\n",
+            ]
         )
         payload = self._extract_json(
             self._generate_text(
@@ -907,12 +930,12 @@ class GeminiBrain:
             if retry_html:
                 html = retry_html
                 payload = retry_payload
-        if self._news_needs_depth_retry(html, min_words=1800):
+        if self._news_needs_depth_retry(html, min_words=target_min_words):
             depth_retry_prompt = (
                 prompt
                 + "\n\nREWRITE REQUIRED: previous output was too short, too generic, or drifted into a troubleshooting template. "
                 "Regenerate the full article as a real news explainer only. "
-                "Minimum target: 1800 words. "
+                f"Minimum target: {target_min_words} words. "
                 "Use Quick Take, What Happened, Why It Matters, Key Details, What To Watch Next, What To Do Now, and Sources. "
                 "Do not use Fix-style headings."
             )
@@ -960,13 +983,17 @@ class GeminiBrain:
         outline_plan: OutlinePlan,
         plan: dict | None = None,
     ) -> DraftPost:
-        source_link = str(getattr(candidate, "url", "") or "").strip()
+        payload_plan = dict(plan or {})
+        content_type = str(payload_plan.get("content_type", "hot") or "hot").strip().lower() or "hot"
+        target_min_words = max(700, int(payload_plan.get("min_words", 1800) or 1800))
+        target_max_words = max(target_min_words, int(payload_plan.get("max_words", 2200) or 2200))
+        source_strategy = str(payload_plan.get("source_strategy", "news_source_plus_corroboration") or "news_source_plus_corroboration").strip().lower()
+        source_link = "" if source_strategy == "authority_first" else str(getattr(candidate, "url", "") or "").strip()
         safe_authorities = [
             re.sub(r"\s+", " ", str(x or "").strip())
             for x in (authority_links or [])
             if str(x or "").strip()
         ][:8]
-        payload_plan = dict(plan or {})
         category_norm = normalize_category(category)
         section_order_text = "\n".join(outline_plan.section_titles)
         paragraph_plan = "; ".join(
@@ -993,6 +1020,16 @@ class GeminiBrain:
             for x in (intent_bundle.negative_angles or [])
             if str(x or "").strip()
         ][:4]
+        depth_line = f"Target depth: roughly {target_min_words}-{target_max_words} words."
+        section_depth_line = (
+            "Each major H2 should contain 1-2 concise paragraphs with direct value."
+            if target_max_words <= 1000
+            else (
+                "Each major H2 should contain 2-3 grounded paragraphs with practical implications."
+                if target_max_words <= 1500
+                else "Each major H2 should contain 2-4 real paragraphs with concrete implications, examples, or tradeoffs."
+            )
+        )
 
         def _render_news_html(payload_obj: dict) -> str:
             body_html = str(payload_obj.get("content_html", payload_obj.get("html", "")) or "")
@@ -1010,45 +1047,53 @@ class GeminiBrain:
                 authority_links=safe_authorities,
             )
 
-        prompt = (
-            "Write a US tech or consumer news explainer in valid HTML body fragment only.\n"
-            "Language policy: US English only. Never output Korean.\n"
-            "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
-            "Tone: factual, natural, useful, ad-safe, and attribution-first.\n"
-            "Do not sound like clickbait. Do not write like a generic AI summary. Vary sentence rhythm naturally.\n"
-            "No defamation. No unverified allegations. Use attribution phrasing when details are not fully confirmed.\n"
-            f"Primary search intent: {intent_bundle.primary_query}\n"
-            f"Audience: {intent_bundle.audience}\n"
-            f"Content kind: {intent_bundle.content_kind}\n"
-            f"Recommended archetypes: {list(intent_bundle.recommended_archetypes or [])}\n"
-            f"Selected archetype: {outline_plan.archetype}\n"
-            "H2 section order for this run (follow exactly):\n"
-            f"{section_order_text}\n"
-            f"Intro pattern: {outline_plan.intro_template}\n"
-            f"Conclusion pattern: {outline_plan.conclusion_template}\n"
-            f"Paragraph rhythm: {paragraph_plan}\n"
-            "Intent questions to answer naturally:\n"
-            + "\n".join(f"- {item}" for item in questions)
-            + "\nSupporting search queries to cover naturally:\n"
-            + "\n".join(f"- {item}" for item in supporting_queries)
-            + "\nOutline brief to respect:\n"
-            + "\n".join(f"- {item}" for item in outline_brief)
-            + "\nAngles to avoid:\n"
-            + "\n".join(f"- {item}" for item in negative_angles)
-            + "\n"
-            "Required core H2 sections: Quick Take, What Happened, What To Do Now, Sources.\n"
-            "Target depth: roughly 1800-2000 words.\n"
-            "Each major H2 should contain 2-4 real paragraphs with concrete implications, examples, or tradeoffs.\n"
-            "Under Quick Take, include a 2-3 sentence lede and a 5-bullet key facts list.\n"
-            "In Sources, show publisher-labeled links, not raw URL text.\n"
-            "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n"
-            f"News category: {category_norm}\n"
-            f"Reference guidance: {reference_guidance}\n"
-            f"Authority links allow-list: {safe_authorities}\n"
-            f"Plan JSON: {json.dumps(payload_plan, ensure_ascii=False)}\n"
-            f"Source title: {candidate.title}\n"
-            f"Source body: {candidate.body[:9000]}\n"
-            f"Source URL: {source_link}\n"
+        prompt = "".join(
+            [
+                "Write a US tech or consumer news explainer in valid HTML body fragment only.\n",
+                "Language policy: US English only. Never output Korean.\n",
+                "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n",
+                "Tone: factual, natural, useful, ad-safe, and attribution-first.\n",
+                "Do not sound like clickbait. Do not write like a generic AI summary. Vary sentence rhythm naturally.\n",
+                "No defamation. No unverified allegations. Use attribution phrasing when details are not fully confirmed.\n",
+                f"Primary search intent: {intent_bundle.primary_query}\n",
+                f"Audience: {intent_bundle.audience}\n",
+                f"Content kind: {intent_bundle.content_kind}\n",
+                f"Recommended archetypes: {list(intent_bundle.recommended_archetypes or [])}\n",
+                f"Selected archetype: {outline_plan.archetype}\n",
+                "H2 section order for this run (follow exactly):\n",
+                f"{section_order_text}\n",
+                f"Intro pattern: {outline_plan.intro_template}\n",
+                f"Conclusion pattern: {outline_plan.conclusion_template}\n",
+                f"Paragraph rhythm: {paragraph_plan}\n",
+                "Intent questions to answer naturally:\n",
+                "\n".join(f"- {item}" for item in questions),
+                "\nSupporting search queries to cover naturally:\n",
+                "\n".join(f"- {item}" for item in supporting_queries),
+                "\nOutline brief to respect:\n",
+                "\n".join(f"- {item}" for item in outline_brief),
+                "\nAngles to avoid:\n",
+                "\n".join(f"- {item}" for item in negative_angles),
+                "\n",
+                "Required core H2 sections: Quick Take, What Happened, What To Do Now, Sources.\n",
+                f"{depth_line}\n",
+                f"{section_depth_line}\n",
+                "Under Quick Take, include a 2-3 sentence lede and a 5-bullet key facts list.\n",
+                "In Sources, show publisher-labeled links, not raw URL text.\n",
+                (
+                    "Sources must use relevant authority links only. Do not invent a placeholder source URL.\n"
+                    if source_strategy == "authority_first"
+                    else ""
+                ),
+                "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n",
+                f"News category: {category_norm}\n",
+                f"Content type: {content_type}\n",
+                f"Reference guidance: {reference_guidance}\n",
+                f"Authority links allow-list: {safe_authorities}\n",
+                f"Plan JSON: {json.dumps(payload_plan, ensure_ascii=False)}\n",
+                f"Source title: {candidate.title}\n",
+                f"Source body: {candidate.body[:9000]}\n",
+                f"Source URL: {source_link}\n",
+            ]
         )
         payload = self._extract_json(
             self._generate_text(
@@ -1059,7 +1104,7 @@ class GeminiBrain:
             )
         )
         html = _render_news_html(payload)
-        if self._news_needs_depth_retry(html, min_words=1800):
+        if self._news_needs_depth_retry(html, min_words=target_min_words):
             retry_prompt = (
                 prompt
                 + "\n\nREWRITE REQUIRED: previous output was too short or too generic. "
@@ -1270,14 +1315,16 @@ class GeminiBrain:
         text = re.sub(r"<[^>]+>", " ", src)
         text = re.sub(r"\s+", " ", text).strip()
         words = len(re.findall(r"[A-Za-z0-9']+", text))
-        if words < max(900, int(min_words)):
+        minimum = max(700, int(min_words))
+        if words < minimum:
             return True
 
         h2_titles = [
             re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", part)).strip().lower()
             for part in re.findall(r"<h2[^>]*>(.*?)</h2>", src, flags=re.IGNORECASE | re.DOTALL)
         ]
-        if len(h2_titles) < 6:
+        minimum_h2 = 5 if minimum <= 1000 else 6
+        if len(h2_titles) < minimum_h2:
             return True
 
         required_titles = ("quick take", "what happened", "what to do now", "sources")

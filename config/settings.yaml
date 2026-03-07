@@ -332,7 +332,7 @@ structure_randomization:
   fingerprint_ttl_days: 30
   max_attempts: 3
 content_allocation:
-  enabled: false
+  enabled: true
   mix_hot: 2
   mix_search_derived: 2
   mix_evergreen: 1

@@ -495,7 +495,7 @@ class StructureRandomizationSettings:
 
 @dataclass
 class ContentAllocationSettings:
-    enabled: bool = False
+    enabled: bool = True
     mix_hot: int = 2
     mix_search_derived: int = 2
     mix_evergreen: int = 1

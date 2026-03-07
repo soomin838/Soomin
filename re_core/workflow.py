@@ -7,7 +7,7 @@ import random
 import time
 import threading
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -35,7 +35,7 @@ from re_core.services.news_collector import fetch_trending_topics
 from re_core.services.search_intent import IntentBundle, SearchIntentGenerator
 from re_core.services.keyword_discovery import DiscoveryOpportunity, KeywordDiscovery
 from re_core.services.topic_scoring import TopicScoring
-from re_core.services.content_allocation import ContentAllocationEngine
+from re_core.services.content_allocation import ContentAllocationEngine, ContentPolicy
 from re_core.news_pack_manifest import NewsPackManifest
 from re_core.news_pack_picker import NewsPackPicker
 
@@ -62,6 +62,7 @@ from re_core.story_profile import (
     assess_tech_news_topic,
     build_story_tags,
     filter_relevant_authority_links,
+    infer_news_category,
     infer_story_profile,
 )
 from re_core.preflight import validate_secrets
@@ -208,6 +209,7 @@ class AgentWorkflow:
         self._global_keyword_cache: tuple[datetime, list[str]] | None = None
         self._global_keyword_cache_ttl_seconds = 1800
         self.last_global_keywords: list[str] = []
+        self._active_content_policy: dict[str, Any] = {}
         self._pending_keyword_claims: list[str] = []
         self._kst = timezone(timedelta(hours=9))
         self._keyword_pool_path = self.root / "storage" / "logs" / "keyword_pool.json"
@@ -701,16 +703,39 @@ class AgentWorkflow:
         include_image_integrity: bool | None = None,
         phase: str = "post_images",
     ):
-        return self._profile_call(
-            stage=f"qa_evaluate:{context}",
-            fn=lambda: self.qa.evaluate(
+        active_policy = dict(getattr(self, "_active_content_policy", {}) or {})
+        min_words_override = int(active_policy.get("min_words", 0) or 0)
+        max_words_override = int(active_policy.get("max_words", 0) or 0)
+
+        def _evaluate() -> Any:
+            gate = self.qa
+            if min_words_override or max_words_override:
+                qa_settings = replace(
+                    self.qa.settings,
+                    min_word_count=max(300, min_words_override or int(getattr(self.qa.settings, "min_word_count", 1800) or 1800)),
+                    max_word_count=max(
+                        max_words_override or int(getattr(self.qa.settings, "max_word_count", 2200) or 2200),
+                        min_words_override or int(getattr(self.qa.settings, "min_word_count", 1800) or 1800),
+                    ),
+                )
+                gate = ContentQAGate(
+                    qa_settings,
+                    list(getattr(self.qa, "authority_links", []) or []),
+                    qa_runtime_path=getattr(self.qa, "qa_runtime_path", None),
+                    ollama_client=getattr(self.qa, "ollama_client", None),
+                )
+            return gate.evaluate(
                 html,
                 title=title,
                 domain=domain,
                 keyword=keyword,
                 include_image_integrity=include_image_integrity,
                 phase=phase,
-            ),
+            )
+
+        return self._profile_call(
+            stage=f"qa_evaluate:{context}",
+            fn=_evaluate,
             slow_ms=1200,
             meta={
                 "domain": str(domain or ""),
@@ -749,7 +774,11 @@ class AgentWorkflow:
     def _build_news_word_count_expansion(self, *, html: str, source_url: str = "") -> str:
         metrics = self._news_html_metrics(html)
         quality = getattr(self.settings, "quality", None)
-        target_words = max(1200, int(getattr(quality, "min_word_count", 1800) or 1800))
+        active_policy = dict(getattr(self, "_active_content_policy", {}) or {})
+        target_words = max(
+            700,
+            int(active_policy.get("min_words", 0) or getattr(quality, "min_word_count", 1800) or 1800),
+        )
         current_words = int(metrics.get("word_count", 0) or 0)
         deficit = max(0, target_words - current_words)
         if deficit <= 0:
@@ -1009,6 +1038,10 @@ class AgentWorkflow:
         return current, logs
 
     def _image_target_max(self) -> int:
+        active_policy = dict(getattr(self, "_active_content_policy", {}) or {})
+        policy_max = int(active_policy.get("max_images", 0) or 0)
+        if policy_max > 0:
+            return max(0, policy_max)
         configured_max = int(getattr(self.settings.publish, "max_images_per_post", 5) or 5)
         visual_target = int(getattr(self.settings.visual, "target_images_per_post", configured_max) or configured_max)
         if is_news_mode(self.settings):
@@ -1016,6 +1049,10 @@ class AgentWorkflow:
         return max(0, min(5, configured_max, visual_target))
 
     def _image_min_required(self) -> int:
+        active_policy = dict(getattr(self, "_active_content_policy", {}) or {})
+        policy_min = int(active_policy.get("min_images", 0) or 0)
+        if policy_min > 0:
+            return max(0, min(self._image_target_max(), policy_min))
         requested = int(getattr(self.settings.publish, "min_images_required", 0) or 0)
         if is_news_mode(self.settings):
             return max(0, min(self._image_target_max(), max(1, requested)))
@@ -1793,6 +1830,284 @@ class AgentWorkflow:
         except Exception:
             return
 
+    def _content_day_kst(self) -> str:
+        return datetime.now(self._kst).date().isoformat()
+
+    def _today_content_type_counts(self) -> dict[str, int]:
+        counts = {"hot": 0, "search_derived": 0, "evergreen": 0}
+        path = self.root / "storage" / "logs" / "publish_metadata.jsonl"
+        if not path.exists():
+            return counts
+        day_kst = self._content_day_kst()
+        try:
+            for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = str(raw_line or "").strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                ts_raw = str((row or {}).get("ts_utc", "") or "").strip()
+                try:
+                    ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    if ts.astimezone(self._kst).date().isoformat() != day_kst:
+                        continue
+                except Exception:
+                    continue
+                content_type = str((row or {}).get("content_type", "") or "").strip().lower()
+                if content_type in counts:
+                    counts[content_type] += 1
+        except Exception:
+            return counts
+        return counts
+
+    def _resolve_candidate_content_type(self, candidate: TopicCandidate | None) -> str:
+        if candidate is None:
+            return "hot"
+        meta = dict(getattr(candidate, "meta", {}) or {})
+        explicit = str(meta.get("content_type", "") or "").strip().lower()
+        if explicit in {"hot", "search_derived", "evergreen"}:
+            return explicit
+        if bool(meta.get("opportunity_source", False)) or str(getattr(candidate, "source", "") or "").strip().lower() == "search_console":
+            return "search_derived"
+        if str(getattr(candidate, "source", "") or "").strip().lower() in {"topic_growth", "manual", "seed"}:
+            return "evergreen"
+        return "hot"
+
+    def _content_policy_for_candidate(
+        self,
+        candidate: TopicCandidate | None,
+        requested_type: str = "",
+    ) -> ContentPolicy:
+        content_type = str(requested_type or self._resolve_candidate_content_type(candidate) or "hot").strip().lower()
+        return self.content_allocator.policy_for(content_type)
+
+    def _annotate_candidate_content_policy(
+        self,
+        candidate: TopicCandidate,
+        requested_type: str = "",
+    ) -> dict[str, Any]:
+        policy = self._content_policy_for_candidate(candidate, requested_type=requested_type)
+        meta = dict(getattr(candidate, "meta", {}) or {})
+        category = str(meta.get("news_category", "") or "").strip().lower()
+        if not category or category in {"search_derived", "evergreen", "hot"}:
+            category = infer_news_category(f"{getattr(candidate, 'title', '')} {getattr(candidate, 'body', '')}", explicit=category)
+        meta["news_category"] = category or "platform"
+        meta["content_type"] = str(policy.content_type)
+        meta["content_policy"] = asdict(policy)
+        candidate.meta = meta
+        return dict(meta)
+
+    def _search_derived_candidates(self, limit: int = 6) -> list[TopicCandidate]:
+        out: list[TopicCandidate] = []
+        for candidate in self._supporting_discovery_candidates(limit=max(1, int(limit))):
+            meta = self._annotate_candidate_content_policy(candidate, requested_type="search_derived")
+            category = str(meta.get("news_category", "") or "platform")
+            candidate.url = ""
+            if not self._candidate_matches_content_mode(candidate):
+                continue
+            allowed, _, _ = self._policy_gate_candidate(
+                title=str(getattr(candidate, "title", "") or ""),
+                snippet=str(getattr(candidate, "body", "") or ""),
+                body_excerpt="",
+                category=category,
+                route="news",
+                source_url="",
+            )
+            if allowed:
+                out.append(candidate)
+        return sorted(out, key=lambda row: int(getattr(row, "score", 0) or 0), reverse=True)
+
+    def _evergreen_candidates(self, limit: int = 8) -> list[TopicCandidate]:
+        recent_titles = {
+            str((row or {}).get("title", "") or "").strip().lower()
+            for row in self.logs.get_recent_topic_history(days=120, limit=600)
+            if str((row or {}).get("title", "") or "").strip()
+        }
+        out: list[TopicCandidate] = []
+        for candidate in list(self.scout._collect_seeds() or []):  # noqa: SLF001
+            title_key = str(getattr(candidate, "title", "") or "").strip().lower()
+            if not title_key or title_key in recent_titles:
+                continue
+            meta = self._annotate_candidate_content_policy(candidate, requested_type="evergreen")
+            category = str(meta.get("news_category", "") or "platform")
+            url = str(getattr(candidate, "url", "") or "").strip().lower()
+            if not url or "example.com" in url:
+                candidate.url = ""
+            if not self._candidate_matches_content_mode(candidate):
+                continue
+            allowed, _, _ = self._policy_gate_candidate(
+                title=str(getattr(candidate, "title", "") or ""),
+                snippet=str(getattr(candidate, "body", "") or ""),
+                body_excerpt="",
+                category=category,
+                route="news",
+                source_url=str(getattr(candidate, "url", "") or ""),
+            )
+            if allowed:
+                out.append(candidate)
+            if len(out) >= max(1, int(limit)):
+                break
+        return sorted(out, key=lambda row: int(getattr(row, "score", 0) or 0), reverse=True)
+
+    def _allocation_candidate_type_order(self) -> list[str]:
+        if not bool(getattr(self.settings.content_allocation, "enabled", False)):
+            return ["hot", "search_derived", "evergreen"]
+        return self.content_allocator.next_content_types(
+            day=self._content_day_kst(),
+            published_counts=self._today_content_type_counts(),
+        )
+
+    def _claim_hot_news_candidate(
+        self,
+        *,
+        run_start_minute: str,
+        retry_event_id: str,
+        degraded_note: str,
+    ) -> tuple[TopicCandidate | None, dict[str, Any] | None, int, str, int, int, str]:
+        claimed_item: dict[str, Any] | None = None
+        selected: TopicCandidate | None = None
+        claimed_id = 0
+        cluster_id = ""
+        cluster_skip_count = 0
+        retry_event_mismatch_count = 0
+        excluded_claim_ids: set[int] = set()
+        retry_event_filter = str(retry_event_id or "").strip()
+        max_claim_attempts = 6
+        current_note = str(degraded_note or "")
+        for claim_try in range(1, max_claim_attempts + 1):
+            claimed_item = self._profile_call(
+                "news_pool_claim",
+                lambda: self._claim_news_item(
+                    force_refresh_once=bool(claim_try == 1),
+                    retry_event_id=retry_event_filter,
+                    exclude_item_ids=sorted(excluded_claim_ids),
+                ),
+                slow_ms=1800,
+            )
+            if not claimed_item:
+                break
+            attempt_claimed_id = int((claimed_item or {}).get("id", 0) or 0)
+            if attempt_claimed_id > 0 and attempt_claimed_id in excluded_claim_ids:
+                try:
+                    self.news_pool_store.rollback_claim(attempt_claimed_id)
+                except Exception:
+                    pass
+                continue
+            attempt_selected = self._news_item_to_candidate(claimed_item)
+            attempt_category = str((attempt_selected.meta or {}).get("news_category", "") or "").strip().lower()
+            allowed_news, deny_reason, _ = self._policy_gate_candidate(
+                title=str(getattr(attempt_selected, "title", "") or ""),
+                snippet=str(getattr(attempt_selected, "body", "") or ""),
+                body_excerpt="",
+                category=attempt_category,
+                route="news",
+                source_url=str(getattr(attempt_selected, "url", "") or ""),
+            )
+            if not allowed_news:
+                if attempt_claimed_id > 0:
+                    excluded_claim_ids.add(attempt_claimed_id)
+                    try:
+                        self.news_pool_store.mark_used(attempt_claimed_id, deny_reason)
+                    except Exception:
+                        try:
+                            self.news_pool_store.rollback_claim(attempt_claimed_id)
+                        except Exception:
+                            pass
+                current_note = self._append_note(current_note, deny_reason)
+                continue
+            if str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower() == "tech_news_only":
+                attempt_assessment = self._assess_tech_news_candidate(
+                    title=str(getattr(attempt_selected, "title", "") or ""),
+                    snippet=str(getattr(attempt_selected, "body", "") or ""),
+                    category=attempt_category,
+                    source_url=str(getattr(attempt_selected, "url", "") or ""),
+                    topic=str((attempt_selected.meta or {}).get("news_topic", "") or ""),
+                )
+                if not attempt_assessment.allow:
+                    skip_reason = f"tech_news_only_skip:{attempt_assessment.reason}"
+                    self._log_news_mode_guard("claim_topic_gate", attempt_assessment.reason)
+                    if attempt_claimed_id > 0:
+                        excluded_claim_ids.add(attempt_claimed_id)
+                        try:
+                            self.news_pool_store.mark_skipped(attempt_claimed_id, skip_reason)
+                        except Exception:
+                            try:
+                                self.news_pool_store.rollback_claim(attempt_claimed_id)
+                            except Exception:
+                                pass
+                    current_note = self._append_note(current_note, skip_reason)
+                    continue
+            attempt_event_id = str(
+                (attempt_selected.meta or {}).get("event_id", "")
+                or (attempt_selected.meta or {}).get("news_event_id", "")
+                or (attempt_selected.meta or {}).get("news_pool_id", "")
+                or attempt_claimed_id
+            ).strip()
+            if retry_event_filter and attempt_event_id != retry_event_filter:
+                retry_event_mismatch_count += 1
+                if attempt_claimed_id > 0:
+                    excluded_claim_ids.add(attempt_claimed_id)
+                try:
+                    self.news_pool_store.rollback_claim(attempt_claimed_id)
+                except Exception:
+                    pass
+                continue
+            cluster_decision = self.news_cluster_engine.assign_cluster(
+                event_id=attempt_event_id,
+                title=str(getattr(attempt_selected, "title", "") or ""),
+                body=str(getattr(attempt_selected, "body", "") or ""),
+                run_start_minute=str(run_start_minute or "").strip(),
+            )
+            attempt_meta = dict(getattr(attempt_selected, "meta", {}) or {})
+            attempt_meta["cluster_id"] = str(cluster_decision.cluster_id or "")
+            attempt_meta["cluster_similarity"] = float(cluster_decision.best_similarity)
+            attempt_meta["cluster_matched_existing"] = bool(cluster_decision.matched_existing)
+            attempt_selected.meta = attempt_meta
+            attempt_cluster_id = str(attempt_meta.get("cluster_id", "") or "")
+            if should_skip_same_run(attempt_cluster_id, self._seen_cluster_ids_in_run):
+                cluster_skip_count += 1
+                if attempt_claimed_id > 0:
+                    excluded_claim_ids.add(attempt_claimed_id)
+                current_note = self._append_note(
+                    current_note,
+                    f"cluster_skip_same_cycle={attempt_cluster_id or 'none'}",
+                )
+                if retry_event_filter and attempt_event_id == retry_event_filter:
+                    retry_event_filter = ""
+                    current_note = self._append_note(
+                        current_note,
+                        "retry_event_filter_released_on_cluster_skip",
+                    )
+                self._append_workflow_perf(
+                    "news_cluster_skip",
+                    {
+                        "claim_try": int(claim_try),
+                        "claimed_id": int(attempt_claimed_id),
+                        "cluster_id": str(attempt_cluster_id or ""),
+                        "similarity": float(cluster_decision.best_similarity),
+                    },
+                )
+                try:
+                    self.news_pool_store.rollback_claim(attempt_claimed_id)
+                except Exception:
+                    pass
+                continue
+            selected = attempt_selected
+            claimed_id = int(attempt_claimed_id)
+            cluster_id = attempt_cluster_id
+            break
+        return (
+            selected,
+            claimed_item,
+            int(claimed_id),
+            str(cluster_id or ""),
+            int(cluster_skip_count),
+            int(retry_event_mismatch_count),
+            str(current_note or ""),
+        )
+
     def _canonical_news_url(self, url: str) -> str:
         raw = str(url or "").strip()
         if not raw:
@@ -2499,9 +2814,9 @@ class AgentWorkflow:
         provider = re.sub(r"\s+", " ", str((item or {}).get("provider", "") or "")).strip().lower()
         topic = re.sub(r"\s+", " ", str((item or {}).get("topic", "") or "")).strip()
         if not category:
-            category = classify_category(f"{title} {snippet}")
+            category = infer_news_category(f"{title} {snippet}")
         long_tail = self._build_news_long_tail_keywords(title, category)
-        return TopicCandidate(
+        candidate = TopicCandidate(
             source=source or "news_pool",
             title=title,
             body=snippet,
@@ -2517,8 +2832,11 @@ class AgentWorkflow:
                 "news_topic": topic,
                 "collected_at": str((item or {}).get("collected_at", "") or ""),
                 "topic_fp": str((item or {}).get("topic_fp", "") or ""),
+                "content_type": "hot",
             },
         )
+        self._annotate_candidate_content_policy(candidate, requested_type="hot")
+        return candidate
 
     def _build_news_post_local_fallback(
         self,
@@ -2850,9 +3168,11 @@ class AgentWorkflow:
                 "That is the standard worth holding this kind of coverage to."
             )
         )
-        word_count = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", body_html)))
-        if word_count < 1700:
-            body_html += (
+        active_policy = dict(getattr(self, "_active_content_policy", {}) or {})
+        target_min_words = max(700, int(active_policy.get("min_words", 1600) or 1600))
+        expansion_blocks = [
+            (
+                900,
                 "<h2>How To Narrow The Decision</h2>"
                 + _p(
                     f"A good next step is not to memorize the whole ranking or every reaction. It is to reduce the choice to one or two variables that matter most in your own case. "
@@ -2865,11 +3185,10 @@ class AgentWorkflow:
                 + _p(
                     "The smartest readers are often the ones who slow the story down just enough to test one assumption. That does not make the coverage less useful. "
                     "It makes the next action much more defensible."
-                )
-            )
-        word_count = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", body_html)))
-        if word_count < 1850:
-            body_html += (
+                ),
+            ),
+            (
+                1200,
                 "<h2>The Part Most Roundups Compress</h2>"
                 + _p(
                     "What gets compressed first is the mismatch between a universal headline and a specific life. A model can be the best for a reviewer and still be wrong for a bedroom. "
@@ -2882,11 +3201,10 @@ class AgentWorkflow:
                 + _p(
                     "The closer a story gets to influencing real purchases or habits, the more important it is to read past the badge, the ranking number, or the first dramatic framing. "
                     "That extra minute of skepticism usually produces a better decision than any perfect-sounding headline."
-                )
-            )
-        word_count = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", body_html)))
-        if word_count < 1950:
-            body_html += (
+                ),
+            ),
+            (
+                1500,
                 "<h2>Questions That Actually Change The Choice</h2>"
                 + _p(
                     f"The best follow-up questions are usually the least glamorous ones. For {reader_group}, that means asking what part of daily use would feel wrong first, "
@@ -2899,11 +3217,10 @@ class AgentWorkflow:
                 + _p(
                     "That is also why good analysis keeps returning to fit. Fit is where price, tolerance, convenience, maintenance, and timing finally meet. If the article helps readers identify fit more quickly, "
                     "it has done its job. If it only made the headline louder, it has not."
-                )
-            )
-        word_count = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", body_html)))
-        if word_count < 2050:
-            body_html += (
+                ),
+            ),
+            (
+                1850,
                 "<h2>How Readers Can Compare Evidence Better</h2>"
                 + _p(
                     "A useful habit is to compare the story on three levels at once: the headline claim, the evidence behind the claim, and the situation where the claim is supposed to matter. "
@@ -2915,8 +3232,16 @@ class AgentWorkflow:
                 )
                 + _p(
                     "That sounds slower, but it usually saves time. One careful comparison is cheaper than buying, updating, or trusting the wrong thing and then undoing the mistake after a week of irritation."
-                )
-            )
+                ),
+            ),
+        ]
+        for block_min_words, block_html in expansion_blocks:
+            word_count = len(re.findall(r"[A-Za-z0-9']+", re.sub(r"<[^>]+>", " ", body_html)))
+            if word_count >= target_min_words:
+                break
+            if target_min_words < block_min_words:
+                continue
+            body_html += block_html
         html = body_html + "<h2>Sources</h2>" + f"<ul>{''.join(source_items) if source_items else '<li>No external source available yet.</li>'}</ul>"
         html = ensure_what_to_do_now_section(html=html, action_items=action_items)
         return DraftPost(
@@ -3043,132 +3368,47 @@ class AgentWorkflow:
             cluster_id = ""
             cluster_skip_count = 0
             retry_event_mismatch_count = 0
-            excluded_claim_ids: set[int] = set()
-            retry_event_filter = str(retry_event_id or "").strip()
-            max_claim_attempts = 6
-            for claim_try in range(1, max_claim_attempts + 1):
-                claimed_item = self._profile_call(
-                    "news_pool_claim",
-                    lambda: self._claim_news_item(
-                        force_refresh_once=bool(claim_try == 1),
-                        retry_event_id=retry_event_filter,
-                        exclude_item_ids=sorted(excluded_claim_ids),
-                    ),
-                    slow_ms=1800,
-                )
-                if not claimed_item:
-                    break
-                attempt_claimed_id = int((claimed_item or {}).get("id", 0) or 0)
-                if attempt_claimed_id > 0 and attempt_claimed_id in excluded_claim_ids:
-                    try:
-                        self.news_pool_store.rollback_claim(attempt_claimed_id)
-                    except Exception:
-                        pass
-                    continue
-                attempt_selected = self._news_item_to_candidate(claimed_item)
-                attempt_category = str((attempt_selected.meta or {}).get("news_category", "") or "").strip().lower()
-                allowed_news, deny_reason, _ = self._policy_gate_candidate(
-                    title=str(getattr(attempt_selected, "title", "") or ""),
-                    snippet=str(getattr(attempt_selected, "body", "") or ""),
-                    body_excerpt="",
-                    category=attempt_category,
-                    route="news",
-                    source_url=str(getattr(attempt_selected, "url", "") or ""),
-                )
-                if not allowed_news:
-                    if attempt_claimed_id > 0:
-                        excluded_claim_ids.add(attempt_claimed_id)
-                        try:
-                            self.news_pool_store.mark_used(attempt_claimed_id, deny_reason)
-                        except Exception:
-                            try:
-                                self.news_pool_store.rollback_claim(attempt_claimed_id)
-                            except Exception:
-                                pass
-                    degraded_note = self._append_note(degraded_note, deny_reason)
-                    continue
-                if str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower() == "tech_news_only":
-                    attempt_assessment = self._assess_tech_news_candidate(
-                        title=str(getattr(attempt_selected, "title", "") or ""),
-                        snippet=str(getattr(attempt_selected, "body", "") or ""),
-                        category=attempt_category,
-                        source_url=str(getattr(attempt_selected, "url", "") or ""),
-                        topic=str((attempt_selected.meta or {}).get("news_topic", "") or ""),
-                    )
-                    if not attempt_assessment.allow:
-                        skip_reason = f"tech_news_only_skip:{attempt_assessment.reason}"
-                        self._log_news_mode_guard("claim_topic_gate", attempt_assessment.reason)
-                        if attempt_claimed_id > 0:
-                            excluded_claim_ids.add(attempt_claimed_id)
-                            try:
-                                self.news_pool_store.mark_skipped(attempt_claimed_id, skip_reason)
-                            except Exception:
-                                try:
-                                    self.news_pool_store.rollback_claim(attempt_claimed_id)
-                                except Exception:
-                                    pass
-                        degraded_note = self._append_note(degraded_note, skip_reason)
-                        continue
-                attempt_event_id = str(
-                    (attempt_selected.meta or {}).get("event_id", "")
-                    or (attempt_selected.meta or {}).get("news_event_id", "")
-                    or (attempt_selected.meta or {}).get("news_pool_id", "")
-                    or attempt_claimed_id
-                ).strip()
-                if retry_event_filter and attempt_event_id != retry_event_filter:
-                    retry_event_mismatch_count += 1
-                    if attempt_claimed_id > 0:
-                        excluded_claim_ids.add(attempt_claimed_id)
-                    try:
-                        self.news_pool_store.rollback_claim(attempt_claimed_id)
-                    except Exception:
-                        pass
-                    continue
-                cluster_decision = self.news_cluster_engine.assign_cluster(
-                    event_id=attempt_event_id,
-                    title=str(getattr(attempt_selected, "title", "") or ""),
-                    body=str(getattr(attempt_selected, "body", "") or ""),
-                    run_start_minute=str(run_start_minute or "").strip(),
-                )
-                attempt_meta = dict(getattr(attempt_selected, "meta", {}) or {})
-                attempt_meta["cluster_id"] = str(cluster_decision.cluster_id or "")
-                attempt_meta["cluster_similarity"] = float(cluster_decision.best_similarity)
-                attempt_meta["cluster_matched_existing"] = bool(cluster_decision.matched_existing)
-                attempt_selected.meta = attempt_meta
-                attempt_cluster_id = str(attempt_meta.get("cluster_id", "") or "")
-                if should_skip_same_run(attempt_cluster_id, self._seen_cluster_ids_in_run):
-                    cluster_skip_count += 1
-                    if attempt_claimed_id > 0:
-                        excluded_claim_ids.add(attempt_claimed_id)
-                    degraded_note = self._append_note(
+            selected_content_type = ""
+            allocation_order = self._allocation_candidate_type_order()
+            for desired_type in allocation_order:
+                if desired_type == "hot":
+                    (
+                        selected,
+                        claimed_item,
+                        claimed_id,
+                        cluster_id,
+                        cluster_skip_count,
+                        retry_event_mismatch_count,
                         degraded_note,
-                        f"cluster_skip_same_cycle={attempt_cluster_id or 'none'}",
+                    ) = self._claim_hot_news_candidate(
+                        run_start_minute=run_start_minute,
+                        retry_event_id=retry_event_id,
+                        degraded_note=degraded_note,
                     )
-                    if retry_event_filter and attempt_event_id == retry_event_filter:
-                        # Retry target collided with same-run cluster guard; release filter and move on.
-                        retry_event_filter = ""
-                        degraded_note = self._append_note(
-                            degraded_note,
-                            "retry_event_filter_released_on_cluster_skip",
+                    if selected is not None:
+                        selected_content_type = "hot"
+                        degraded_note = self._append_note(degraded_note, "content_slot=hot")
+                        break
+                elif desired_type == "search_derived":
+                    search_candidates = self._search_derived_candidates(limit=6)
+                    if search_candidates:
+                        selected = max(search_candidates, key=lambda row: int(getattr(row, "score", 0) or 0))
+                        selected_content_type = "search_derived"
+                        cluster_id = self._infer_cluster_id_from_keyword(
+                            " ".join(getattr(selected, "long_tail_keywords", [])[:2]) or str(getattr(selected, "title", "") or "")
                         )
-                    self._append_workflow_perf(
-                        "news_cluster_skip",
-                        {
-                            "claim_try": int(claim_try),
-                            "claimed_id": int(attempt_claimed_id),
-                            "cluster_id": str(attempt_cluster_id or ""),
-                            "similarity": float(cluster_decision.best_similarity),
-                        },
-                    )
-                    try:
-                        self.news_pool_store.rollback_claim(attempt_claimed_id)
-                    except Exception:
-                        pass
-                    continue
-                selected = attempt_selected
-                claimed_id = int(attempt_claimed_id)
-                cluster_id = attempt_cluster_id
-                break
+                        degraded_note = self._append_note(degraded_note, "content_slot=search_derived")
+                        break
+                elif desired_type == "evergreen":
+                    evergreen_candidates = self._evergreen_candidates(limit=8)
+                    if evergreen_candidates:
+                        selected = max(evergreen_candidates, key=lambda row: int(getattr(row, "score", 0) or 0))
+                        selected_content_type = "evergreen"
+                        cluster_id = self._infer_cluster_id_from_keyword(
+                            " ".join(getattr(selected, "long_tail_keywords", [])[:2]) or str(getattr(selected, "title", "") or "")
+                        )
+                        degraded_note = self._append_note(degraded_note, "content_slot=evergreen")
+                        break
 
             if not selected:
                 hold_reason = (
@@ -3176,8 +3416,8 @@ class AgentWorkflow:
                     if cluster_skip_count > 0
                     else (
                         f"news_retry_event_mismatch_exhausted:{retry_event_mismatch_count}"
-                        if str(retry_event_filter or "").strip() and retry_event_mismatch_count > 0
-                        else "news_pool_empty"
+                        if str(retry_event_id or "").strip() and retry_event_mismatch_count > 0
+                        else "content_allocation_no_candidate"
                     )
                 )
                 global_blocked, global_reason = self._watchdog_hold_gate(hold_reason)
@@ -3196,9 +3436,16 @@ class AgentWorkflow:
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
 
+            selected_meta = self._annotate_candidate_content_policy(selected, requested_type=selected_content_type or "hot")
+            active_policy = dict(selected_meta.get("content_policy", {}) or {})
+            self._active_content_policy = active_policy
             category = str((selected.meta or {}).get("news_category", "platform") or "platform").strip().lower() or "platform"
             global_keywords = list(getattr(selected, "long_tail_keywords", []) or [])[:8]
-            reason = f"news_pool_claimed={claimed_id};category={category};cluster_id={cluster_id or 'none'}"
+            reason = (
+                f"content_type={selected_meta.get('content_type', selected_content_type or 'hot')};"
+                f"candidate_source={str(getattr(selected, 'source', '') or '').strip() or 'unknown'};"
+                f"claimed_id={claimed_id};category={category};cluster_id={cluster_id or 'none'}"
+            )
             if cluster_id:
                 degraded_note = self._append_note(degraded_note, f"news_cluster_id={cluster_id}")
             labels = self._build_public_labels(
@@ -3222,7 +3469,6 @@ class AgentWorkflow:
                 candidate=selected,
                 category=category,
             )
-            selected_meta = dict(getattr(selected, "meta", {}) or {})
             selected_meta["intent_bundle"] = asdict(intent_bundle)
             if intent_source != "ollama":
                 degraded_note = self._append_note(degraded_note, "search_intent_fallback_used")
@@ -3328,6 +3574,12 @@ class AgentWorkflow:
                         plan={
                             "primary_keyword": intent_bundle.primary_query or selected.title,
                             "news_category": category,
+                            "content_type": str(active_policy.get("content_type", "hot") or "hot"),
+                            "min_words": int(active_policy.get("min_words", 1800) or 1800),
+                            "max_words": int(active_policy.get("max_words", 2200) or 2200),
+                            "title_strategy": str(active_policy.get("title_strategy", "timely_explainer") or "timely_explainer"),
+                            "source_strategy": str(active_policy.get("source_strategy", "news_source_plus_corroboration") or "news_source_plus_corroboration"),
+                            "image_strategy": str(active_policy.get("image_strategy", "hero_plus_one_inline") or "hero_plus_one_inline"),
                             "event_id": event_id,
                             "run_start_minute": str(run_start_minute or "").strip(),
                             "retry_index": retry_index,
@@ -4142,6 +4394,12 @@ class AgentWorkflow:
                                         plan={
                                             "primary_keyword": selected.title,
                                             "news_category": category,
+                                            "content_type": str(active_policy.get("content_type", "hot") or "hot"),
+                                            "min_words": int(active_policy.get("min_words", 1800) or 1800),
+                                            "max_words": int(active_policy.get("max_words", 2200) or 2200),
+                                            "title_strategy": str(active_policy.get("title_strategy", "timely_explainer") or "timely_explainer"),
+                                            "source_strategy": str(active_policy.get("source_strategy", "news_source_plus_corroboration") or "news_source_plus_corroboration"),
+                                            "image_strategy": str(active_policy.get("image_strategy", "hero_plus_one_inline") or "hero_plus_one_inline"),
                                             "event_id": event_id,
                                             "run_start_minute": str(run_start_minute or "").strip(),
                                             "retry_index": int(entropy_retry_index),
@@ -4626,6 +4884,7 @@ class AgentWorkflow:
             self._workflow_perf_finish_run("hold", hold_reason)
             return WorkflowResult("hold", hold_reason)
         finally:
+            self._active_content_policy = {}
             if claimed_id and (not claim_finalized):
                 try:
                     self.news_pool_store.rollback_claim(claimed_id)
@@ -6370,6 +6629,14 @@ class AgentWorkflow:
                 "outline_fingerprint": str(outline_plan.fingerprint or ""),
                 "cluster_id": str(cluster_id or ""),
                 "opportunity_source": bool((getattr(selected, "meta", {}) or {}).get("opportunity_source", False)),
+                "content_type": str(active_policy.get("content_type", "hot") or "hot"),
+                "target_word_range": [
+                    int(active_policy.get("min_words", 1800) or 1800),
+                    int(active_policy.get("max_words", 2200) or 2200),
+                ],
+                "title_strategy": str(active_policy.get("title_strategy", "timely_explainer") or "timely_explainer"),
+                "source_strategy": str(active_policy.get("source_strategy", "news_source_plus_corroboration") or "news_source_plus_corroboration"),
+                "image_strategy": str(active_policy.get("image_strategy", "hero_plus_one_inline") or "hero_plus_one_inline"),
             }
         )
         self._remember_title_fingerprint(draft.title)
