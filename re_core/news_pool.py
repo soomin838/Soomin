@@ -50,6 +50,7 @@ class NewsPoolItem:
     claimed_at: str
     used_at: str
     published_url: str
+    skip_reason: str
     created_at: str
     topic_fp: str
 
@@ -70,6 +71,7 @@ class NewsPoolItem:
             "claimed_at": str(self.claimed_at or ""),
             "used_at": str(self.used_at or ""),
             "published_url": str(self.published_url or ""),
+            "skip_reason": str(self.skip_reason or ""),
             "created_at": str(self.created_at or ""),
             "topic_fp": str(self.topic_fp or ""),
         }
@@ -106,6 +108,7 @@ class NewsPoolStore:
                     claimed_at TEXT NOT NULL DEFAULT '',
                     used_at TEXT NOT NULL DEFAULT '',
                     published_url TEXT NOT NULL DEFAULT '',
+                    skip_reason TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT '',
                     topic_fp TEXT NOT NULL DEFAULT ''
                 )
@@ -123,6 +126,8 @@ class NewsPoolStore:
                 conn.execute("ALTER TABLE news_items ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
             if "collected_at" not in cols:
                 conn.execute("ALTER TABLE news_items ADD COLUMN collected_at TEXT NOT NULL DEFAULT ''")
+            if "skip_reason" not in cols:
+                conn.execute("ALTER TABLE news_items ADD COLUMN skip_reason TEXT NOT NULL DEFAULT ''")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_news_status_score ON news_items(status, score DESC, published_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_news_published_at ON news_items(published_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_news_used_at ON news_items(used_at)")
@@ -269,7 +274,7 @@ class NewsPoolStore:
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 sql = """
-                    SELECT id, url, title, source, provider, topic, collected_at, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at, topic_fp
+                    SELECT id, url, title, source, provider, topic, collected_at, published_at, snippet, category, status, score, claimed_at, used_at, published_url, skip_reason, created_at, topic_fp
                     FROM news_items
                     WHERE status='queued'
                       AND (published_at='' OR published_at >= ?)
@@ -392,10 +397,22 @@ class NewsPoolStore:
             changed = conn.execute(
                 """
                 UPDATE news_items
-                SET status='used', used_at=?, published_url=?
+                SET status='used', used_at=?, published_url=?, skip_reason=''
                 WHERE id=?
                 """,
                 (_iso(), str(published_url or "").strip(), int(item_id)),
+            ).rowcount
+        return bool(changed)
+
+    def mark_skipped(self, item_id: int, reason: str) -> bool:
+        with self._connect() as conn:
+            changed = conn.execute(
+                """
+                UPDATE news_items
+                SET status='skipped', claimed_at='', used_at=?, published_url='', skip_reason=?
+                WHERE id=?
+                """,
+                (_iso(), str(reason or "").strip()[:220], int(item_id)),
             ).rowcount
         return bool(changed)
 
@@ -424,7 +441,7 @@ class NewsPoolStore:
             removed_used = conn.execute(
                 """
                 DELETE FROM news_items
-                WHERE status='used'
+                WHERE status IN ('used', 'skipped')
                   AND used_at != ''
                   AND used_at < ?
                 """,
@@ -463,7 +480,7 @@ class NewsPoolStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, url, title, source, provider, topic, collected_at, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at, topic_fp
+                SELECT id, url, title, source, provider, topic, collected_at, published_at, snippet, category, status, score, claimed_at, used_at, published_url, skip_reason, created_at, topic_fp
                 FROM news_items
                 WHERE id=?
                 LIMIT 1
@@ -488,6 +505,7 @@ class NewsPoolStore:
             claimed_at=str(row["claimed_at"] or ""),
             used_at=str(row["used_at"] or ""),
             published_url=str(row["published_url"] or ""),
+            skip_reason=str(row["skip_reason"] or ""),
             created_at=str(row["created_at"] or ""),
             topic_fp=str(row["topic_fp"] or ""),
         ).as_dict()

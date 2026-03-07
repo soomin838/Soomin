@@ -5,6 +5,8 @@ from html import escape
 from typing import Any
 from urllib.parse import urlparse
 
+from .story_profile import is_relevant_source_domain_for_story
+
 
 _URL_TEXT_RE = re.compile(r"https?://[^\s<>'\"`]+", flags=re.IGNORECASE)
 _SOURCES_H2_RE = re.compile(r"(?is)<h2[^>]*>\s*Sources\s*</h2>")
@@ -157,6 +159,10 @@ def normalize_sources_section(
     authority_links: list[str],
     max_items: int,
     require: bool,
+    title: str,
+    snippet: str,
+    category: str,
+    topic: str,
 ) -> str:
     src = str(html or "")
     max_items = max(1, _safe_int(max_items, 6))
@@ -187,6 +193,16 @@ def normalize_sources_section(
         if not domain:
             continue
         if _is_forbidden_source_domain(domain):
+            continue
+        if source_url and url == _canonical_http_url(source_url):
+            pass
+        elif not is_relevant_source_domain_for_story(
+            url,
+            title=title,
+            snippet=snippet,
+            category=category,
+            topic=topic,
+        ):
             continue
         if domain in seen_domains:
             continue
@@ -228,6 +244,10 @@ def apply_source_naturalization(
     source_url: str,
     authority_links: list[str],
     settings: dict[str, Any] | Any,
+    title: str = "",
+    snippet: str = "",
+    category: str = "",
+    topic: str = "",
 ) -> str:
     src = str(html or "")
     try:
@@ -246,6 +266,10 @@ def apply_source_naturalization(
             authority_links=list(authority_links or []),
             max_items=max_items,
             require=require_sources,
+            title=str(title or ""),
+            snippet=str(snippet or ""),
+            category=str(category or ""),
+            topic=str(topic or ""),
         )
         return out
     except Exception:

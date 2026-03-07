@@ -109,12 +109,205 @@ class StoryProfile:
     tech_story: bool
 
 
+@dataclass(frozen=True)
+class TechTopicAssessment:
+    allow: bool
+    score: float
+    tech_hits: list[str]
+    off_topic_hits: list[str]
+    reason: str
+    source_domain: str
+
+
 def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip())
 
 
 def _lower_blob(*parts: str) -> str:
     return _clean(" ".join(str(x or "") for x in parts)).lower()
+
+
+_TECH_NEWS_SIGNAL_GROUPS: dict[str, tuple[str, ...]] = {
+    "ai": ("ai", "artificial intelligence", "model", "llm", "openai", "anthropic", "gemini", "copilot", "claude"),
+    "cybersecurity": ("security", "cyber", "privacy", "breach", "vulnerability", "patch", "malware", "ransomware", "cve"),
+    "software": ("software", "app", "apps", "saas", "api", "sdk", "developer", "open source", "release notes", "python", "linux", "github"),
+    "platform": ("platform", "update", "rollout", "browser", "windows", "macos", "ios", "android", "chrome"),
+    "mobile": ("iphone", "ipad", "pixel", "galaxy", "android", "ios", "smartphone", "mobile"),
+    "chips": ("chip", "chips", "gpu", "cpu", "semiconductor", "silicon", "nvidia", "amd", "intel"),
+    "privacy": ("privacy", "tracking", "consent", "vpn", "encryption", "data protection"),
+    "cloud": ("cloud", "aws", "azure", "gcp", "datacenter", "infrastructure", "server"),
+}
+
+_OFF_TOPIC_SIGNAL_GROUPS: dict[str, tuple[str, ...]] = {
+    "education": ("exam", "exams", "rank", "ranks", "ranking", "results", "admission", "admissions", "students", "student", "college", "school", "university", "jee", "neet", "campus"),
+    "pr_wire": ("press release", "pr wire", "business wire", "globe newswire", "announces", "announced today", "launch event", "partnership announcement"),
+    "celebrity": ("celebrity", "actor", "actress", "singer", "musician", "influencer"),
+    "entertainment": ("movie", "box office", "series", "tv show", "concert", "album", "trailer"),
+    "sports": ("match", "tournament", "league", "goal", "nba", "nfl", "fifa", "olympic", "cricket"),
+    "politics": ("election", "minister", "senate", "parliament", "president", "campaign", "vote"),
+    "human_interest": ("wedding", "lifestyle", "horoscope", "viral video", "pet story", "travel diary"),
+}
+
+_TECH_SOURCE_DOMAINS = (
+    "theverge.com",
+    "techcrunch.com",
+    "wired.com",
+    "arstechnica.com",
+    "androidauthority.com",
+    "9to5google.com",
+    "9to5mac.com",
+    "securityweek.com",
+    "bleepingcomputer.com",
+    "venturebeat.com",
+    "tomshardware.com",
+    "anandtech.com",
+)
+
+_IRRELEVANT_NEWS_REFERENCE_DOMAINS = (
+    "prnewswire.com",
+    "businesswire.com",
+    "globenewswire.com",
+    "accesswire.com",
+)
+
+_DOMAIN_TOPIC_HINTS: dict[str, tuple[str, ...]] = {
+    "cisa.gov": ("security", "vulnerability", "cve", "breach", "malware", "ransomware", "advisory"),
+    "nist.gov": ("security", "privacy", "framework", "cybersecurity", "encryption"),
+    "msrc.microsoft.com": ("microsoft", "windows", "office", "azure", "copilot", "security"),
+    "microsoft.com": ("microsoft", "windows", "office", "azure", "copilot", "surface"),
+    "support.apple.com": ("apple", "iphone", "ipad", "mac", "macos", "ios", "safari"),
+    "security.googleblog.com": ("google", "android", "chrome", "pixel", "gmail", "security"),
+    "aws.amazon.com": ("aws", "cloud", "ec2", "s3", "lambda", "security"),
+    "cloudflare.com": ("cloudflare", "dns", "cdn", "ddos", "security", "network"),
+    "consumerreports.org": ("review", "tested", "ranking", "consumer", "shopping"),
+    "wirecutter.com": ("review", "tested", "ranking", "consumer", "shopping"),
+    "fda.gov": ("health", "medical", "drug", "food", "safety"),
+    "nih.gov": ("health", "medical", "research", "study"),
+    "epa.gov": ("air", "filter", "indoor air", "environment"),
+    "docs.python.org": ("python", "developer", "software", "programming", "library"),
+    "github.com": ("github", "repo", "release", "open source", "developer", "software", "sdk"),
+    "stackexchange.com": ("developer", "software", "python", "programming", "stack overflow", "api"),
+}
+
+
+def extract_source_domain(value: str) -> str:
+    raw = _clean(value)
+    if not raw:
+        return ""
+    parse_target = raw if "://" in raw else f"https://{raw}"
+    parsed = urlparse(parse_target)
+    host = str(parsed.netloc or "").strip()
+    if not host:
+        host = str(parsed.path or "").split("/", 1)[0].strip()
+    host = host.split("@")[-1].split(":")[0].strip().lower()
+    host = re.sub(r"^www\d*\.", "", host)
+    return host
+
+
+def _matching_groups(text: str, groups: dict[str, tuple[str, ...]]) -> list[str]:
+    hits: list[str] = []
+    lower = _lower_blob(text)
+    for label, tokens in groups.items():
+        if any(str(token).lower() in lower for token in tokens):
+            hits.append(label)
+    return hits
+
+
+def assess_tech_news_topic(
+    *,
+    title: str,
+    snippet: str = "",
+    category: str = "",
+    source_url: str = "",
+    topic: str = "",
+) -> TechTopicAssessment:
+    clean_title = _clean(title)
+    clean_snippet = _clean(snippet)
+    source_domain = extract_source_domain(source_url)
+    merged = _lower_blob(clean_title, clean_snippet, category, topic, source_domain)
+    tech_hits = _matching_groups(merged, _TECH_NEWS_SIGNAL_GROUPS)
+    off_topic_hits = _matching_groups(merged, _OFF_TOPIC_SIGNAL_GROUPS)
+
+    normalized_category = normalize_story_category(category)
+    if normalized_category in {"security", "policy", "ai", "chips"} and normalized_category not in tech_hits:
+        tech_hits.append(normalized_category)
+    if source_domain and any(
+        source_domain == host or source_domain.endswith("." + host)
+        for host in _TECH_SOURCE_DOMAINS
+    ):
+        tech_hits.append("tech_domain")
+    if source_domain and any(
+        source_domain == host or source_domain.endswith("." + host)
+        for host in _IRRELEVANT_NEWS_REFERENCE_DOMAINS
+    ):
+        off_topic_hits.append("pr_wire_domain")
+
+    allow_score = float(len(set(tech_hits)))
+    if "tech_domain" in tech_hits:
+        allow_score += 0.5
+    if topic and _matching_groups(topic, _TECH_NEWS_SIGNAL_GROUPS):
+        allow_score += 0.5
+
+    has_direct_tech_angle = bool(
+        set(tech_hits)
+        & {"ai", "cybersecurity", "software", "platform", "mobile", "chips", "privacy", "cloud", "security", "policy"}
+    )
+    off_topic_penalty = float(len(set(off_topic_hits)))
+
+    allow = True
+    reason = "ok"
+    if ("education" in off_topic_hits) and allow_score < 2.5:
+        allow = False
+        reason = "off_topic_education_no_explicit_tech_angle"
+    elif ({"pr_wire", "pr_wire_domain"} & set(off_topic_hits)) and allow_score < 2.5:
+        allow = False
+        reason = "off_topic_pr_wire_low_tech_overlap"
+    elif (off_topic_penalty >= allow_score) and (not has_direct_tech_angle):
+        allow = False
+        reason = "off_topic_non_tech_signal_dominant"
+    elif allow_score < 2.0 and not (has_direct_tech_angle and allow_score >= 1.5):
+        allow = False
+        reason = "tech_signal_overlap_below_threshold"
+
+    return TechTopicAssessment(
+        allow=bool(allow),
+        score=float(allow_score - off_topic_penalty),
+        tech_hits=sorted(set(tech_hits)),
+        off_topic_hits=sorted(set(off_topic_hits)),
+        reason=reason,
+        source_domain=source_domain,
+    )
+
+
+def is_relevant_source_domain_for_story(
+    url: str,
+    *,
+    title: str,
+    snippet: str = "",
+    category: str = "",
+    topic: str = "",
+) -> bool:
+    domain = extract_source_domain(url)
+    if not domain:
+        return False
+    if any(domain == host or domain.endswith("." + host) for host in _IRRELEVANT_NEWS_REFERENCE_DOMAINS):
+        return False
+    topic_blob = _lower_blob(title, snippet, category, topic)
+    for host, required_tokens in _DOMAIN_TOPIC_HINTS.items():
+        if domain == host or domain.endswith("." + host):
+            return any(token in topic_blob for token in required_tokens)
+    if any(domain == host or domain.endswith("." + host) for host in _TECH_SOURCE_DOMAINS):
+        return assess_tech_news_topic(
+            title=title,
+            snippet=snippet,
+            category=category,
+            source_url=url,
+            topic=topic,
+        ).allow
+    domain_parts = [p for p in re.split(r"[.-]", domain) if p and p not in {"com", "org", "net", "co", "www"}]
+    if any(part in topic_blob for part in domain_parts[:2]):
+        return True
+    return False
 
 
 def infer_news_category(text: str, explicit: str = "") -> str:
@@ -179,24 +372,34 @@ def filter_relevant_authority_links(
     title: str,
     snippet: str = "",
     category: str = "",
+    source_url: str = "",
+    topic: str = "",
 ) -> list[str]:
     profile = infer_story_profile(title=title, snippet=snippet, category=category)
     out: list[str] = []
     seen: set[str] = set()
+    source_domain = extract_source_domain(source_url)
     for link in authority_links or []:
         clean = _clean(link)
         if not clean:
             continue
-        try:
-            host = (urlparse(clean).netloc or "").lower()
-        except Exception:
-            host = ""
+        host = extract_source_domain(clean)
         if host in seen:
             continue
+        if source_domain and host == source_domain:
+            continue
         if profile.tech_story:
+            if not is_relevant_source_domain_for_story(
+                clean,
+                title=title,
+                snippet=snippet,
+                category=category,
+                topic=topic,
+            ):
+                continue
             out.append(clean)
             seen.add(host)
-            if len(out) >= 3:
+            if len(out) >= 2:
                 break
             continue
         if any(tok in host for tok in ("fda.gov", "nih.gov", "epa.gov", "consumerreports.org", "wirecutter.com")):

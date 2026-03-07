@@ -59,6 +59,7 @@ from re_core.scout import SourceScout, TopicCandidate
 from re_core.settings import AppSettings, is_news_mode
 from re_core.structure_randomizer import OutlinePlan, StructureRandomizer
 from re_core.story_profile import (
+    assess_tech_news_topic,
     build_story_tags,
     filter_relevant_authority_links,
     infer_story_profile,
@@ -734,7 +735,7 @@ class AgentWorkflow:
         h2_count = len(re.findall(r"<h2\b", src, flags=re.IGNORECASE))
         links = re.findall(r'href="([^"]+)"', src, flags=re.IGNORECASE)
         ext_links = [u for u in links if u.startswith("http://") or u.startswith("https://")]
-        authority_links = list(getattr(self.settings, "authority_links", []) or [])
+        authority_links = self._active_authority_links()
         auth_count = sum(1 for u in ext_links if any(u.startswith(a) for a in authority_links))
         story_hits = len(re.findall(r"\b(i|my|when i|i tried|in our test|real-world)\b", text.lower()))
         return {
@@ -948,7 +949,7 @@ class AgentWorkflow:
             add_urls: list[str] = []
             # Keep body/source attribution deterministic and safe:
             # do not inject candidate/source URL into article body.
-            for ref in list(getattr(self.settings, "authority_links", []) or []):
+            for ref in self._active_authority_links():
                 ref_url = str(ref or "").strip()
                 if not ref_url or self._is_forbidden_news_url(ref_url):
                     continue
@@ -1010,10 +1011,14 @@ class AgentWorkflow:
     def _image_target_max(self) -> int:
         configured_max = int(getattr(self.settings.publish, "max_images_per_post", 5) or 5)
         visual_target = int(getattr(self.settings.visual, "target_images_per_post", configured_max) or configured_max)
+        if is_news_mode(self.settings):
+            return max(1, min(2, configured_max, visual_target or 2))
         return max(0, min(5, configured_max, visual_target))
 
     def _image_min_required(self) -> int:
         requested = int(getattr(self.settings.publish, "min_images_required", 0) or 0)
+        if is_news_mode(self.settings):
+            return max(0, min(self._image_target_max(), max(1, requested)))
         return max(0, min(self._image_target_max(), requested))
 
     def _pick_images_from_library_or_guard(self, *, title: str, min_count: int) -> list[ImageAsset]:
@@ -2037,6 +2042,25 @@ class AgentWorkflow:
                 )
                 if score <= 0:
                     continue
+                if str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower() == "tech_news_only":
+                    assessment = self._assess_tech_news_candidate(
+                        title=title,
+                        snippet=snippet,
+                        category=category,
+                        source_url=url,
+                        topic=topic,
+                    )
+                    if not assessment.allow:
+                        self._append_news_pool_refresh_log(
+                            {
+                                "event": "news_pool_skip_off_topic",
+                                "provider": "gdelt",
+                                "title": title[:120],
+                                "url": url,
+                                "reason": assessment.reason,
+                            }
+                        )
+                        continue
                 allowed, _, _ = self._policy_gate_candidate(
                     title=title,
                     snippet=snippet,
@@ -2125,6 +2149,25 @@ class AgentWorkflow:
                 )
                 if score <= 0:
                     continue
+                if str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower() == "tech_news_only":
+                    assessment = self._assess_tech_news_candidate(
+                        title=title,
+                        snippet=snippet,
+                        category=category,
+                        source_url=url,
+                        topic="",
+                    )
+                    if not assessment.allow:
+                        self._append_news_pool_refresh_log(
+                            {
+                                "event": "news_pool_skip_off_topic",
+                                "provider": "rss",
+                                "title": title[:120],
+                                "url": url,
+                                "reason": assessment.reason,
+                            }
+                        )
+                        continue
                 allowed, _, _ = self._policy_gate_candidate(
                     title=title,
                     snippet=snippet,
@@ -2531,6 +2574,8 @@ class AgentWorkflow:
             title=title,
             snippet=snippet,
             category=cat,
+            source_url=source_url,
+            topic=str((getattr(selected, "meta", {}) or {}).get("news_topic", "") or ""),
         )[:2]
         source_items: list[str] = []
         if source_url:
@@ -2693,11 +2738,12 @@ class AgentWorkflow:
 
         facts_html = (
             "<ul>"
-            f"<li>Who: {escape(reader_group)}.</li>"
-            f"<li>What: New coverage about {escape(profile.subject_phrase)}.</li>"
-            f"<li>Source frame: The current read is anchored by {escape(source_label)}.</li>"
+            f"<li>Headline focus: {escape(title)}.</li>"
+            f"<li>Reported by: {escape(source_label)}.</li>"
+            f"<li>Who is affected first: {escape(reader_group)}.</li>"
+            f"<li>Current source detail: {escape((snippet or summary_line)[:220])}.</li>"
             "<li>Timing: The headline is current, but the most durable implications still depend on follow-up evidence.</li>"
-            f"<li>Main tradeoff: {escape(compare_block)}</li>"
+            f"<li>What still needs verification: {escape(question_lines[0])}</li>"
             "</ul>"
         )
 
@@ -2963,7 +3009,7 @@ class AgentWorkflow:
         retry_event_id: str = "",
         draft_post_id: str = "",
     ) -> WorkflowResult:
-        self._progress("news_pool", "뉴스 풀 갱신/클레임", 18)
+        self._progress("news_pool", "Reviewing news candidates and selecting the best fit.", 18)
         working_draft_id = str(draft_post_id or "").strip()
         claimed_item: dict[str, Any] | None = None
         claimed_id = 0
@@ -3041,6 +3087,28 @@ class AgentWorkflow:
                                 pass
                     degraded_note = self._append_note(degraded_note, deny_reason)
                     continue
+                if str(getattr(self.settings.content_mode, "mode", "") or "").strip().lower() == "tech_news_only":
+                    attempt_assessment = self._assess_tech_news_candidate(
+                        title=str(getattr(attempt_selected, "title", "") or ""),
+                        snippet=str(getattr(attempt_selected, "body", "") or ""),
+                        category=attempt_category,
+                        source_url=str(getattr(attempt_selected, "url", "") or ""),
+                        topic=str((attempt_selected.meta or {}).get("news_topic", "") or ""),
+                    )
+                    if not attempt_assessment.allow:
+                        skip_reason = f"tech_news_only_skip:{attempt_assessment.reason}"
+                        self._log_news_mode_guard("claim_topic_gate", attempt_assessment.reason)
+                        if attempt_claimed_id > 0:
+                            excluded_claim_ids.add(attempt_claimed_id)
+                            try:
+                                self.news_pool_store.mark_skipped(attempt_claimed_id, skip_reason)
+                            except Exception:
+                                try:
+                                    self.news_pool_store.rollback_claim(attempt_claimed_id)
+                                except Exception:
+                                    pass
+                        degraded_note = self._append_note(degraded_note, skip_reason)
+                        continue
                 attempt_event_id = str(
                     (attempt_selected.meta or {}).get("event_id", "")
                     or (attempt_selected.meta or {}).get("news_event_id", "")
@@ -3149,7 +3217,7 @@ class AgentWorkflow:
             )
             degraded_note = self._append_note(degraded_note, collect_note)
 
-            self._progress("intent", "검색 의도 해석", 26)
+            self._progress("intent", "검색 의도와 핵심 쿼리를 정리합니다.", 26)
             intent_bundle, intent_source = self._build_search_intent_bundle(
                 candidate=selected,
                 category=category,
@@ -3158,7 +3226,7 @@ class AgentWorkflow:
             selected_meta["intent_bundle"] = asdict(intent_bundle)
             if intent_source != "ollama":
                 degraded_note = self._append_note(degraded_note, "search_intent_fallback_used")
-            self._progress("outline", "구조 아키타입 선택", 30)
+            self._progress("outline", "아웃라인과 기사 구조를 고릅니다.", 30)
             try:
                 outline_plan = self._pick_outline_plan(
                     candidate=selected,
@@ -3192,12 +3260,16 @@ class AgentWorkflow:
             selected_meta["outline_fingerprint"] = str(outline_plan.fingerprint or "")
             selected.meta = selected_meta
 
-            self._progress("draft", "뉴스 본문 초안 생성", 36)
+            self._progress("draft", "초안 생성 중입니다.", 36)
             api_ready = bool(
                 (self.settings.gemini.api_key or "").strip()
                 and (self.settings.gemini.api_key or "").strip() != "GEMINI_API_KEY"
             )
             draft: DraftPost | None = None
+            story_authority_links = self._set_story_authority_links(
+                candidate=selected,
+                category=category,
+            )
             reference_guidance = self.references.build_guidance()
             event_id = str(
                 (selected.meta or {}).get("event_id", "")
@@ -3248,7 +3320,7 @@ class AgentWorkflow:
 
                     draft = self.brain.generate_post_from_outline(
                         candidate=selected,
-                        authority_links=self.settings.authority_links,
+                        authority_links=story_authority_links,
                         reference_guidance=reference_guidance,
                         category=category,
                         intent_bundle=intent_bundle,
@@ -3314,10 +3386,35 @@ class AgentWorkflow:
                     selected.meta = selected_meta
                 except Exception:
                     pass
+                fallback_allowed, fallback_reason = self._can_use_news_fallback(selected, category)
+                if not fallback_allowed:
+                    hold_reason = f"news_fallback_disallowed:{fallback_reason}"
+                    if claimed_id:
+                        try:
+                            self.news_pool_store.mark_skipped(claimed_id, hold_reason)
+                            claim_finalized = True
+                        except Exception:
+                            try:
+                                self.news_pool_store.rollback_claim(claimed_id)
+                                claim_finalized = True
+                            except Exception:
+                                pass
+                    self.logs.append_run(
+                        RunRecord(
+                            status="skipped",
+                            score=0,
+                            title=str(selected.title or ""),
+                            source_url=str(getattr(selected, "url", "") or ""),
+                            published_url="",
+                            note=self._append_note(hold_reason, degraded_note),
+                        )
+                    )
+                    self._workflow_perf_finish_run("skipped", hold_reason)
+                    return WorkflowResult("skipped", hold_reason)
                 draft = self._build_news_post_local_fallback(
                     selected,
                     category,
-                    self.settings.authority_links,
+                    story_authority_links,
                     facet_context=local_facet_context,
                 )
                 degraded_note = self._append_note(degraded_note, "news_local_fallback_draft")
@@ -3371,8 +3468,43 @@ class AgentWorkflow:
                     "news_link_sanitize",
                     {"removed": int(removed_news_links), "domain": current_domain},
                 )
+            coherence_ok, coherence_reason, coherence_detail = self._evaluate_news_topic_coherence(
+                candidate=selected,
+                html=final_html,
+                title=draft.title,
+                category=category,
+            )
+            if not coherence_ok:
+                hold_reason = str(coherence_reason or "topic_mismatch_low_overlap")
+                degraded_note = self._append_note(
+                    degraded_note,
+                    f"{hold_reason}:{json.dumps(coherence_detail, ensure_ascii=False)[:220]}",
+                )
+                if claimed_id:
+                    try:
+                        self.news_pool_store.mark_skipped(claimed_id, hold_reason)
+                        claim_finalized = True
+                    except Exception:
+                        try:
+                            self.news_pool_store.rollback_claim(claimed_id)
+                            claim_finalized = True
+                        except Exception:
+                            pass
+                self.logs.append_run(
+                    RunRecord(
+                        status="skipped",
+                        score=0,
+                        title=str(draft.title or ""),
+                        source_url=str(getattr(selected, "url", "") or ""),
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("skipped", hold_reason)
+                return WorkflowResult("skipped", hold_reason)
 
-            self._progress("qa", "품질 게이트 점검", 56)
+
+            self._progress("qa", "Reviewing factual accuracy and structure.", 56)
             qa_result = self._qa_evaluate(
                 final_html,
                 title=draft.title,
@@ -3668,7 +3800,7 @@ class AgentWorkflow:
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
 
-            self._progress("visual", "뉴스 이미지/썸네일 구성", 72)
+            self._progress("visual", "이미지를 준비하고 배치합니다.", 72)
             try:
                 visual_diag_pre = diagnose_visual_settings(self.settings, self.root)
                 self._append_workflow_perf(
@@ -3717,6 +3849,7 @@ class AgentWorkflow:
             for note in emergency_notes:
                 degraded_note = self._append_note(degraded_note, note)
                 
+            images = self._curate_news_images(images, selected)
             if len(images) < min_images_required:
                 detail = "; ".join(emergency_notes) if emergency_notes else "no_provider_notes"
                 hold_reason = f"missing_images_required({len(images)}/{min_images_required}) | {detail}"
@@ -3809,6 +3942,33 @@ class AgentWorkflow:
                         "preflight_thumb": bool(preflight_thumb_src),
                     },
                 )
+            coherence_ok, coherence_reason, coherence_detail = self._evaluate_news_topic_coherence(
+                candidate=selected,
+                html=gate_preview_html,
+                title=draft.title,
+                category=category,
+            )
+            if not coherence_ok:
+                hold_reason = str(coherence_reason or "topic_mismatch_low_overlap")
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title=draft.title,
+                        source_url=draft.source_url,
+                        published_url="",
+                        note=self._append_note(
+                            hold_reason,
+                            self._append_note(
+                                degraded_note,
+                                json.dumps(coherence_detail, ensure_ascii=False)[:220],
+                            ),
+                        ),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+
 
             post_image_qa = self._qa_evaluate(
                 gate_preview_html,
@@ -3903,9 +4063,13 @@ class AgentWorkflow:
                 try:
                     final_html = apply_source_naturalization(
                         html=final_html,
-                        source_url="",
-                        authority_links=list(getattr(self.settings, "authority_links", []) or []),
+                        source_url=str(getattr(selected, "url", "") or ""),
+                        authority_links=story_authority_links,
                         settings=getattr(self.settings, "source_naturalization", None),
+                        title=str(getattr(selected, "title", "") or ""),
+                        snippet=str(getattr(selected, "body", "") or ""),
+                        category=str(category or ""),
+                        topic=str((getattr(selected, "meta", {}) or {}).get("news_topic", "") or ""),
                     )
                 except Exception:
                     degraded_note = self._append_note(degraded_note, "source_naturalization_failed")
@@ -3972,7 +4136,7 @@ class AgentWorkflow:
                                     "news_entropy_rewrite_gemini",
                                     lambda: self.brain.generate_news_post(
                                         selected,
-                                        self.settings.authority_links,
+                                        story_authority_links,
                                         reference_guidance,
                                         category=category,
                                         plan={
@@ -4028,18 +4192,30 @@ class AgentWorkflow:
                                 selected.meta = selected_meta
                             except Exception:
                                 pass
-                            rewritten_draft = self._profile_call(
-                                "news_entropy_rewrite_local_fallback",
-                                lambda: self._build_news_post_local_fallback(
-                                    selected,
-                                    category,
-                                    self.settings.authority_links,
-                                    facet_context=local_facet_context,
-                                ),
-                                slow_ms=120,
-                                meta={"retry_index": int(entropy_retry_index)},
-                            )
-                            degraded_note = self._append_note(degraded_note, "entropy_rewrite_local_fallback")
+                            fallback_allowed, fallback_reason = self._can_use_news_fallback(selected, category)
+                            if not fallback_allowed:
+                                hold_reason = f"news_fallback_disallowed:{fallback_reason}"
+                                self._append_workflow_perf(
+                                    "news_entropy_rewrite_skipped",
+                                    {
+                                        "reason": hold_reason,
+                                        "retry_index": int(entropy_retry_index),
+                                    },
+                                )
+                                rewritten_draft = None
+                            else:
+                                rewritten_draft = self._profile_call(
+                                    "news_entropy_rewrite_local_fallback",
+                                    lambda: self._build_news_post_local_fallback(
+                                        selected,
+                                        category,
+                                        story_authority_links,
+                                        facet_context=local_facet_context,
+                                    ),
+                                    slow_ms=120,
+                                    meta={"retry_index": int(entropy_retry_index)},
+                                )
+                                degraded_note = self._append_note(degraded_note, "entropy_rewrite_local_fallback")
 
                         if rewritten_draft is not None:
                             draft = rewritten_draft
@@ -4107,9 +4283,13 @@ class AgentWorkflow:
                                 try:
                                     final_html = apply_source_naturalization(
                                         html=final_html,
-                                        source_url="",
-                                        authority_links=list(getattr(self.settings, "authority_links", []) or []),
+                                        source_url=str(getattr(selected, "url", "") or ""),
+                                        authority_links=story_authority_links,
                                         settings=getattr(self.settings, "source_naturalization", None),
+                                        title=str(getattr(selected, "title", "") or ""),
+                                        snippet=str(getattr(selected, "body", "") or ""),
+                                        category=str(category or ""),
+                                        topic=str((getattr(selected, "meta", {}) or {}).get("news_topic", "") or ""),
                                     )
                                 except Exception:
                                     degraded_note = self._append_note(
@@ -4235,7 +4415,7 @@ class AgentWorkflow:
                 self._workflow_perf_finish_run("success", "dry-run://not-published")
                 return WorkflowResult("success", "dry-run://not-published")
 
-            self._progress("schedule", "예약 시간 계산", 84)
+            self._progress("schedule", "발행 시간을 계산합니다.", 84)
             publish_at = self._compute_publish_at()
             if publish_at is None:
                 publish_at = datetime.now(timezone.utc) + timedelta(minutes=15)
@@ -4342,7 +4522,7 @@ class AgentWorkflow:
             )
             if ledger_payload:
                 ledger_payload["seo_slug"] = str(seo_slug or "")
-            self._progress("publish", "Blogger 예약 발행 처리", 92)
+            self._progress("publish", "Blogger 예약 발행을 준비합니다.", 92)
             published = self.publisher.publish_post(
                 draft.title,
                 final_html,
@@ -4477,7 +4657,7 @@ class AgentWorkflow:
         generation_count = 0
         partial_fix_count = 0
         today_gemini_before = int(self.logs.get_today_gemini_count())
-        self._progress("preflight", "실행 조건 확인 중", 2)
+        self._progress("preflight", "실행 전 조건과 상태를 확인합니다.", 2)
         sync_note = self._profile_call(
             "sync_with_blogger",
             lambda: self._sync_posts_index_with_blogger(force=bool(manual_trigger)),
@@ -4553,7 +4733,7 @@ class AgentWorkflow:
             self._workflow_perf_finish_run("hold", budget.reason)
             return WorkflowResult("hold", budget.reason)
 
-        self._progress("queue_check", "예약 큐 상태 점검", 8)
+        self._progress("queue_check", "Checking the scheduled queue state.", 8)
         queue_state = self._queue_state(blog_snapshot)
         queue_advisory = ""
         if (
@@ -4566,7 +4746,7 @@ class AgentWorkflow:
                 f"{self.settings.publish.target_queue_size}"
             )
 
-        self._progress("resume_check", "중단 초안 재개 가능 여부 확인", 10)
+        self._progress("resume_check", "중단된 작업과 재개 가능 상태를 점검합니다.", 10)
         resume_result = self._resume_from_saved_wip(
             manual_trigger=manual_trigger,
             queue_advisory=queue_advisory,
@@ -4575,7 +4755,7 @@ class AgentWorkflow:
             self._workflow_perf_finish_run(str(resume_result.status or "hold"), str(resume_result.message or ""))
             return resume_result
 
-        self._progress("topic_growth", "주제 풀 확장 점검", 12)
+        self._progress("topic_growth", "Reviewing topic expansion candidates.", 12)
         existing_titles = [r.get("title", "") for r in self.logs.get_recent_topic_history(days=30, limit=600)]
         try:
             self.topic_grower.maybe_grow(existing_titles)
@@ -4595,7 +4775,7 @@ class AgentWorkflow:
                 today_gemini_before=today_gemini_before,
             )
 
-        self._progress("collect", "콘텐츠 소스 수집 중", 18)
+        self._progress("collect", "후보를 수집하고 정리합니다.", 18)
         working_draft_id = ""
         recent_history_titles: list[str] = []
         recent_urls: list[str] = []
@@ -4734,7 +4914,7 @@ class AgentWorkflow:
         generation_mode = self._generation_mode()
         # Cost control: in free_mode, keep local-first/hybrid behavior even if API key exists.
         free_local_mode = bool(self.settings.budget.free_mode and generation_mode != "cloud_first")
-        self._progress("trend", "글로벌 타겟 키워드 분석", 24)
+        self._progress("trend", "트렌드와 후보 우선순위를 계산합니다.", 24)
         global_keywords, keyword_pool_note = self._acquire_run_keywords(candidates)
         keyword_fallback_note = keyword_pool_note or ""
         if not global_keywords:
@@ -4751,7 +4931,7 @@ class AgentWorkflow:
             self.logs.increment_today_gemini_count(self.brain.call_count)
             self.brain.reset_run_counter()
 
-        self._progress("select", "주제 선정 및 점수화", 28)
+        self._progress("select", "이번 실행에 사용할 주제를 선택합니다.", 28)
         selected = None
         score = 0
         reason = ""
@@ -4924,7 +5104,7 @@ class AgentWorkflow:
         )
         if collect_note:
             generation_degraded_note = self._append_note(generation_degraded_note, collect_note)
-        self._progress("plan", "트러블슈팅 플랜 구성", 34)
+        self._progress("plan", "기사 계획과 참고 맥락을 정리합니다.", 34)
         troubleshooting_plan = self._profile_call(
             "build_troubleshooting_plan",
             lambda: self._build_troubleshooting_plan_with_local_llm(selected),
@@ -4982,7 +5162,7 @@ class AgentWorkflow:
         if plan_source != "ollama":
             generation_degraded_note = self._append_note(generation_degraded_note, f"plan_source={plan_source}")
         headline_note = ""
-        self._progress("draft", "본문 초안 생성", 40)
+        self._progress("draft", "초안 생성 중입니다.", 40)
         current_domain = self._infer_domain_from_title(str(getattr(selected, "title", "") or ""))
         generation_mode = self._generation_mode()
         gemini_only_on_fail = bool(getattr(getattr(self.settings, "generation", None), "gemini_only_on_fail", True))
@@ -5157,7 +5337,7 @@ class AgentWorkflow:
             return WorkflowResult("hold", hold_msg)
 
         headline_note = "headline_opt=deferred_to_post_body"
-        draft.title = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", str(draft.title or ""))
+        draft.title = re.sub(r"[ㄱ-ㆎ가-힣]", " ", str(draft.title or ""))
         draft.title = re.sub(r"\s+", " ", draft.title).strip()
 
         similarity = self._similarity_ratio(draft.html, selected.body)
@@ -5190,7 +5370,7 @@ class AgentWorkflow:
             )
             base_html = linked_html
         base_html = self._canonicalize_html_payload(base_html)
-        self._progress("qa", "품질 게이트 점검/개선", 58)
+        self._progress("qa", "초안을 점검하고 수정합니다.", 58)
         qa_result = self._qa_evaluate(
             base_html,
             title=draft.title,
@@ -5472,7 +5652,7 @@ class AgentWorkflow:
                 )
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
-            self._progress("qa", "액션 가능성 강화 재작성", 66)
+            self._progress("qa", "이미지 적용 전후 품질을 다시 점검합니다.", 66)
             try:
                 generation_count += 1
                 rewritten_html = self._profile_call(
@@ -5545,7 +5725,7 @@ class AgentWorkflow:
             self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
 
-        self._progress("headline", "최종 제목 정합성 점검", 70)
+        self._progress("headline", "Finalizing the headline and key points.", 70)
         final_title, final_title_reason = self._finalize_title_after_content(
             current_title=draft.title,
             final_html=final_html,
@@ -5636,10 +5816,10 @@ class AgentWorkflow:
         if draft_note:
             generation_degraded_note = self._append_note(generation_degraded_note, draft_note)
 
-        self._progress("visual", "이미지 생성 및 업로드 준비", 74)
+        self._progress("visual", "이미지를 선택하고 본문에 배치합니다.", 74)
         target_images = self._image_target_max()
         min_images_required = self._image_min_required()
-        self._set_image_pipeline_state("running", 0, target_images, "이미지 준비 서비스 시작")
+        self._set_image_pipeline_state("running", 0, target_images, "Preparing images and article placement.")
 
         image_prompt_plan = self._build_image_prompt_plan_with_local_llm(draft, selected)
         images = self._profile_call(
@@ -5677,8 +5857,8 @@ class AgentWorkflow:
             return WorkflowResult("hold", hold_msg)
         if len(images) > target_images:
             images = images[:target_images]
-        self._set_image_pipeline_state("validated", len(images), target_images, f"이미지 선택 완료 {len(images)}/{target_images}")
-        self._progress("visual", f"이미지 선택 완료 {len(images)}/{target_images}", 80)
+        self._set_image_pipeline_state("validated", len(images), target_images, f"Validated image set. {len(images)}/{target_images}")
+        self._progress("visual", f"Validated image set. {len(images)}/{target_images}", 80)
         self._ensure_min_long_tail_keywords(
             candidate=selected,
             title=draft.title,
@@ -5911,7 +6091,7 @@ class AgentWorkflow:
             self._workflow_perf_finish_run("hold", reason)
             return WorkflowResult("hold", reason)
 
-        self._progress("schedule", "예약 시간 계산", 84)
+        self._progress("schedule", "발행 시간을 계산합니다.", 84)
         publish_at = self._compute_publish_at()
         if publish_at is None:
             # Completion-first fallback: book the earliest safe slot instead of skipping.
@@ -5940,7 +6120,7 @@ class AgentWorkflow:
                 else ""
             ),
         )
-        self._progress("publish", "Blogger 예약 발행 처리", 92)
+        self._progress("publish", "Blogger 예약 발행을 준비합니다.", 92)
         published = None
         last_publish_err = ""
         if images and (not preflight_thumb_src):
@@ -6115,7 +6295,7 @@ class AgentWorkflow:
             self._mark_active_slot("hold", hold_msg)
             self._workflow_perf_finish_run("hold", hold_msg)
             return WorkflowResult("hold", hold_msg)
-        self._progress("indexing", "인덱싱/후처리 반영", 97)
+        self._progress("indexing", "발행 후 색인 요청을 준비합니다.", 97)
         self.logs.add_scheduled_post(
             publish_at=publish_at.isoformat(),
             post_id=published.post_id,
@@ -6243,7 +6423,7 @@ class AgentWorkflow:
         except Exception:
             pass
         self._cleanup_local_image_files(images)
-        self._progress("done", "회차 완료", 100)
+        self._progress("done", "작업이 완료되었습니다.", 100)
         self._mark_active_slot("consumed", "publish_success", post_id=str(getattr(published, "post_id", "") or ""))
         if publish_at:
             success_msg = f"{published.url} (scheduled: {publish_at.isoformat()})"
@@ -6377,6 +6557,18 @@ class AgentWorkflow:
             ]
             if any(tok in text for tok in banned):
                 return False
+            if mode == "tech_news_only":
+                meta = dict(getattr(candidate, "meta", {}) or {})
+                assessment = self._assess_tech_news_candidate(
+                    title=str(getattr(candidate, "title", "") or ""),
+                    snippet=str(getattr(candidate, "body", "") or ""),
+                    category=str(meta.get("news_category", "") or ""),
+                    source_url=str(getattr(candidate, "url", "") or ""),
+                    topic=str(meta.get("news_topic", "") or ""),
+                )
+                if not assessment.allow:
+                    self._log_news_mode_guard("candidate_matches_content_mode", assessment.reason)
+                    return False
             return True
         if mode != "tech_troubleshoot_only":
             return True
@@ -6432,7 +6624,7 @@ class AgentWorkflow:
             key in lower
             for key in [
                 "prompt",
-                "프롬프트",
+                "prompt pattern",
                 "system instruction",
                 "example prompt",
                 "prompt guide",
@@ -6448,7 +6640,7 @@ class AgentWorkflow:
 
     def _is_physical_impossible_error(self, message: str) -> bool:
         msg = (message or "").lower()
-        if "api 키가 설정되지 않았습니다" in msg:
+        if "api key missing" in msg:
             return True
         if "api key not valid" in msg:
             return True
@@ -6458,15 +6650,15 @@ class AgentWorkflow:
             return True
         if "invalid_scope" in msg:
             return True
-        if "oauth 토큰 스코프가 현재 요청과 맞지 않습니다" in msg:
+        if "oauth scope missing" in msg or "invalid_scope" in msg:
             return True
         if "permission denied" in msg and "drive" in msg:
             return True
-        if "gcs 버킷이 설정되지 않았습니다" in msg:
+        if "gcs key missing" in msg:
             return True
-        if "gcs 서비스 계정 키 파일을 찾을 수 없습니다" in msg:
+        if "gcs upload failed" in msg:
             return True
-        if "google-cloud-storage 패키지가 설치되지 않았습니다" in msg:
+        if "google-cloud-storage package missing" in msg:
             return True
         if "blogger_token.json" in msg and "no such file or directory" in msg:
             return True
@@ -6476,7 +6668,7 @@ class AgentWorkflow:
         msg = (message or "").lower()
         if "[daily_quota_exceeded]" in msg:
             return "No Quota: daily limit exhausted"
-        if "api 키가 설정되지 않았습니다" in msg:
+        if "api key missing" in msg:
             return "No API Key: Gemini key is missing"
         if "api key not valid" in msg or "invalid api key" in msg:
             return "No API Key: invalid Gemini key"
@@ -6484,13 +6676,13 @@ class AgentWorkflow:
             return "No Permission: Google Drive scope missing"
         if "insufficient authentication scopes" in msg:
             return "No Permission: OAuth scopes are insufficient"
-        if "invalid_scope" in msg or "oauth 토큰 스코프가 현재 요청과 맞지 않습니다" in msg:
+        if "invalid_scope" in msg or "oauth scope missing" in msg:
             return "No Permission: OAuth scope mismatch (reconnect Google login)"
-        if "gcs 버킷이 설정되지 않았습니다" in msg:
+        if "gcs key missing" in msg:
             return "No Image Hosting: GCS bucket is not configured"
-        if "gcs 서비스 계정 키 파일을 찾을 수 없습니다" in msg:
+        if "gcs upload failed" in msg:
             return "No Image Hosting: service_account.json is missing"
-        if "google-cloud-storage 패키지가 설치되지 않았습니다" in msg:
+        if "google-cloud-storage package missing" in msg:
             return "No Image Hosting: google-cloud-storage dependency missing"
         if "blogger_token.json" in msg and "no such file or directory" in msg:
             return "No Auth Token: blogger_token.json is missing"
@@ -6521,8 +6713,8 @@ class AgentWorkflow:
             "rate limit",
             "thumbnail must be generated image",
             "thumbnail must be hosted on blogger media server",
-            "이미지 최소 개수 부족",
-            "이미지 업로드에 실패했습니다",
+            "thumbnail generation failed",
+            "thumbnail upload failed",
         ]
         if self._is_physical_impossible_error(msg):
             return False
@@ -6568,6 +6760,193 @@ class AgentWorkflow:
             self.qa.write("runtime", "news_mode_guard_skip", payload)
         except Exception:
             return
+
+    def _active_authority_links(self) -> list[str]:
+        live_links = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (getattr(self.qa, "authority_links", []) or [])
+            if str(x or "").strip()
+        ]
+        if live_links:
+            return live_links
+        return [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (getattr(self.settings, "authority_links", []) or [])
+            if str(x or "").strip()
+        ]
+
+    def _story_authority_links(
+        self,
+        *,
+        candidate: TopicCandidate | None = None,
+        title: str = "",
+        snippet: str = "",
+        category: str = "",
+        source_url: str = "",
+        topic: str = "",
+    ) -> list[str]:
+        meta = dict(getattr(candidate, "meta", {}) or {}) if candidate is not None else {}
+        safe_title = title or str(getattr(candidate, "title", "") or "")
+        safe_snippet = snippet or str(getattr(candidate, "body", "") or "")
+        safe_category = category or str(meta.get("news_category", "") or "")
+        safe_source_url = source_url or str(getattr(candidate, "url", "") or "")
+        safe_topic = topic or str(meta.get("news_topic", "") or "")
+        return filter_relevant_authority_links(
+            list(getattr(self.settings, "authority_links", []) or []),
+            title=safe_title,
+            snippet=safe_snippet,
+            category=safe_category,
+            source_url=safe_source_url,
+            topic=safe_topic,
+        )
+
+    def _set_story_authority_links(
+        self,
+        *,
+        candidate: TopicCandidate | None = None,
+        title: str = "",
+        snippet: str = "",
+        category: str = "",
+        source_url: str = "",
+        topic: str = "",
+    ) -> list[str]:
+        links = self._story_authority_links(
+            candidate=candidate,
+            title=title,
+            snippet=snippet,
+            category=category,
+            source_url=source_url,
+            topic=topic,
+        )
+        try:
+            self.qa.authority_links = list(links or [])
+        except Exception:
+            pass
+        return list(links or [])
+
+    def _assess_tech_news_candidate(
+        self,
+        *,
+        title: str,
+        snippet: str,
+        category: str,
+        source_url: str,
+        topic: str = "",
+    ):
+        return assess_tech_news_topic(
+            title=title,
+            snippet=snippet,
+            category=category,
+            source_url=source_url,
+            topic=topic,
+        )
+
+    def _news_key_terms(self, text: str, limit: int = 12) -> set[str]:
+        stopwords = {
+            "about", "after", "before", "between", "could", "first", "from", "have", "into", "just",
+            "main", "more", "most", "news", "only", "over", "section", "source", "story", "their",
+            "there", "these", "this", "those", "today", "tradeoff", "what", "when", "where", "which",
+            "while", "with", "would", "your",
+        }
+        out: list[str] = []
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", str(text or "").lower()):
+            if token in stopwords or token in out:
+                continue
+            out.append(token)
+            if len(out) >= max(4, int(limit)):
+                break
+        return set(out)
+
+    def _news_named_terms(self, text: str) -> set[str]:
+        phrases = re.findall(r"\b([A-Z][a-zA-Z0-9&.-]{2,}(?:\s+[A-Z][a-zA-Z0-9&.-]{2,}){0,2})", str(text or ""))
+        return {
+            re.sub(r"\s+", " ", item).strip().lower()
+            for item in phrases
+            if re.sub(r"\s+", " ", item).strip()
+        }
+
+    def _evaluate_news_topic_coherence(
+        self,
+        *,
+        candidate: TopicCandidate,
+        html: str,
+        title: str,
+        category: str,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        source_title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
+        source_snippet = re.sub(r"\s+", " ", str(getattr(candidate, "body", "") or "")).strip()
+        source_topic = str((getattr(candidate, "meta", {}) or {}).get("news_topic", "") or "")
+        text = re.sub(r"<[^>]+>", " ", str(html or ""))
+        text = re.sub(r"\s+", " ", text).strip()
+        headings = " ".join(
+            re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(x or ""))).strip()
+            for x in re.findall(r"<h[23][^>]*>.*?</h[23]>", str(html or ""), flags=re.IGNORECASE | re.DOTALL)
+        )
+        source_terms = self._news_key_terms(f"{source_title} {source_snippet}", limit=14)
+        body_terms = self._news_key_terms(text, limit=24)
+        heading_terms = self._news_key_terms(headings, limit=12)
+        overlap = len(source_terms & (body_terms | heading_terms))
+        overlap_ratio = overlap / max(1, min(len(source_terms), 8))
+        title_terms = self._news_key_terms(title or source_title, limit=10)
+        title_overlap = len(title_terms & (body_terms | heading_terms)) / max(1, len(title_terms))
+        title_entities = self._news_named_terms(title or source_title)
+        body_entities = self._news_named_terms(f"{headings} {text}")
+        entity_overlap = len(title_entities & body_entities)
+        generic_hits = [
+            token
+            for token in (
+                "source frame:",
+                "main tradeoff:",
+                "write from the reader's lived experience",
+                "keep a one-line status update tied to",
+            )
+            if token in str(html or "").lower()
+        ]
+        source_assessment = self._assess_tech_news_candidate(
+            title=source_title,
+            snippet=source_snippet,
+            category=category,
+            source_url=str(getattr(candidate, "url", "") or ""),
+            topic=source_topic,
+        )
+        detail = {
+            "source_terms": sorted(source_terms)[:8],
+            "body_terms": sorted(body_terms)[:8],
+            "overlap_ratio": round(float(overlap_ratio), 3),
+            "title_overlap": round(float(title_overlap), 3),
+            "entity_overlap": int(entity_overlap),
+            "generic_hits": list(generic_hits),
+            "topic_reason": str(source_assessment.reason or ""),
+        }
+        if is_news_mode(self.settings) and (not source_assessment.allow):
+            return False, "topic_mismatch_low_overlap", detail
+        if title_entities and entity_overlap <= 0 and overlap_ratio < 0.20:
+            return False, "entity_mismatch_before_publish", detail
+        if generic_hits and (overlap_ratio < 0.28 or title_overlap < 0.24):
+            return False, "generic_body_not_grounded", detail
+        if overlap_ratio < 0.18 and title_overlap < 0.18:
+            return False, "topic_mismatch_low_overlap", detail
+        return True, "", detail
+
+    def _can_use_news_fallback(self, candidate: TopicCandidate, category: str) -> tuple[bool, str]:
+        meta = dict(getattr(candidate, "meta", {}) or {})
+        snippet = re.sub(r"\s+", " ", str(getattr(candidate, "body", "") or "")).strip()
+        assessment = self._assess_tech_news_candidate(
+            title=str(getattr(candidate, "title", "") or ""),
+            snippet=snippet,
+            category=category or str(meta.get("news_category", "") or ""),
+            source_url=str(getattr(candidate, "url", "") or ""),
+            topic=str(meta.get("news_topic", "") or ""),
+        )
+        if not assessment.allow:
+            return False, assessment.reason
+        if len(snippet) < 60:
+            return False, "source_summary_too_thin_for_fallback"
+        source_terms = self._news_key_terms(f"{getattr(candidate, 'title', '')} {snippet}", limit=12)
+        entity_terms = self._news_named_terms(str(getattr(candidate, "title", "") or ""))
+        if len(source_terms) < 4 and not entity_terms:
+            return False, "insufficient_grounding_terms"
+        return True, ""
 
     def _current_rotated_device_type(self) -> str:
         default_order = ["windows", "mac", "iphone", "galaxy"]
@@ -6974,7 +7353,7 @@ class AgentWorkflow:
         return None
 
     def _resume_collect_done(self, row: dict, manual_trigger: bool, queue_advisory: str = "") -> WorkflowResult:
-        self._progress("draft", "중단 문서 재개: collect 단계에서 초안 생성", 40)
+        self._progress("draft", "재개된 작업의 초안을 복구합니다.", 40)
         title = self._strip_wip_title_prefix(str(row.get("title", "") or "").strip())
         html = self._strip_wip_checkpoint_banner(str(row.get("content", "") or ""))
         plain = re.sub(r"<[^>]+>", " ", html or "")
@@ -7074,7 +7453,7 @@ class AgentWorkflow:
         return result
 
     def _resume_images_done(self, row: dict, manual_trigger: bool, queue_advisory: str = "") -> WorkflowResult:
-        self._progress("schedule", "중단 문서 재개: 예약 시간 계산", 84)
+        self._progress("schedule", "재개된 작업의 발행 시간을 계산합니다.", 84)
         publish_at = self._compute_publish_at()
         if publish_at is None:
             delay_min = max(10, int(getattr(self.settings.publish, "min_delay_minutes", 10)))
@@ -7094,9 +7473,9 @@ class AgentWorkflow:
         if not title:
             title = "Recovered Draft"
         if not html_body:
-            raise RuntimeError("재개 가능한 draft 본문이 비어 있습니다.")
+            raise RuntimeError("Resumed job is missing draft body content.")
 
-        self._progress("publish", "중단 문서 재개: 예약 발행 처리", 92)
+        self._progress("publish", "재개된 작업을 발행합니다.", 92)
         backoff = [30, 300, 900]
         published = None
         last_err = ""
@@ -7173,7 +7552,7 @@ class AgentWorkflow:
         )
         if manual_trigger and str(getattr(published, "post_id", "")).strip():
             self.logs.add_excluded_post(str(published.post_id).strip(), reason="manual_trigger")
-        self._progress("done", "중단 문서 재개 완료", 100)
+        self._progress("done", "재개된 작업이 완료되었습니다.", 100)
         self._mark_active_slot("consumed", "resume_images_done_publish_success", post_id=str(getattr(published, "post_id", "") or ""))
         return WorkflowResult("success", f"{published.url} (scheduled: {publish_at.isoformat()})")
 
@@ -7221,10 +7600,10 @@ class AgentWorkflow:
         )
         resume_degraded_note = ""
 
-        self._progress("visual", "중단 문서 재개: 이미지 라이브러리 선택", 74)
+        self._progress("visual", "재개된 작업의 이미지를 확인합니다.", 74)
         target_images = self._image_target_max()
         min_images_required = self._image_min_required()
-        self._set_image_pipeline_state("running", 0, target_images, "중단 작업 이미지 선택")
+        self._set_image_pipeline_state("running", 0, target_images, "Preparing images for the resumed job.")
         image_prompt_plan: dict[str, Any] = {"source": "library"}
         if is_news_mode(self.settings):
             cat = str(row.get("category", "tech") or "tech")
@@ -7276,8 +7655,8 @@ class AgentWorkflow:
             return WorkflowResult("hold", hold_msg)
         if len(images) > target_images:
             images = images[:target_images]
-        self._set_image_pipeline_state("validated", len(images), target_images, f"이미지 선택 완료 {len(images)}/{target_images}")
-        self._progress("visual", f"이미지 선택 완료 {len(images)}/{target_images}", 80)
+        self._set_image_pipeline_state("validated", len(images), target_images, f"Validated image set. {len(images)}/{target_images}")
+        self._progress("visual", f"Validated image set. {len(images)}/{target_images}", 80)
 
         resume_domain = self._infer_domain_from_title(title)
         self._ensure_min_long_tail_keywords(candidate=candidate, title=title, global_keywords=self.last_global_keywords)
@@ -7454,7 +7833,7 @@ class AgentWorkflow:
             self._mark_active_slot("hold", reason)
             return WorkflowResult("hold", reason)
 
-        self._progress("schedule", "중단 문서 재개: 예약 시간 계산", 84)
+        self._progress("schedule", "재개된 작업의 발행 시간을 계산합니다.", 84)
         publish_at = self._compute_publish_at()
         if publish_at is None:
             delay_min = max(10, int(getattr(self.settings.publish, "min_delay_minutes", 10)))
@@ -7474,7 +7853,7 @@ class AgentWorkflow:
             ),
         )
 
-        self._progress("publish", "중단 문서 재개: 예약 발행 처리", 92)
+        self._progress("publish", "재개된 작업을 발행합니다.", 92)
         meta_description = self._build_meta_description(
             title=title,
             summary=summary_text,
@@ -7601,7 +7980,7 @@ class AgentWorkflow:
         self._remember_title_fingerprint(title)
         if manual_trigger and str(getattr(published, "post_id", "")).strip():
             self.logs.add_excluded_post(str(published.post_id).strip(), reason="manual_trigger")
-        self._progress("done", "중단 문서 재개 완료", 100)
+        self._progress("done", "재개된 작업이 완료되었습니다.", 100)
         self._mark_active_slot("consumed", "resume_publish_success", post_id=str(getattr(published, "post_id", "") or ""))
         return WorkflowResult("success", f"{published.url} (scheduled: {publish_at.isoformat()})")
 
@@ -7877,6 +8256,53 @@ class AgentWorkflow:
             "Start with one safe troubleshooting step, then scale only after you verify the result.",
         )
 
+    def _curate_news_images(self, images: list[ImageAsset], candidate: TopicCandidate) -> list[ImageAsset]:
+        if not images:
+            return []
+        if not is_news_mode(self.settings):
+            self._optimize_thumbnail_alt(images, candidate)
+            return list(images or [])
+
+        long_tails = [
+            re.sub(r"\s+", " ", str(k or "")).strip()
+            for k in (getattr(candidate, "long_tail_keywords", []) or [])
+            if str(k or "").strip()
+        ]
+        entity = re.sub(r"\s+", " ", str(getattr(candidate, "main_entity", "") or "")).strip()
+        title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
+        subject = ""
+        if long_tails:
+            base = re.sub(r"[?]+$", "", long_tails[0]).strip()
+            base = re.sub(r"^(how|why|what)\s+", "", base, flags=re.IGNORECASE)
+            subject = re.sub(r"\s+", " ", base).strip(" -")
+        if not subject:
+            subject = entity or title or "this update"
+        subject = re.sub(r"[^A-Za-z0-9 .,:'&()/+-]", " ", subject)
+        subject = re.sub(r"\s+", " ", subject).strip()
+        subject = subject[:120] if subject else "this update"
+
+        curated: list[ImageAsset] = []
+        seen_sources: set[str] = set()
+        for index, image in enumerate(images or []):
+            if len(curated) >= 2:
+                break
+            fingerprint = str(getattr(image, "source_url", "") or getattr(image, "path", "") or "").strip().lower()
+            if fingerprint and fingerprint in seen_sources:
+                continue
+            if fingerprint:
+                seen_sources.add(fingerprint)
+            image.slot_role = "thumbnail" if index == 0 else "content"
+            if image.slot_role == "thumbnail":
+                image.alt = f"Illustration related to {subject}."[:180]
+            else:
+                anchor = re.sub(r"\s+", " ", str(getattr(image, "anchor_text", "") or "")).strip()
+                context = anchor[:72] if anchor else subject
+                image.alt = f"Supporting image related to {context}."[:180]
+            curated.append(image)
+        if curated:
+            self._optimize_thumbnail_alt(curated, candidate)
+        return curated
+
     def _optimize_thumbnail_alt(self, images: list[ImageAsset], candidate: TopicCandidate) -> None:
         if not images:
             return
@@ -7891,7 +8317,6 @@ class AgentWorkflow:
         entity = re.sub(r"\s+", " ", str(getattr(candidate, "main_entity", "") or "")).strip()
         title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
 
-        # pick subject
         subject = ""
         if long_tails:
             base = re.sub(r"[?]+$", "", long_tails[0]).strip()
@@ -7901,16 +8326,18 @@ class AgentWorkflow:
         if not subject:
             subject = entity or title or "this update"
 
-        subject = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", subject)
+        subject = re.sub(r"[^A-Za-z0-9 .,:'&()/+-]", " ", subject)
         subject = re.sub(r"\s+", " ", subject).strip()
         subject = subject[:120] if subject else "this update"
 
         if news_mode:
-            # NEWS: never mention troubleshooting / diagram language
-            thumb.alt = f"Tech news thumbnail illustration about {subject}."[:180]
+            thumb.alt = f"Illustration related to {subject}."[:180]
+            for image in images[1:]:
+                anchor = re.sub(r"\s+", " ", str(getattr(image, "anchor_text", "") or "")).strip()
+                context = anchor[:72] if anchor else subject
+                image.alt = f"Supporting image related to {context}."[:180]
             return
 
-        # Legacy troubleshoot mode
         thumb.alt = f"Practical troubleshooting process diagram for {subject}."[:180]
 
     def _enforce_seo_title(
@@ -7926,7 +8353,7 @@ class AgentWorkflow:
         news_mode = is_news_mode(self.settings)
         if not raw:
             raw = pref or base_candidate_title or ("Tech update" if news_mode else "Windows update error fix")
-        raw = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", raw)
+        raw = re.sub(r"[ㄱ-ㆎ가-힣]", " ", raw)
         banned_phrases = [
             "fixes that actually work",
             "ultimate guide",
@@ -8238,7 +8665,7 @@ class AgentWorkflow:
         return raw[:120]
 
     def _normalize_title_for_fingerprint(self, title: str) -> str:
-        norm = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", str(title or "").lower())
+        norm = re.sub(r"[ㄱ-ㆎ가-힣]", " ", str(title or "").lower())
         norm = re.sub(r"\b(20[0-9]{2})\b", " ", norm)
         norm = re.sub(r"[^a-z0-9\s]", " ", norm)
         norm = re.sub(r"\s+", " ", norm).strip()
@@ -8441,7 +8868,7 @@ class AgentWorkflow:
         out: list[str] = []
         seen: set[str] = set()
         for raw in seeds:
-            t = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", " ", str(raw or ""))
+            t = re.sub(r"[ㄱ-ㆎ가-힣]", " ", str(raw or ""))
             t = re.sub(r"\s+", " ", t).strip(" -:")
             if not t:
                 continue
@@ -8719,7 +9146,7 @@ class AgentWorkflow:
         warnings: list[str] = []
         merged_raw = f"{title}\n{final_html}"
         merged = merged_raw.lower()
-        if re.search(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", merged_raw):
+        if re.search(r"[ㄱ-ㆎ가-힣]", merged_raw):
             errors.append("english_only_violation_hangul")
 
         if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", str(final_html or "")):
@@ -8776,7 +9203,7 @@ class AgentWorkflow:
             missing_alt = [img for img in images if not str(getattr(img, "alt", "") or "").strip()]
             if missing_alt:
                 errors.append("alt_missing")
-            hangul_alt = [img for img in images if re.search(r"[가-힣ㄱ-ㅎㅏ-ㅣ]", str(getattr(img, "alt", "") or ""))]
+            hangul_alt = [img for img in images if re.search(r"[ㄱ-ㆎ가-힣]", str(getattr(img, "alt", "") or ""))]
             if hangul_alt:
                 errors.append("alt_non_english_detected")
             if images:
@@ -9140,7 +9567,7 @@ class AgentWorkflow:
             try:
                 self._progress(
                     "publish",
-                    f"썸네일 업로드 재시도 중 ({attempt_no}/{finite_cycles})",
+                    f"Running thumbnail preflight. ({attempt_no}/{finite_cycles})",
                     85,
                 )
                 thumb_src = self.publisher.preflight_thumbnail_blogger_media(
@@ -9639,12 +10066,12 @@ class AgentWorkflow:
     def _strip_hangul_blocks(self, html: str) -> str:
         out = str(html or "")
         out = re.sub(
-            r"<(p|li|h2|h3|figcaption)[^>]*>[^<]*[가-힣ㄱ-ㅎㅏ-ㅣ][^<]*</\1>",
+            r"<(p|li|h2|h3|figcaption)[^>]*>[^<]*[ㄱ-ㆎ가-힣][^<]*</\1>",
             "",
             out,
             flags=re.IGNORECASE,
         )
-        out = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]+", " ", out)
+        out = re.sub(r"[ㄱ-ㆎ가-힣]+", " ", out)
         out = re.sub(r"\s{2,}", " ", out)
         out = re.sub(r"\n{3,}", "\n\n", out)
         return out.strip()
@@ -11514,7 +11941,7 @@ class AgentWorkflow:
             if len(s) < 80:
                 s = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(html or ""))).strip()[:220]
             meta = f"{t}: {s}".strip()
-            meta = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]+", " ", meta)
+            meta = re.sub(r"[ㄱ-ㆎ가-힣]+", " ", meta)
             meta = re.sub(r"\b(test|troubleshooting|fix guide)\b", " ", meta, flags=re.IGNORECASE)
             meta = re.sub(r"\s+", " ", meta).strip()
             if len(meta) > 160:
@@ -11530,7 +11957,7 @@ class AgentWorkflow:
                 seed
                 + " This post explains what worked, what failed, and what everyday users can apply immediately."
             )
-        seed = re.sub(r"[가-힣ㄱ-ㅎㅏ-ㅣ]+", " ", seed)
+        seed = re.sub(r"[ㄱ-ㆎ가-힣]+", " ", seed)
         seed = re.sub(r"\s+", " ", seed).strip()
         if len(seed) < 120:
             seed = (seed + " Learn the practical steps, common mistakes, and realistic outcomes from this one-week test.").strip()
@@ -12150,4 +12577,3 @@ class AgentWorkflow:
             last_seen_at=datetime.now(timezone.utc).isoformat(),
             source="blogger",
         )
-

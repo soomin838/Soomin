@@ -6,6 +6,16 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+PROMPT_PACK_VERSION = 2
+_STALE_CACHE_PATTERNS = (
+    "deliver maximum engagement and click-through-rate value",
+    "write from the reader's lived experience",
+    "source frame:",
+    "main tradeoff:",
+    "keep a one-line status update tied to",
+    "patient, approachable tech educator",
+)
+
 
 @dataclass
 class PromptPack:
@@ -18,6 +28,7 @@ class PromptPack:
     temperature: float
     top_p: float
     persona_id: str = ""
+    version: int = PROMPT_PACK_VERSION
 
 
 _PERSONA_POOL = [
@@ -85,6 +96,7 @@ class PromptFactory:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.base_dir = (root / "storage" / "prompt_packs").resolve()
+        self._purge_stale_packs()
 
     def get_pack(self, purpose: str, seed: str = "") -> PromptPack:
         purpose_key = str(purpose or "generic").strip().lower() or "generic"
@@ -93,7 +105,9 @@ class PromptFactory:
         if pack_path.exists():
             try:
                 data = json.loads(pack_path.read_text(encoding="utf-8"))
-                return PromptPack(**data)
+                if self._is_valid_cached_pack(data):
+                    return PromptPack(**data)
+                pack_path.unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -109,6 +123,41 @@ class PromptFactory:
         except Exception:
             pass
         return pack
+
+    def _is_valid_cached_pack(self, data: dict[str, object]) -> bool:
+        if not isinstance(data, dict):
+            return False
+        if int(data.get("version", 0) or 0) != PROMPT_PACK_VERSION:
+            return False
+        required = {"purpose", "system", "user", "style_variant_id", "must_include", "ban_tokens", "temperature", "top_p"}
+        if not required.issubset({str(k or "") for k in data.keys()}):
+            return False
+        merged = " ".join(
+            str(data.get(key, "") or "")
+            for key in ("purpose", "system", "user", "style_variant_id", "persona_id")
+        ).lower()
+        if any(marker in merged for marker in _STALE_CACHE_PATTERNS):
+            return False
+        return True
+
+    def _purge_stale_packs(self) -> None:
+        if not self.base_dir.exists():
+            return
+        for pack_path in self.base_dir.rglob("*.json"):
+            try:
+                data = json.loads(pack_path.read_text(encoding="utf-8"))
+            except Exception:
+                try:
+                    pack_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                continue
+            if self._is_valid_cached_pack(data):
+                continue
+            try:
+                pack_path.unlink(missing_ok=True)
+            except Exception:
+                continue
 
     def _style_variant_id(self, purpose: str, seed: str) -> str:
         src = f"{datetime.now(timezone.utc).date().isoformat()}:{purpose}:{seed}".encode("utf-8")

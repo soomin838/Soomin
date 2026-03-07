@@ -333,7 +333,7 @@ class QualitySettings:
     min_external_links: int = 1
     min_authority_links: int = 1
     min_external_links_news_interpretation: int = 1
-    min_authority_links_news_interpretation: int = 1
+    min_authority_links_news_interpretation: int = 0
     banned_markers: list[str] = field(
         default_factory=lambda: [
             "delve",
@@ -354,6 +354,10 @@ class QualitySettings:
             "section context visual",
             "concept visual",
             "supporting chart",
+            "source frame:",
+            "main tradeoff:",
+            "write from the reader's lived experience",
+            "keep a one-line status update tied to",
         ]
     )
     disallowed_terms_office_experiment: list[str] = field(

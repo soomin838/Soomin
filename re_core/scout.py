@@ -12,6 +12,7 @@ from urllib.parse import quote_plus
 import requests
 
 from .settings import ContentModeSettings, SourceSettings
+from .story_profile import assess_tech_news_topic
 
 
 @dataclass
@@ -502,33 +503,24 @@ class SourceScout:
                 continue
             c.title = cleaned_title
             out.append(c)
-        if out:
-            return out
-        # deterministic fallback pool to avoid empty candidate set
-        fallback_titles = [
-            "How AI is Revolutionizing Personal Productivity in 2026",
-            "The Future of Computing: Why Your Next Device Might Not Have a Screen",
-            "Breaking Down the Latest Tech Regulation: What Users Need to Know",
-            "Beyond the Hype: A Realistic Look at This Year's Innovation Trends",
-        ]
-        return [
-            TopicCandidate(
-                source="fallback_news",
-                title=t,
-                body="Strategic news analysis and trend interpretation for a mainstream tech audience.",
-                score=120 - idx,
-                url=f"https://duckduckgo.com/?q={quote_plus(t)}",
-                main_entity="",
-                long_tail_keywords=[],
-            )
-            for idx, t in enumerate(fallback_titles, start=1)
-        ]
+        return out
 
     def _passes_news_mode(self, candidate: TopicCandidate) -> bool:
         text = f"{getattr(candidate, 'title', '')} {getattr(candidate, 'body', '')}".lower()
         banned = [str(x or "").strip().lower() for x in (getattr(self.content_mode, "banned_topic_keywords", []) or []) if str(x or "").strip()]
         if any(token in text for token in banned):
             return False
+        mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower()
+        if mode == "tech_news_only":
+            meta = dict(getattr(candidate, "meta", {}) or {})
+            assessment = assess_tech_news_topic(
+                title=str(getattr(candidate, "title", "") or ""),
+                snippet=str(getattr(candidate, "body", "") or ""),
+                category=str(meta.get("news_category", "") or ""),
+                source_url=str(getattr(candidate, "url", "") or ""),
+                topic=str(meta.get("news_topic", "") or ""),
+            )
+            return bool(assessment.allow)
         # 뉴스 모드에서는 특정 장치 토큰이 없어도 괜찮으나, 뉴스성 키워드는 있어야 함
         has_news_intent = any(token in text for token in self._NEWS_INTENT_TERMS)
         has_mainstream = any(token in text for token in self._MAINSTREAM_TERMS)

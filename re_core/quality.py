@@ -893,6 +893,14 @@ class ContentQAGate:
             if masked_prompt_example_regions:
                 detail = f"outside_allowed_examples:{detail}"
             return True, detail
+        if re.search(
+            r"\b(source frame:|main tradeoff:|write from the reader's lived experience|keep a one-line status update tied to)\b",
+            target_text,
+        ):
+            detail = "directive_template_residue"
+            if masked_prompt_example_regions:
+                detail = f"outside_allowed_examples:{detail}"
+            return True, detail
 
         patterns = [str(x or "").strip() for x in (self.settings.prompt_leak_patterns or []) if str(x or "").strip()]
         for token in patterns:
@@ -1378,6 +1386,12 @@ class ContentQAGate:
             out = re.sub(re.escape(t), "", out, flags=re.IGNORECASE)
         out = re.sub(
             r"\bfor quick take\b.{0,80}\b(you are|write|must|do not)\b",
+            "",
+            out,
+            flags=re.IGNORECASE,
+        )
+        out = re.sub(
+            r"\b(source frame:|main tradeoff:|write from the reader's lived experience|keep a one-line status update tied to)\b",
             "",
             out,
             flags=re.IGNORECASE,

@@ -100,8 +100,8 @@ publish:
   thumbnail_preflight_only: false
   thumbnail_preflight_max_cycles: 6
   thumbnail_preflight_retry_delay_sec: 8
-  min_images_required: 5
-  max_images_per_post: 5
+  min_images_required: 1
+  max_images_per_post: 2
 internal_links:
   enabled: true
   body_link_count: 1
@@ -157,6 +157,8 @@ quality:
   min_list_items: 3
   min_external_links: 1
   min_authority_links: 1
+  min_external_links_news_interpretation: 1
+  min_authority_links_news_interpretation: 0
   min_external_links_tech_troubleshoot: 1
   min_authority_links_tech_troubleshoot: 1
   banned_markers:
@@ -175,6 +177,14 @@ quality:
   - section context visual
   - concept visual
   - supporting chart
+  - source frame:
+  - main tradeoff:
+  - write from the reader's lived experience
+  - keep a one-line status update tied to
+  - source frame:
+  - main tradeoff:
+  - write from the reader's lived experience
+  - keep a one-line status update tied to
   disallowed_terms_office_experiment:
   - rollback
   - rollback criteria
@@ -395,9 +405,9 @@ gemini:
   max_calls_per_run: 4
   min_request_interval_seconds: 30
 visual:
-  target_images_per_post: 5
+  target_images_per_post: 2
   max_banner_images: 1
-  max_inline_images: 4
+  max_inline_images: 1
   image_provider: generated
   enable_gemini_image_generation: true
   allow_chart_fallback: false

@@ -37,19 +37,21 @@ DEFAULT_PER_REQUEST = 50
 MAX_PER_REQUEST = 250
 DEFAULT_TREND_QUERIES = [
     "AI",
-    "technology",
-    "startup",
     "cybersecurity",
     "software",
-    "open source",
+    "privacy",
+    "mobile",
+    "chips",
+    "platform updates",
 ]
 KEYWORD_EXPANSIONS: dict[str, list[str]] = {
     "ai": ["artificial intelligence", "machine learning", "LLM"],
-    "technology": ["tech", "innovation", "digital transformation"],
-    "startup": ["venture", "seed round", "funding"],
     "cybersecurity": ["infosec", "data breach", "zero trust"],
     "software": ["developer tools", "SaaS", "enterprise software"],
-    "open source": ["open-source", "GitHub", "OSS"],
+    "privacy": ["tracking", "consent", "encryption"],
+    "mobile": ["android", "iphone", "smartphone"],
+    "chips": ["gpu", "semiconductor", "chip supply"],
+    "platform updates": ["software update", "release notes", "rollout"],
 }
 
 

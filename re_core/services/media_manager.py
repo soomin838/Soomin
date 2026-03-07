@@ -479,11 +479,11 @@ class MediaManagerService:
                 local_copy = self._download_remote_asset(src_url=src_url, index=index)
                 if local_copy is not None:
                     kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
-                    alt = "Editorial thumbnail illustration" if kind == "thumb_final" else "Editorial illustration"
+                    alt = "Illustration related to the article topic" if kind == "thumb_final" else "Supporting image related to the article topic"
                     slot_role = "thumbnail" if "thumb" in kind else "content"
                     return ImageAsset(path=local_copy, alt=alt, source_kind="news_pack", source_url=src_url, slot_role=slot_role)
             kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
-            alt = "Editorial thumbnail illustration" if kind == "thumb_final" else "Editorial illustration"
+            alt = "Illustration related to the article topic" if kind == "thumb_final" else "Supporting image related to the article topic"
             virtual = (self.root / "storage" / "temp_images" / f"news_pack_virtual_{int(index):02d}.png").resolve()
             virtual.parent.mkdir(parents=True, exist_ok=True)
             virtual.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="))
@@ -501,7 +501,7 @@ class MediaManagerService:
             return None
             
         kind = str(row.get("kind", "inline_bg") or "inline_bg").strip().lower()
-        alt = "Editorial thumbnail illustration" if kind == "thumb_final" else "Editorial illustration"
+        alt = "Illustration related to the article topic" if kind == "thumb_final" else "Supporting image related to the article topic"
         slot_role = "thumbnail" if "thumb" in kind else "content"
         return ImageAsset(path=local, alt=alt, source_kind="news_pack", source_url=src_url, slot_role=slot_role)
 

@@ -187,7 +187,7 @@ def pick_images(title: str, min_count: int = 2, root: Path | None = None) -> lis
             ImageAsset(
                 path=use_path,
                 alt=(
-                    "Editorial illustration supporting this tech news section."
+                    "Illustration related to the article topic."
                     if category in _NEWS_CATEGORIES
                     else f"Troubleshooting process diagram for {str(title or '').strip()}."
                 ),

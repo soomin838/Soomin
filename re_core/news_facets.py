@@ -32,7 +32,7 @@ FACET_EMPHASIS_HINTS = {
     "official": "Prioritize confirmed statements, release notes, and clearly attributed evidence.",
     "risk": "Highlight credible downside scenarios, safeguards, and low-regret checks.",
     "market": "Surface vendor, partner, and ecosystem reaction with concrete business implications.",
-    "user_angle": "Write from the reader's lived experience and immediate usability concerns.",
+    "user_angle": "Ground the section in the reader's immediate use case, friction points, and practical constraints.",
 }
 
 FACET_OPTIONAL_SECTION_PRIORITY = {
@@ -247,7 +247,7 @@ def build_action_items(
     elif facet_hint == "user_angle":
         pool.append("Validate the change in a real user flow, not only in an admin or test dashboard.")
     if title:
-        pool.append(f"Keep a one-line status update tied to '{str(title).strip()[:70]}' after each check.")
+        pool.append(f"Record a short status note tied to '{str(title).strip()[:70]}' after each check.")
 
     unique_pool: list[str] = []
     seen: set[str] = set()

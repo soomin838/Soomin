@@ -2288,7 +2288,9 @@ class Publisher:
         intro_text = self._first_paragraph_text(html)
         banner = records[0]
         if is_news_layout:
-            safe_banner_alt = "Editorial illustration supporting this tech news section."
+            safe_banner_alt = self._regen_alt_if_too_similar(str(banner.get("alt", "") or ""), intro_text)
+            if not safe_banner_alt:
+                safe_banner_alt = "Illustration related to the article topic."
         else:
             safe_banner_alt = self._regen_alt_if_too_similar(str(banner.get("alt", "") or ""), intro_text)
         banner_block = self._image_block(str(banner.get("src", "") or ""), safe_banner_alt)
@@ -2433,10 +2435,12 @@ class Publisher:
             if section is None:
                 continue
             safe_alt = (
-                "Editorial illustration supporting this tech news section."
+                self._regen_alt_if_too_similar(str(record.get("alt", "") or ""), intro_text)
                 if is_news_layout
                 else self._regen_alt_if_too_similar(str(record.get("alt", "") or ""), intro_text)
             )
+            if not safe_alt:
+                safe_alt = "Supporting image related to the article topic."
             block = self._image_block(str(record.get("src", "") or ""), safe_alt)
             insertions.append((self._section_insert_offset(section), block))
             used_records.add(id(record))
@@ -2449,10 +2453,12 @@ class Publisher:
         leftovers = [r for r in records if id(r) not in used_records]
         for idx, record in enumerate(leftovers):
             safe_alt = (
-                "Editorial illustration supporting this tech news section."
+                self._regen_alt_if_too_similar(str(record.get("alt", "") or ""), intro_text)
                 if is_news_layout
                 else self._regen_alt_if_too_similar(str(record.get("alt", "") or ""), intro_text)
             )
+            if not safe_alt:
+                safe_alt = "Supporting image related to the article topic."
             block = self._image_block(str(record.get("src", "") or ""), safe_alt)
             out = self._insert_after_paragraph_slot(out, block, inserted_count + idx, max(1, len(records)))
         return self._rebalance_adjacent_image_blocks(out)

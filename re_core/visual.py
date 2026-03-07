@@ -1722,13 +1722,7 @@ class VisualPipeline:
         s = re.sub(r"\s+", " ", str(subject or "").strip()) or "the workflow"
         merged = f"{subject} {context}".lower()
         if re.search(r"\b(news|security|policy|privacy|ai|platform|chips|update)\b", merged):
-            news_templates = [
-                "Editorial illustration supporting this tech news section.",
-                "Abstract visual background for a technology news explainer.",
-                "Minimal tech-news graphic used to support the article context.",
-                "Editorial-style illustration for a software update news story.",
-            ]
-            return random.choice(news_templates)[:180]
+            return f"Illustration related to {s}."[:180]
         templates = [
             "Minimal diagram explaining the main troubleshooting steps.",
             "Practical workflow diagram aligned with this section.",
