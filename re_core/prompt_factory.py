@@ -40,7 +40,7 @@ _PERSONA_POOL = [
             "You are a brilliant tech storyteller who makes readers feel like they're watching a thriller unfold. "
             "Use vivid metaphors, dramatic pacing, and cliffhanger transitions. "
             "Turn dry tech news into gripping narratives. Short paragraphs, rapid-fire sentences, "
-            "occasional one-liners for emphasis. Make it impossible to stop scrolling."
+            "occasional one-liners for emphasis. Keep the pacing strong without overselling the story."
         ),
         "temperature": 0.92,
     },
@@ -130,7 +130,7 @@ class PromptFactory:
 
     def _build_default_pack(self, purpose: str, style_variant_id: str, persona: dict) -> PromptPack:
         system = str(persona.get("system", ""))
-        user = "Deliver maximum engagement and click-through-rate value."
+        user = "Deliver specific, useful, evidence-first reader value."
         must_include: list[str] = []
         ban_tokens = list(_GLOBAL_BAN_TOKENS)
         temperature = float(persona.get("temperature", 0.85))
@@ -139,24 +139,23 @@ class PromptFactory:
 
         if purpose in {"headline", "choose_best"}:
             system = (
-                "You are an expert YouTube thumbnail creator and viral BuzzFeed editor. "
-                "Your goal is to write the most clickable, shocking, and irresistible headlines possible. "
-                "Use curiosity gaps, numbers, and emotional triggers (Fear, Greed, Shock, Anger)."
+                "You are a senior editorial headline strategist. "
+                "Write specific, useful, ad-safe headlines that create curiosity without sounding manipulative. "
+                "Prioritize clarity, evidence, and strong reader value."
             )
-            user = "Generate a clickbait headline for tech news that makes it physically impossible not to click."
+            user = "Generate a specific, useful, evidence-first headline for a tech or consumer story."
             must_include = []
-            temperature = 0.95
+            temperature = 0.72
         elif purpose == "rewrite_to_actionable":
             user = (
-                "Rewrite the source material into an addictive, scrolling-friendly article. "
-                "Use very short paragraphs (1-2 sentences max). Add humorous or sarcastic commentary. "
-                "Drop in a few conversational idioms (e.g. 'mind-blowing', 'train wreck', 'absolute game-changer'). "
-                "Ensure the perplexity and burstiness are extremely high to fool AI detectors."
+                "Rewrite the source material into a practical, readable article. "
+                "Vary sentence rhythm naturally, keep transitions fresh, and avoid boilerplate phrasing. "
+                "Prefer concrete examples, useful detail, and ad-safe wording."
             )
-            temperature = 0.88
+            temperature = 0.78
         elif purpose == "extract_keywords":
-            system = "You are an AdSense SEO expert specializing in viral trends."
-            user = "Extract high-CPC, viral, trending long-tail keywords that people are desperately searching for right now."
+            system = "You are an SEO editor focused on real search demand."
+            user = "Extract specific long-tail keywords and questions that reflect real user search intent."
             temperature = 0.5
 
         return PromptPack(

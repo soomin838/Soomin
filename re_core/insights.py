@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 try:
     from google.auth.transport.requests import Request
@@ -179,6 +180,67 @@ class GrowthInsights:
             return 0.0, 0.0
         row = rows[0] or {}
         return self._safe_float(row.get("clicks", 0)), self._safe_float(row.get("impressions", 0))
+
+    def fetch_search_console_rows(
+        self,
+        start_date: str,
+        end_date: str,
+        dimensions: tuple[str, ...] = ("query", "page"),
+        page_size: int = 25000,
+        max_rows: int = 50000,
+    ) -> list[dict[str, Any]]:
+        creds = self._oauth_credentials()
+        site_url = str(getattr(self.settings, "search_console_site_url", "") or "").strip()
+        if not site_url:
+            raise RuntimeError("search_console_site_url_missing")
+        dims = [str(x or "").strip() for x in (dimensions or ()) if str(x or "").strip()]
+        if not dims:
+            dims = ["query", "page"]
+        safe_page_size = max(1, min(25000, int(page_size)))
+        safe_max_rows = max(1, min(50000, int(max_rows)))
+        service = build("searchconsole", "v1", credentials=creds, cache_discovery=False)
+        out: list[dict[str, Any]] = []
+        current = datetime.fromisoformat(str(start_date)).date()
+        last = datetime.fromisoformat(str(end_date)).date()
+        while current <= last and len(out) < safe_max_rows:
+            start_row = 0
+            day_str = current.isoformat()
+            while start_row < safe_max_rows and len(out) < safe_max_rows:
+                body = {
+                    "startDate": day_str,
+                    "endDate": day_str,
+                    "dimensions": dims,
+                    "rowLimit": min(safe_page_size, safe_max_rows - len(out)),
+                    "startRow": int(start_row),
+                }
+                response = (
+                    service.searchanalytics()
+                    .query(siteUrl=site_url, body=body)
+                    .execute()
+                )
+                rows = response.get("rows", []) or []
+                if not rows:
+                    break
+                for row in rows:
+                    keys = list((row or {}).get("keys", []) or [])
+                    payload = {
+                        "date": day_str,
+                        "query": str(keys[0] if len(keys) > 0 else "").strip(),
+                        "page": str(keys[1] if len(keys) > 1 else "").strip(),
+                        "clicks": self._safe_float((row or {}).get("clicks", 0.0)),
+                        "impressions": self._safe_float((row or {}).get("impressions", 0.0)),
+                        "ctr": self._safe_float((row or {}).get("ctr", 0.0)),
+                        "position": self._safe_float((row or {}).get("position", 0.0)),
+                    }
+                    if payload["query"] and payload["page"]:
+                        out.append(payload)
+                        if len(out) >= safe_max_rows:
+                            break
+                start_row += len(rows)
+                if len(rows) < body["rowLimit"]:
+                    break
+            current += timedelta(days=1)
+        return out[:safe_max_rows]
 
     def _extract_first_metric(self, payload: dict) -> float:
         # AdSense v2 can return:

@@ -454,6 +454,50 @@ class TopicGrowthSettings:
 
 
 @dataclass
+class WorldMonitorSettings:
+    enabled: bool = True
+    api_key: str = ""
+    prefer_api: bool = True
+    timeout_sec: int = 15
+
+
+@dataclass
+class PolicyGateSettings:
+    enabled: bool = True
+
+
+@dataclass
+class SearchLearningSettings:
+    enabled: bool = True
+    lookback_days: int = 14
+    collection_interval_hours: int = 24
+    max_rows_per_day: int = 50000
+
+
+@dataclass
+class SearchIntentSettings:
+    enabled: bool = True
+    provider: str = "ollama_then_rules"
+    timeout_sec: int = 15
+
+
+@dataclass
+class StructureRandomizationSettings:
+    enabled: bool = True
+    similarity_threshold: float = 0.75
+    fingerprint_ttl_days: int = 30
+    max_attempts: int = 3
+
+
+@dataclass
+class ContentAllocationSettings:
+    enabled: bool = False
+    mix_hot: int = 2
+    mix_search_derived: int = 2
+    mix_evergreen: int = 1
+
+
+@dataclass
 class KeywordPoolSettings:
     enabled: bool = True
     daily_target: int = 100
@@ -536,7 +580,7 @@ def is_news_mode(settings: "AppSettings | None") -> bool:
         mode = str(getattr(getattr(settings, "content_mode", None), "mode", "") or "").strip().lower()
     except Exception:
         return False
-    return mode == "news_interpretation"
+    return mode in {"news_interpretation", "news_interpretation_only", "tech_news_only"}
 
 
 def is_troubleshoot_mode(settings: "AppSettings | None") -> bool:
@@ -544,7 +588,7 @@ def is_troubleshoot_mode(settings: "AppSettings | None") -> bool:
         mode = str(getattr(getattr(settings, "content_mode", None), "mode", "") or "").strip().lower()
     except Exception:
         return True
-    return mode != "news_interpretation"
+    return mode not in {"news_interpretation", "news_interpretation_only", "tech_news_only"}
 
 
 @dataclass
@@ -651,6 +695,12 @@ class AppSettings:
     actionability_gate: ActionabilityGateSettings = field(default_factory=ActionabilityGateSettings)
     generation: GenerationSettings = field(default_factory=GenerationSettings)
     topic_growth: TopicGrowthSettings = field(default_factory=TopicGrowthSettings)
+    worldmonitor: WorldMonitorSettings = field(default_factory=WorldMonitorSettings)
+    policy_gate: PolicyGateSettings = field(default_factory=PolicyGateSettings)
+    search_learning: SearchLearningSettings = field(default_factory=SearchLearningSettings)
+    search_intent: SearchIntentSettings = field(default_factory=SearchIntentSettings)
+    structure_randomization: StructureRandomizationSettings = field(default_factory=StructureRandomizationSettings)
+    content_allocation: ContentAllocationSettings = field(default_factory=ContentAllocationSettings)
     keyword_pool: KeywordPoolSettings = field(default_factory=KeywordPoolSettings)
     topic_pool: TopicPoolSettings = field(default_factory=TopicPoolSettings)
     integrations: IntegrationSettings = field(default_factory=IntegrationSettings)
@@ -689,6 +739,12 @@ def load_settings(path: Path) -> AppSettings:
     generation_raw = dict(raw.get("generation", {}) or {})
     topic_pool_raw = dict(raw.get("topic_pool", {}) or {})
     qa_raw = raw.get("qa", {}) or {}
+    worldmonitor_raw = dict(raw.get("worldmonitor", {}) or {})
+    policy_gate_raw = dict(raw.get("policy_gate", {}) or {})
+    search_learning_raw = dict(raw.get("search_learning", {}) or {})
+    search_intent_raw = dict(raw.get("search_intent", {}) or {})
+    structure_randomization_raw = dict(raw.get("structure_randomization", {}) or {})
+    content_allocation_raw = dict(raw.get("content_allocation", {}) or {})
     content_raw = dict(raw.get("content", {}) or {})
     content_mode_raw = dict(raw.get("content_mode", {}) or {})
     topics_raw = dict(raw.get("topics", {}) or {})
@@ -886,6 +942,9 @@ def load_settings(path: Path) -> AppSettings:
     gemini_raw = dict(raw.get("gemini", {}) or {})
     gemini_raw["api_key"] = str(os.getenv("GEMINI_API_KEY") or gemini_raw.get("api_key", "")).strip()
     raw["gemini"] = gemini_raw
+    worldmonitor_raw["api_key"] = str(
+        os.getenv("WORLDMONITOR_API_KEY") or worldmonitor_raw.get("api_key", "")
+    ).strip()
     publish_raw.setdefault("r2", {})
     r2_raw = dict(publish_raw.get("r2", {}) or {})
     # ENV-first override policy for secrets.
@@ -963,6 +1022,12 @@ def load_settings(path: Path) -> AppSettings:
         actionability_gate=_construct_dc(ActionabilityGateSettings, actionability_raw),
         generation=_construct_dc(GenerationSettings, generation_raw),
         topic_growth=_construct_dc(TopicGrowthSettings, raw.get("topic_growth", {})),
+        worldmonitor=_construct_dc(WorldMonitorSettings, worldmonitor_raw),
+        policy_gate=_construct_dc(PolicyGateSettings, policy_gate_raw),
+        search_learning=_construct_dc(SearchLearningSettings, search_learning_raw),
+        search_intent=_construct_dc(SearchIntentSettings, search_intent_raw),
+        structure_randomization=_construct_dc(StructureRandomizationSettings, structure_randomization_raw),
+        content_allocation=_construct_dc(ContentAllocationSettings, content_allocation_raw),
         keyword_pool=_construct_dc(KeywordPoolSettings, raw.get("keyword_pool", {})),
         topic_pool=_construct_dc(TopicPoolSettings, topic_pool_raw),
         integrations=_construct_dc(IntegrationSettings, raw.get("integrations", {})),

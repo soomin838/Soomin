@@ -187,18 +187,20 @@ class SourceScout:
         root: Path,
         content_mode: ContentModeSettings | None = None,
         intelligence: Any = None,
+        safety_filter: Any = None,
     ) -> None:
         self.settings = settings
         self.root = root
         self.content_mode = content_mode or ContentModeSettings()
         self.intelligence = intelligence
+        self.safety_filter = safety_filter
         self._longtail_cache: dict[str, tuple[datetime, list[str]]] = {}
         self._longtail_cache_ttl = timedelta(hours=6)
 
     def collect(self) -> list[TopicCandidate]:
         candidates: list[TopicCandidate] = []
         mode = (self.settings.mode or "mixed").lower()
-        strict_mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower() == "news_interpretation_only"
+        strict_mode = self._is_news_mode_alias()
         trend_candidates: list[TopicCandidate] = []
 
         if mode in {"manual_seed", "seed", "manual"}:
@@ -213,9 +215,6 @@ class SourceScout:
         if (not strict_mode) and mode in {"mixed", "hackernews", "manual_seed", "seed", "manual"}:
             trend_candidates = self._collect_trending_entity_topics()
             candidates.extend(trend_candidates)
-        # Fixed entity pool is now strict fallback only when real-time scouting yields zero.
-        if (not strict_mode) and mode in {"mixed", "manual_seed", "seed", "manual"} and not trend_candidates:
-            candidates.extend(self._collect_global_giant_topics())
 
         if not candidates:
             candidates.extend(self._collect_seeds())
@@ -223,6 +222,7 @@ class SourceScout:
         if strict_mode:
             candidates = self._apply_news_mode_filter(candidates)
 
+        candidates = self._apply_safety_filter(candidates)
         candidates = self._enrich_candidates_with_longtail(candidates)
         candidates = self._filter_mass_market_candidates(candidates)
 
@@ -434,7 +434,7 @@ class SourceScout:
         if not candidates:
             return candidates
         out: list[TopicCandidate] = []
-        strict_mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower() == "news_interpretation_only"
+        strict_mode = self._is_news_mode_alias()
         for c in candidates:
             title = str(getattr(c, "title", "") or "")
             body = str(getattr(c, "body", "") or "")
@@ -467,6 +467,28 @@ class SourceScout:
                 out.append(c)
 
         return out if out else candidates
+
+    def _apply_safety_filter(self, candidates: list[TopicCandidate]) -> list[TopicCandidate]:
+        if self.safety_filter is None:
+            return list(candidates or [])
+        route = "news" if self._is_news_mode_alias() else "troubleshoot"
+        out: list[TopicCandidate] = []
+        for candidate in candidates or []:
+            decision = self.safety_filter.evaluate(
+                title=str(getattr(candidate, "title", "") or ""),
+                snippet=str(getattr(candidate, "body", "") or "")[:280],
+                body_excerpt=str(getattr(candidate, "body", "") or "")[:900],
+                category=str((getattr(candidate, "meta", {}) or {}).get("news_category", "") or ""),
+                route=route,
+                source_url=str(getattr(candidate, "url", "") or ""),
+            )
+            if decision.allow:
+                out.append(candidate)
+        return out
+
+    def _is_news_mode_alias(self) -> bool:
+        mode = str(getattr(self.content_mode, "mode", "") or "").strip().lower()
+        return mode in {"news_interpretation", "news_interpretation_only", "tech_news_only"}
 
     def _apply_news_mode_filter(self, candidates: list[TopicCandidate]) -> list[TopicCandidate]:
         out: list[TopicCandidate] = []

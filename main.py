@@ -49,7 +49,7 @@ import yaml
 from zoneinfo import ZoneInfo
 
 from re_core.onboarding import has_missing_required
-from re_core.preflight import validate_runtime_settings
+from re_core.preflight import validate_runtime_settings, validate_runtime_warnings
 from re_core.qa_logger import QALogger, classify_error
 from re_core.daily_vector import run_daily_vector_if_needed
 from re_core.secret_backup import backup_runtime_secrets
@@ -1124,8 +1124,8 @@ class AgentController:
                 changed = True
 
             provider = (_nested_get(raw, "visual.image_provider") or "").strip().lower()
-            if provider != "library":
-                _nested_set(raw, "visual.image_provider", "library")
+            if provider not in {"generated", "airforce_imagen4", "gemini", "pollinations_auth", "pollinations_anon", "library"}:
+                _nested_set(raw, "visual.image_provider", "generated")
                 changed = True
             visual_raw = (
                 raw.get("visual", {}) if isinstance(raw.get("visual", {}), dict) else {}
@@ -1136,8 +1136,14 @@ class AgentController:
             if "thumbnail_ocr_verify" not in visual_raw:
                 _nested_set(raw, "visual.thumbnail_ocr_verify", False)
                 changed = True
-            if str(_nested_get(raw, "visual.enable_gemini_image_generation") or "").strip().lower() not in {"false", "0", "no", "off"}:
-                _nested_set(raw, "visual.enable_gemini_image_generation", False)
+            if str(_nested_get(raw, "visual.enable_gemini_image_generation") or "").strip().lower() in {"", "none"}:
+                _nested_set(raw, "visual.enable_gemini_image_generation", True)
+                changed = True
+            if str(_nested_get(raw, "visual.allow_library_fallback") or "").strip().lower() in {"", "none"}:
+                _nested_set(raw, "visual.allow_library_fallback", False)
+                changed = True
+            if str(_nested_get(raw, "visual.allow_rendered_fallback") or "").strip().lower() in {"", "none"}:
+                _nested_set(raw, "visual.allow_rendered_fallback", True)
                 changed = True
             if str(_nested_get(raw, "publish.thumbnail_data_uri_allowed") or "").strip().lower() not in {"false", "0", "no", "off"}:
                 _nested_set(raw, "publish.thumbnail_data_uri_allowed", False)
@@ -1192,8 +1198,11 @@ class AgentController:
             if not (_nested_get(raw, "news_pack.state_path") or "").strip():
                 _nested_set(raw, "news_pack.state_path", "storage/state/news_pack_state.json")
                 changed = True
-            if (_nested_get(raw, "images.provider") or "").strip().lower() != "library":
-                _nested_set(raw, "images.provider", "library")
+            image_provider = (_nested_get(raw, "images.provider") or _nested_get(raw, "visual.image_provider") or "").strip().lower()
+            if image_provider not in {"generated", "airforce_imagen4", "gemini", "pollinations_auth", "pollinations_anon", "library"}:
+                image_provider = "generated"
+            if (_nested_get(raw, "images.provider") or "").strip().lower() != image_provider:
+                _nested_set(raw, "images.provider", image_provider)
                 changed = True
             try:
                 cur_banner_count = int(_nested_get(raw, "images.banner_count") or "0")
@@ -1551,7 +1560,8 @@ def run_qt(force_once: bool, setup_only: bool) -> int:
         if not dlg.exec() or has_missing_required(SETTINGS_PATH):
             return 1
 
-    preflight_errors = validate_runtime_settings(ROOT, load_settings(SETTINGS_PATH))
+    runtime_settings = load_settings(SETTINGS_PATH)
+    preflight_errors = validate_runtime_settings(ROOT, runtime_settings)
     if preflight_errors:
         qa_boot.write(
             "update_regression",
@@ -1565,6 +1575,19 @@ def run_qt(force_once: bool, setup_only: bool) -> int:
         box.setInformativeText("\n".join(f"- {e}" for e in preflight_errors[:8]))
         box.exec()
         return 1
+    preflight_warnings = validate_runtime_warnings(ROOT, runtime_settings)
+    if preflight_warnings:
+        qa_boot.write(
+            "update_regression",
+            "preflight_warnings",
+            {"warnings": preflight_warnings[:8]},
+        )
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("설정 경고")
+        box.setText("실행은 가능하지만 확인이 필요한 항목이 있습니다.")
+        box.setInformativeText("\n".join(f"- {w}" for w in preflight_warnings[:8]))
+        box.exec()
     qa_boot.write("update_regression", "preflight_passed", {"status": "ok"})
 
     controller = AgentController()

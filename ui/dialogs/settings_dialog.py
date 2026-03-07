@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -253,12 +254,15 @@ class SettingsDialog(QDialog):
         form = QFormLayout(page)
         form.setSpacing(10)
         self.image_provider = QComboBox()
-        self.image_provider.addItems(["library"])
-        self.image_provider.setCurrentText("library")
-        self.image_provider.setEnabled(False)
+        self.image_provider.addItems(["generated", "airforce_imagen4", "gemini", "pollinations_auth", "pollinations_anon", "library"])
+        current_provider = (_nested_get(self.data, "visual.image_provider") or "generated").strip().lower()
+        if current_provider not in {"generated", "airforce_imagen4", "gemini", "pollinations_auth", "pollinations_anon", "library"}:
+            current_provider = "generated"
+        self.image_provider.setCurrentText(current_provider)
         self.enable_img = QCheckBox()
-        self.enable_img.setChecked(False)
-        self.enable_img.setEnabled(False)
+        self.enable_img.setChecked(
+            _nested_get(self.data, "visual.enable_gemini_image_generation").strip().lower() not in {"0", "false", "no", "off"}
+        )
         self.gemini_image_model = QLineEdit(
             (_nested_get(self.data, "visual.gemini_image_model") or "models/imagen-3.0-generate-001").strip()
         )
@@ -469,6 +473,37 @@ class SettingsDialog(QDialog):
         self.local_llm_base_url = QLineEdit((_nested_get(self.data, "local_llm.base_url") or "http://127.0.0.1:11434").strip())
         self.local_llm_status = QLabel("대기")
         self.local_llm_status.setObjectName("Subtitle")
+        self.worldmonitor_enabled = QCheckBox()
+        self.worldmonitor_enabled.setChecked(
+            _nested_get(self.data, "worldmonitor.enabled").strip().lower() not in {"0", "false", "no", "off"}
+        )
+        self.worldmonitor_api_key = QLineEdit((_nested_get(self.data, "worldmonitor.api_key") or "").strip())
+        self.worldmonitor_api_key.setEchoMode(QLineEdit.Password)
+        self.search_learning_enabled = QCheckBox()
+        self.search_learning_enabled.setChecked(
+            _nested_get(self.data, "search_learning.enabled").strip().lower() not in {"0", "false", "no", "off"}
+        )
+        self.search_learning_lookback_days = QSpinBox()
+        self.search_learning_lookback_days.setRange(1, 90)
+        self.search_learning_lookback_days.setValue(int(_nested_get(self.data, "search_learning.lookback_days") or "14"))
+        self.structure_similarity_threshold = QDoubleSpinBox()
+        self.structure_similarity_threshold.setRange(0.5, 0.95)
+        self.structure_similarity_threshold.setSingleStep(0.01)
+        self.structure_similarity_threshold.setDecimals(2)
+        self.structure_similarity_threshold.setValue(float(_nested_get(self.data, "structure_randomization.similarity_threshold") or "0.75"))
+        self.content_allocation_enabled = QCheckBox()
+        self.content_allocation_enabled.setChecked(
+            _nested_get(self.data, "content_allocation.enabled").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        self.mix_hot = QSpinBox()
+        self.mix_hot.setRange(0, 10)
+        self.mix_hot.setValue(int(_nested_get(self.data, "content_allocation.mix_hot") or "2"))
+        self.mix_search_derived = QSpinBox()
+        self.mix_search_derived.setRange(0, 10)
+        self.mix_search_derived.setValue(int(_nested_get(self.data, "content_allocation.mix_search_derived") or "2"))
+        self.mix_evergreen = QSpinBox()
+        self.mix_evergreen.setRange(0, 10)
+        self.mix_evergreen.setValue(int(_nested_get(self.data, "content_allocation.mix_evergreen") or "1"))
 
         llm_btn_box = QWidget()
         llm_btn_row = QHBoxLayout(llm_btn_box)
@@ -489,6 +524,15 @@ class SettingsDialog(QDialog):
         form.addRow("Local LLM URL", self.local_llm_base_url)
         form.addRow("Local LLM 상태", self.local_llm_status)
         form.addRow("Local LLM 관리", llm_btn_box)
+        form.addRow("WorldMonitor 사용", self.worldmonitor_enabled)
+        form.addRow("WorldMonitor API Key", self.worldmonitor_api_key)
+        form.addRow("Search learning 사용", self.search_learning_enabled)
+        form.addRow("Search learning 조회 기간(일)", self.search_learning_lookback_days)
+        form.addRow("구조 유사도 임계값", self.structure_similarity_threshold)
+        form.addRow("콘텐츠 배분 실험 사용", self.content_allocation_enabled)
+        form.addRow("배분 hot", self.mix_hot)
+        form.addRow("배분 search_derived", self.mix_search_derived)
+        form.addRow("배분 evergreen", self.mix_evergreen)
         self._add_tab("고급", self._wrap_scroll(page))
 
     def _local_llm_settings_from_ui(self) -> LocalLLMSettings:
@@ -685,7 +729,9 @@ class SettingsDialog(QDialog):
         free_mode = bool(self.free_mode.isChecked()) if not self.required_only else (
             _nested_get(self.data, "budget.free_mode").strip().lower() in {"1", "true", "yes", "on"}
         )
-        enable_img = False
+        enable_img = bool(self.enable_img.isChecked()) if hasattr(self, "enable_img") else (
+            _nested_get(self.data, "visual.enable_gemini_image_generation").strip().lower() not in {"0", "false", "no", "off"}
+        )
         gen_per_day = int(getattr(self, "posts_to_generate_per_day", QSpinBox()).value() if hasattr(self, "posts_to_generate_per_day") else int(_nested_get(self.data, "publishing.posts_to_generate_per_day") or "3"))
         pub_per_day = int(getattr(self, "posts_to_publish_per_day", QSpinBox()).value() if hasattr(self, "posts_to_publish_per_day") else int(_nested_get(self.data, "publishing.posts_to_publish_per_day") or "2"))
         if pub_per_day > gen_per_day:
@@ -722,11 +768,16 @@ class SettingsDialog(QDialog):
         if selected_model:
             _nested_set(self.data, "gemini.model", selected_model)
             _nested_set(self.data, "visual.gemini_prompt_model", selected_model)
-        _nested_set(self.data, "visual.image_provider", "library")
+        selected_image_provider = str(self.image_provider.currentText() or "generated").strip().lower()
+        if selected_image_provider not in {"generated", "airforce_imagen4", "gemini", "pollinations_auth", "pollinations_anon", "library"}:
+            selected_image_provider = "generated"
+        _nested_set(self.data, "visual.image_provider", selected_image_provider)
         _nested_set(self.data, "visual.pollinations_enabled", False)
         _nested_set(self.data, "visual.pollinations_api_key", "")
         _nested_set(self.data, "visual.pollinations_thumbnail_model", "")
         _nested_set(self.data, "visual.pollinations_content_model", "")
+        _nested_set(self.data, "visual.allow_library_fallback", False)
+        _nested_set(self.data, "visual.allow_rendered_fallback", True)
         _nested_set(
             self.data,
             "visual.gemini_image_model",
@@ -743,14 +794,14 @@ class SettingsDialog(QDialog):
         _nested_set(self.data, "integrations.refresh_minutes", max(3, integrations_refresh))
         _nested_set(self.data, "budget.dry_run", bool(self.dry_run.isChecked()))
         _nested_set(self.data, "budget.free_mode", bool(self.free_mode.isChecked()))
-        _nested_set(self.data, "visual.enable_gemini_image_generation", False)
+        _nested_set(self.data, "visual.enable_gemini_image_generation", bool(enable_img))
         _nested_set(self.data, "visual.target_images_per_post", 5)
         _nested_set(self.data, "visual.max_banner_images", 1)
         _nested_set(self.data, "visual.max_inline_images", 4)
         _nested_set(self.data, "visual.cache_dir", "storage/image_cache")
         _nested_set(self.data, "visual.fallback_banner", "assets/fallback/banner.png")
         _nested_set(self.data, "visual.fallback_inline", "assets/fallback/inline.png")
-        _nested_set(self.data, "images.provider", "library")
+        _nested_set(self.data, "images.provider", selected_image_provider)
         _nested_set(self.data, "images.banner_count", 1)
         _nested_set(self.data, "images.inline_count", 4)
         _nested_set(self.data, "images.cache_dir", "storage/image_cache")
@@ -776,6 +827,25 @@ class SettingsDialog(QDialog):
         _nested_set(self.data, "local_llm.pull_model_if_missing", bool(local_llm.pull_model_if_missing))
         _nested_set(self.data, "local_llm.request_timeout_sec", int(local_llm.request_timeout_sec))
         _nested_set(self.data, "local_llm.max_calls_per_post", int(local_llm.max_calls_per_post))
+        _nested_set(self.data, "worldmonitor.enabled", bool(self.worldmonitor_enabled.isChecked()))
+        _nested_set(self.data, "worldmonitor.api_key", self.worldmonitor_api_key.text().strip())
+        _nested_set(self.data, "worldmonitor.prefer_api", True)
+        _nested_set(self.data, "policy_gate.enabled", True)
+        _nested_set(self.data, "search_learning.enabled", bool(self.search_learning_enabled.isChecked()))
+        _nested_set(self.data, "search_learning.lookback_days", int(self.search_learning_lookback_days.value()))
+        _nested_set(self.data, "search_learning.collection_interval_hours", 24)
+        _nested_set(self.data, "search_learning.max_rows_per_day", 50000)
+        _nested_set(self.data, "search_intent.enabled", True)
+        _nested_set(self.data, "search_intent.provider", "ollama_then_rules")
+        _nested_set(self.data, "search_intent.timeout_sec", 15)
+        _nested_set(self.data, "structure_randomization.enabled", True)
+        _nested_set(self.data, "structure_randomization.similarity_threshold", float(self.structure_similarity_threshold.value()))
+        _nested_set(self.data, "structure_randomization.fingerprint_ttl_days", 30)
+        _nested_set(self.data, "structure_randomization.max_attempts", 3)
+        _nested_set(self.data, "content_allocation.enabled", bool(self.content_allocation_enabled.isChecked()))
+        _nested_set(self.data, "content_allocation.mix_hot", int(self.mix_hot.value()))
+        _nested_set(self.data, "content_allocation.mix_search_derived", int(self.mix_search_derived.value()))
+        _nested_set(self.data, "content_allocation.mix_evergreen", int(self.mix_evergreen.value()))
 
         _nested_set(self.data, "content.language", "en-US")
         _nested_set(self.data, "content.enforce_english_only", bool(getattr(self, "enforce_english_only", QCheckBox()).isChecked() if hasattr(self, "enforce_english_only") else True))

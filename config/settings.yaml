@@ -300,6 +300,32 @@ integrations:
   search_console_enabled: true
   ga4_property_id: ''
   search_console_site_url: ''
+worldmonitor:
+  enabled: true
+  api_key: ''
+  prefer_api: true
+  timeout_sec: 15
+policy_gate:
+  enabled: true
+search_learning:
+  enabled: true
+  lookback_days: 14
+  collection_interval_hours: 24
+  max_rows_per_day: 50000
+search_intent:
+  enabled: true
+  provider: ollama_then_rules
+  timeout_sec: 15
+structure_randomization:
+  enabled: true
+  similarity_threshold: 0.75
+  fingerprint_ttl_days: 30
+  max_attempts: 3
+content_allocation:
+  enabled: false
+  mix_hot: 2
+  mix_search_derived: 2
+  mix_evergreen: 1
 sources:
   mode: news_pool
   seeds_path: storage/seeds/seeds.json
@@ -457,7 +483,7 @@ indexing:
   service_account_path: config/service_account.json
   daily_quota: 200
 images:
-  provider: library
+  provider: generated
   pollinations:
     model: ''
     size: ''

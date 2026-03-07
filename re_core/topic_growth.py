@@ -17,11 +17,13 @@ class TopicGrower:
         seeds_path: Path,
         gemini: GeminiSettings,
         topic_growth: TopicGrowthSettings,
+        safety_filter=None,
     ) -> None:
         self.root = root
         self.seeds_path = seeds_path
         self.gemini = gemini
         self.topic_growth = topic_growth
+        self.safety_filter = safety_filter
         self.state_path = root / "storage" / "logs" / "topic_growth_state.json"
         self.audit_path = root / "storage" / "logs" / "topic_growth_audit.jsonl"
         self.seeds_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,8 +89,7 @@ class TopicGrower:
             "Goal: expand topic pool into adjacent areas not already covered.\n"
             "Every topic must be a completely new angle that does NOT exist in the current pool.\n"
             "Audience focus: AI productivity, practical life hacks, beginner-friendly tech news.\n"
-            "Include mainstream business angles from global innovators (Apple, Tesla, Google, Microsoft, Amazon, NVIDIA) "
-            "when possible, emphasizing practical productivity lessons.\n"
+            "Prefer category diversity, under-covered clusters, and practical long-tail search angles.\n"
             "Hard rules:\n"
             "1) Legal, safe, all-ages, non-harmful.\n"
             "2) No illegal/harmful/adult/hate/scam content.\n"
@@ -148,8 +149,17 @@ class TopicGrower:
             return None
         if score < int(self.topic_growth.min_seed_score):
             return None
-        if self._contains_blocked_terms(title + " " + body_text):
-            return None
+        if self.safety_filter is not None:
+            decision = self.safety_filter.evaluate(
+                title=title,
+                snippet=body_text[:280],
+                body_excerpt=body_text[:800],
+                category="topic_growth",
+                route="topic_growth",
+                source_url=url,
+            )
+            if not decision.allow:
+                return None
         return {
             "source": "topic_growth",
             "title": title,
@@ -228,11 +238,3 @@ class TopicGrower:
             return json.loads(match.group(0))
         except Exception:
             return {}
-
-    def _contains_blocked_terms(self, text: str) -> bool:
-        lower = (text or "").lower()
-        blocked = [
-            "exploit", "malware", "weapon", "bomb", "drugs", "adult", "porn", "gambling",
-            "fraud", "scam", "counterfeit", "hate", "violence", "deepfake crime",
-        ]
-        return any(w in lower for w in blocked)

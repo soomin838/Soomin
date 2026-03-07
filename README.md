@@ -53,11 +53,11 @@
 ## 주요 파일
 
 - `main.py`: 에이전트 실행 루프
-- `core/scout.py`: 데이터 수집
-- `core/brain.py`: 주제 선정/본문 생성
-- `core/visual.py`: 이미지 생성 파이프라인
-- `core/publisher.py`: Blogger 발행
-- `core/workflow.py`: 전체 오케스트레이션
+- `re_core/scout.py`: 데이터 수집
+- `re_core/brain.py`: 주제 선정/본문 생성
+- `re_core/visual.py`: 이미지 생성 파이프라인
+- `re_core/publisher.py`: Blogger 발행
+- `re_core/workflow.py`: 전체 오케스트레이션
 - `config/settings.yaml`: 운영 설정
 
 ## 설치

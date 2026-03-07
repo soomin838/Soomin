@@ -959,6 +959,9 @@ class ContentQAGate:
     def _detect_forbidden_phrase_or_format(self, text: str, html: str) -> tuple[bool, str]:
         lower = str(text or "").lower()
         raw_html = str(html or "")
+        markup_scan_html = self._strip_image_payload_for_markup_scan(raw_html)
+        scan_html = self._strip_nonvisible_payload_for_scan(raw_html)
+        visible_text = self._to_text(scan_html).lower()
         if re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", raw_html):
             return True, "forbidden_markup:markdown_heading"
         if "## " in raw_html or "### " in raw_html:
@@ -983,38 +986,74 @@ class ContentQAGate:
             t = str(token or "").strip().lower()
             if t and t in lower:
                 return True, f"ban_phrase:{t}"
-        raw_html = raw_html.lower()
+        markup_scan_lower = markup_scan_html.lower()
         if re.search(
             r"(?:https?://|https?:\\\\/\\\\/)?(?:www\.)?google\.com(?:/[^\s\"'<>]*)?",
-            raw_html,
+            markup_scan_html,
             flags=re.IGNORECASE,
         ):
             return True, "forbidden_reference_link:google.com"
         if re.search(
             r"(?:https?://|https?:\\\\/\\\\/)?[^/\s\"'<>]*googleusercontent\.com(?:/[^\s\"'<>]*)?",
-            raw_html,
+            markup_scan_html,
             flags=re.IGNORECASE,
         ):
             return True, "forbidden_reference_link:google.com"
         if re.search(
             r"(?:https?://|https?:\\\\/\\\\/)?[^/\s\"'<>]*googleapis\.com(?:/[^\s\"'<>]*)?",
-            raw_html,
+            markup_scan_html,
             flags=re.IGNORECASE,
         ):
             return True, "forbidden_reference_link:google.com"
-        if "<figcaption" in raw_html:
+        if "<figcaption" in markup_scan_lower:
             return True, "forbidden_markup:figcaption"
-        if "[[meta]]" in raw_html or "[[/meta]]" in raw_html:
+        if "[[meta]]" in markup_scan_lower or "[[/meta]]" in markup_scan_lower:
             return True, "forbidden_meta_block_leak"
-        if re.search(r"\billustration\s+showing\b", raw_html):
+        if re.search(r"\billustration\s+showing\b", markup_scan_lower):
             return True, "forbidden_image_caption_phrase:illustration_showing"
         for fmt in (self.settings.ban_formats or []):
             f = str(fmt or "").strip()
             if not f:
                 continue
-            if re.search(re.escape(f), str(html or ""), flags=re.IGNORECASE):
+            fmt_lower = f.lower()
+            if fmt_lower == "faq":
+                if re.search(r"<h[23][^>]*>\s*faq\s*</h[23]>", scan_html, flags=re.IGNORECASE):
+                    return True, f"ban_format:{f}"
+                if re.search(r"<(?:p|li)[^>]*>\s*faq\s*[:\-]", scan_html, flags=re.IGNORECASE):
+                    return True, f"ban_format:{f}"
+                continue
+            if fmt_lower in {"q:", "a:"}:
+                if re.search(
+                    rf"<(?:p|li|h[23])[^>]*>\s*{re.escape(f)}\s*\S+",
+                    scan_html,
+                    flags=re.IGNORECASE,
+                ):
+                    return True, f"ban_format:{f}"
+                continue
+            if re.search(re.escape(f), visible_text, flags=re.IGNORECASE):
                 return True, f"ban_format:{f}"
         return False, ""
+
+    def _strip_nonvisible_payload_for_scan(self, html: str) -> str:
+        cleaned = str(html or "")
+        if not cleaned:
+            return ""
+        cleaned = self._strip_image_payload_for_markup_scan(cleaned)
+        cleaned = re.sub(r"\s(?:src|href)=['\"][^'\"]*['\"]", "", cleaned, flags=re.IGNORECASE)
+        return cleaned
+
+    def _strip_image_payload_for_markup_scan(self, html: str) -> str:
+        cleaned = str(html or "")
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"<img\b[^>]*>", " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        cleaned = re.sub(
+            r"data:image/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        return cleaned
 
     def detect_intro_alt_similarity(
         self,

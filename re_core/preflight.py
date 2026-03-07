@@ -93,3 +93,36 @@ def validate_runtime_settings(root: Path, settings: AppSettings) -> list[str]:
     errors.extend([f"secret_preflight:{x}" for x in validate_secrets(settings)])
     return errors
 
+
+def validate_runtime_warnings(root: Path, settings: AppSettings) -> list[str]:
+    warnings: list[str] = []
+
+    if bool(getattr(getattr(settings, "worldmonitor", None), "enabled", True)):
+        worldmonitor_key = str(getattr(getattr(settings, "worldmonitor", None), "api_key", "") or "").strip()
+        if not worldmonitor_key:
+            warnings.append("WorldMonitor API key is missing. RSS fallback mode will remain active.")
+
+    integrations = getattr(settings, "integrations", None)
+    if bool(getattr(integrations, "search_console_enabled", False)):
+        site_url = str(getattr(integrations, "search_console_site_url", "") or "").strip()
+        if not site_url:
+            warnings.append("Search Console site URL is empty. Search learning will stay disabled.")
+        token_path = _resolve(root, settings.blogger.credentials_path)
+        if token_path.exists():
+            try:
+                payload = json.loads(token_path.read_text(encoding="utf-8"))
+                scopes = payload.get("scopes", [])
+                if isinstance(scopes, list) and scopes:
+                    scope_values = {str(item or "").strip().lower() for item in scopes if str(item or "").strip()}
+                    if (
+                        "https://www.googleapis.com/auth/webmasters.readonly" not in scope_values
+                        and "https://www.googleapis.com/auth/webmasters" not in scope_values
+                    ):
+                        warnings.append(
+                            "Search Console OAuth scope is missing. Reconnect Google login with webmasters.readonly."
+                        )
+            except Exception:
+                warnings.append("Search Console OAuth scopes could not be verified from blogger token.")
+
+    return warnings
+

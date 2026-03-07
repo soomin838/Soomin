@@ -24,6 +24,8 @@ from re_core.news_facets import (
     resolve_facet_context,
 )
 from re_core.scout import TopicCandidate
+from re_core.services.search_intent import IntentBundle
+from re_core.structure_randomizer import OutlinePlan
 from .settings import GeminiSettings
 
 
@@ -248,7 +250,7 @@ class GeminiBrain:
             "Output language must be American English only. Never output Korean.\n"
             "Return strict JSON: {\"index\": int, \"score\": int, \"reason\": string}.\n"
             "Score must be 0-100.\n"
-            "Maximize potential CTR and editorial depth while staying accurate.\n"
+            "Maximize reader relevance and editorial depth while staying accurate.\n"
             "Prioritize topics that involve significant industry shifts, policy changes, or technological advancements.\n"
             "Prefer analytical lens: Why this matters, who is affected, and what happens next.\n"
             "Prefer topics related to: AI, Platform updates, Security, or Market trends.\n"
@@ -331,7 +333,7 @@ class GeminiBrain:
             "for today's US editorial audience. Focus on industry impact and future trends. "
             "Language policy: American English only. Never output Korean.\n"
             "Keyword intent must be analytical: industry impact, market shift, regulatory update, future outlook, strategic move.\n"
-            "Estimate keywords likely to have strong CTR and advertiser value.\n"
+            "Estimate keywords likely to reflect real search demand and useful commercial intent.\n"
             "Return strict JSON only: {\"keywords\": [\"...\", \"...\", \"...\", \"...\", \"...\"]}\n"
             "Keywords must be short, natural search phrases (2-5 words), no hashtags, no duplicates.\n"
             f"Avoid reusing these recent keywords if possible: {avoid[:8]}\n"
@@ -469,18 +471,16 @@ class GeminiBrain:
         plan_keyword = re.sub(r"\s+", " ", str(plan_payload.get("primary_keyword", "") or "")).strip()
         effective_main_keyword = plan_keyword or main_keyword
         prompt = (
-            "Write a highly engaging, viral, 1000-1500 word tech news article in valid HTML body fragment only.\n"
+            "Write a specific, useful, 1000-1500 word tech article in valid HTML body fragment only.\n"
             "Language policy: US English only. Never output Korean.\n"
             "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
-            "Audience: Mass market internet users looking for an entertaining, scroll-stopping summary of tech news.\n"
-            "Tone: Viral, breathtaking, slightly sarcastic, and highly conversational. Use rhetorical questions and short, punchy paragraphs.\n"
-            "AI EVASION MANDATE: Your text must have extreme variability in perplexity and burstiness. "
-            "Mix very short sentences with long, rambling ones. Use slang or colloquialisms (e.g. 'Wait, what?', 'Wild times') where natural. "
-            "Never sound like a robot summarizing text. Drop the corporate essay style entirely.\n"
+            "Audience: mass-market readers who want a clear explanation and practical value.\n"
+            "Tone: natural, ad-safe, evidence-first, and conversational without sounding sensational.\n"
+            "Vary sentence rhythm naturally. Use strong specifics, but avoid manipulative phrasing.\n"
             "Do not output internal metadata, pipeline status strings, debug tokens, or schema fragments.\n"
             "Do not mention screenshots or 'see image above'.\n"
-            "Use aggressive formatting: bold the most shocking claims, and use blockquotes for impact.\n"
-            "Required H2 section flow (make the headers catchy and clickbaity):\n"
+            "Use formatting only when it improves readability.\n"
+            "Required H2 section flow:\n"
             "Wait, What Just Happened? (The hook/summary)\n"
             "Why This Changes Everything (The impact)\n"
             "The Messy Details (Background)\n"
@@ -949,6 +949,150 @@ class GeminiBrain:
             extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
         )
 
+    def generate_post_from_outline(
+        self,
+        *,
+        candidate: TopicCandidate,
+        authority_links: list[str],
+        reference_guidance: str,
+        category: str,
+        intent_bundle: IntentBundle,
+        outline_plan: OutlinePlan,
+        plan: dict | None = None,
+    ) -> DraftPost:
+        source_link = str(getattr(candidate, "url", "") or "").strip()
+        safe_authorities = [
+            re.sub(r"\s+", " ", str(x or "").strip())
+            for x in (authority_links or [])
+            if str(x or "").strip()
+        ][:8]
+        payload_plan = dict(plan or {})
+        category_norm = normalize_category(category)
+        section_order_text = "\n".join(outline_plan.section_titles)
+        paragraph_plan = "; ".join(
+            f"{title}={outline_plan.paragraph_lengths[idx] if idx < len(outline_plan.paragraph_lengths) else 'medium'}"
+            for idx, title in enumerate(outline_plan.section_titles)
+        )
+        supporting_queries = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (intent_bundle.supporting_queries or [])
+            if str(x or "").strip()
+        ][:6]
+        questions = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (intent_bundle.questions or [])
+            if str(x or "").strip()
+        ][:5]
+        outline_brief = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (intent_bundle.outline_brief or [])
+            if str(x or "").strip()
+        ][:5]
+        negative_angles = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (intent_bundle.negative_angles or [])
+            if str(x or "").strip()
+        ][:4]
+
+        def _render_news_html(payload_obj: dict) -> str:
+            body_html = str(payload_obj.get("content_html", payload_obj.get("html", "")) or "")
+            body_html = self._remove_ai_markers(body_html, domain="tech_news_explainer")
+            body_html = re.sub(
+                r"<h[23][^>]*>\s*faq\s*</h[23]>.*?(?=<h2\b|<h3\b|$)",
+                "",
+                body_html,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            body_html = self._enforce_html_minimum(body_html)
+            return self._normalize_news_sources_section(
+                html=ensure_what_to_do_now_section(html=body_html, action_items=[]),
+                source_url=source_link,
+                authority_links=safe_authorities,
+            )
+
+        prompt = (
+            "Write a US tech or consumer news explainer in valid HTML body fragment only.\n"
+            "Language policy: US English only. Never output Korean.\n"
+            "Output valid HTML only. Do NOT output Markdown headings (#, ##, ###).\n"
+            "Tone: factual, natural, useful, ad-safe, and attribution-first.\n"
+            "Do not sound like clickbait. Do not write like a generic AI summary. Vary sentence rhythm naturally.\n"
+            "No defamation. No unverified allegations. Use attribution phrasing when details are not fully confirmed.\n"
+            f"Primary search intent: {intent_bundle.primary_query}\n"
+            f"Audience: {intent_bundle.audience}\n"
+            f"Content kind: {intent_bundle.content_kind}\n"
+            f"Recommended archetypes: {list(intent_bundle.recommended_archetypes or [])}\n"
+            f"Selected archetype: {outline_plan.archetype}\n"
+            "H2 section order for this run (follow exactly):\n"
+            f"{section_order_text}\n"
+            f"Intro pattern: {outline_plan.intro_template}\n"
+            f"Conclusion pattern: {outline_plan.conclusion_template}\n"
+            f"Paragraph rhythm: {paragraph_plan}\n"
+            "Intent questions to answer naturally:\n"
+            + "\n".join(f"- {item}" for item in questions)
+            + "\nSupporting search queries to cover naturally:\n"
+            + "\n".join(f"- {item}" for item in supporting_queries)
+            + "\nOutline brief to respect:\n"
+            + "\n".join(f"- {item}" for item in outline_brief)
+            + "\nAngles to avoid:\n"
+            + "\n".join(f"- {item}" for item in negative_angles)
+            + "\n"
+            "Required core H2 sections: Quick Take, What Happened, What To Do Now, Sources.\n"
+            "Target depth: roughly 1800-2000 words.\n"
+            "Each major H2 should contain 2-4 real paragraphs with concrete implications, examples, or tradeoffs.\n"
+            "Under Quick Take, include a 2-3 sentence lede and a 5-bullet key facts list.\n"
+            "In Sources, show publisher-labeled links, not raw URL text.\n"
+            "Return strict JSON with keys only: title_draft, meta_description, content_html, summary, focus_keywords.\n"
+            f"News category: {category_norm}\n"
+            f"Reference guidance: {reference_guidance}\n"
+            f"Authority links allow-list: {safe_authorities}\n"
+            f"Plan JSON: {json.dumps(payload_plan, ensure_ascii=False)}\n"
+            f"Source title: {candidate.title}\n"
+            f"Source body: {candidate.body[:9000]}\n"
+            f"Source URL: {source_link}\n"
+        )
+        payload = self._extract_json(
+            self._generate_text(
+                prompt,
+                system_instruction=(
+                    "You are a senior US editor. Write useful, evidence-first, non-templated explainers with real reader value."
+                ),
+            )
+        )
+        html = _render_news_html(payload)
+        if self._news_needs_depth_retry(html, min_words=1800):
+            retry_prompt = (
+                prompt
+                + "\n\nREWRITE REQUIRED: previous output was too short or too generic. "
+                "Regenerate the full article at editorial depth while preserving the exact section order."
+            )
+            retry_payload = self._extract_json(
+                self._generate_text(
+                    retry_prompt,
+                    system_instruction=(
+                        "You are a senior US editor. Write useful, evidence-first, non-templated explainers with real reader value."
+                    ),
+                )
+            )
+            retry_html = _render_news_html(retry_payload)
+            if retry_html:
+                payload = retry_payload
+                html = retry_html
+        urls = payload.get("extracted_urls", [])
+        if not isinstance(urls, list):
+            urls = []
+        out_title = str(payload.get("title_draft", payload.get("title", candidate.title))).strip() or candidate.title
+        if intent_bundle.primary_query and intent_bundle.primary_query.lower() not in out_title.lower():
+            out_title = f"{out_title}: {intent_bundle.primary_query}".strip(" :")
+        return DraftPost(
+            title=out_title[:110],
+            alt_titles=[],
+            summary=str(payload.get("summary", "")).strip()[:500],
+            html=html,
+            score=100,
+            source_url=source_link,
+            extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
+        )
+
     def _load_news_module_rotation(self) -> list[str]:
         try:
             if not self._news_module_rotation_path.exists():
@@ -1299,7 +1443,7 @@ class GeminiBrain:
         keywords = [k for k in keywords if k][:8]
         prompt = (
             "You are a World-class Tech Copywriter for a global audience.\n"
-            "Your task is to rewrite the blog title for maximum Click-Through Rate (CTR).\n"
+            "Your task is to rewrite the blog title for strong reader relevance and clarity.\n"
             "Language policy: American English only. Never output Korean.\n"
             f"Input Draft Summary: {clean_summary}\n"
             f"Input Keywords: {keywords}\n"
@@ -1323,7 +1467,7 @@ class GeminiBrain:
             prompt=prompt,
             model="gemini-2.0-flash",
             system_instruction=(
-                "You write high-CTR, ad-safe, native US English headlines for mainstream tech blogs. "
+                "You write ad-safe, native US English headlines for mainstream tech blogs. "
                 "Output must be American English only."
             ),
         )
@@ -1372,7 +1516,7 @@ class GeminiBrain:
             prompt=prompt,
             model=(self.settings.model or "gemini-2.0-flash"),
             system_instruction=(
-                "You produce high-CTR, ad-safe US-English troubleshooting headlines. "
+                "You produce ad-safe US-English troubleshooting headlines. "
                 "Never output Korean. Output JSON only."
             ),
         )

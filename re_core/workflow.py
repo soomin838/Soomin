@@ -23,11 +23,19 @@ from re_core.news_actionability_gate import NewsActionabilityGate, NewsActionabi
 from re_core.budget import BudgetGuard
 from re_core.asset_store import KeywordAssetStore, PostsIndexStore
 from re_core.index_sync import BloggerIndexSync
+from re_core.insights import GrowthInsights, InsightsSettingsView
 from re_core.logstore import LogStore, RunRecord
 from re_core.news_facets import ensure_what_to_do_now_section, facet_emphasis_hint, resolve_facet_context
 from re_core.news_pool import NewsPoolStore
 from re_core.news_clustering import NewsClusterEngine, should_skip_same_run
+from re_core.news_rss import fetch_feed_detailed
+from re_core.news_score import contains_allow_keywords, has_blocked_keywords, score_news_item
+from re_core.safety_filter import SafetyFilter
 from re_core.services.worldmonitor_client import WorldMonitorClient
+from re_core.services.search_intent import IntentBundle, SearchIntentGenerator
+from re_core.services.keyword_discovery import DiscoveryOpportunity, KeywordDiscovery
+from re_core.services.topic_scoring import TopicScoring
+from re_core.services.content_allocation import ContentAllocationEngine
 from re_core.news_pack_manifest import NewsPackManifest
 from re_core.news_pack_picker import NewsPackPicker
 
@@ -49,6 +57,7 @@ from re_core.reference_docs import ReferenceCorpus
 from re_core.scheduler import MonthlyScheduler
 from re_core.scout import SourceScout, TopicCandidate
 from re_core.settings import AppSettings, is_news_mode
+from re_core.structure_randomizer import OutlinePlan, StructureRandomizer
 from re_core.story_profile import (
     build_story_tags,
     filter_relevant_authority_links,
@@ -82,7 +91,8 @@ class AgentWorkflow:
             json_log_path=root / "storage" / "logs" / "agent_events.jsonl",
         )
         self.guard = BudgetGuard(settings.budget, self.logs)
-        self.scout = SourceScout(settings.sources, root, settings.content_mode)
+        self.safety_filter = SafetyFilter(log_path=root / "storage" / "logs" / "policy_gate.jsonl")
+        self.scout = SourceScout(settings.sources, root, settings.content_mode, safety_filter=self.safety_filter)
         self.patterns = PatternEngine()
         self.prompt_factory = PromptFactory(root)
         self.references = ReferenceCorpus(
@@ -136,13 +146,47 @@ class AgentWorkflow:
         )
         self.actionability_gate = ActionabilityGate()
         self.news_actionability_gate = NewsActionabilityGate()
-        self.worldmonitor = WorldMonitorClient()
-        self.scout = SourceScout(settings.sources, root, settings.content_mode, intelligence=self.intelligence)
+        self.worldmonitor = WorldMonitorClient(settings.worldmonitor)
+        self.search_intent_generator = SearchIntentGenerator(
+            settings=settings.search_intent,
+            ollama_client=self.ollama_client,
+            log_path=root / "storage" / "logs" / "search_intent.jsonl",
+        )
+        self.structure_randomizer = StructureRandomizer(
+            state_path=root / "storage" / "state" / "structure_randomizer.json",
+            log_path=root / "storage" / "logs" / "structure_randomizer.jsonl",
+            similarity_threshold=float(getattr(settings.structure_randomization, "similarity_threshold", 0.75) or 0.75),
+            fingerprint_ttl_days=int(getattr(settings.structure_randomization, "fingerprint_ttl_days", 30) or 30),
+            max_attempts=int(getattr(settings.structure_randomization, "max_attempts", 3) or 3),
+        )
+        self.topic_scoring = TopicScoring(log_path=root / "storage" / "logs" / "topic_scoring.jsonl")
+        self.content_allocator = ContentAllocationEngine(
+            enabled=bool(getattr(settings.content_allocation, "enabled", False)),
+            mix_hot=int(getattr(settings.content_allocation, "mix_hot", 2) or 2),
+            mix_search_derived=int(getattr(settings.content_allocation, "mix_search_derived", 2) or 2),
+            mix_evergreen=int(getattr(settings.content_allocation, "mix_evergreen", 1) or 1),
+            log_path=root / "storage" / "logs" / "content_allocation.jsonl",
+        )
+        self.keyword_discovery = KeywordDiscovery(
+            db_path=root / "storage" / "search_console.sqlite3",
+            fetch_rows_callback=self._fetch_search_console_rows,
+            log_path=root / "storage" / "logs" / "keyword_discovery.jsonl",
+            safety_filter=self.safety_filter,
+            cluster_resolver=self._infer_cluster_id_from_keyword,
+        )
+        self.scout = SourceScout(
+            settings.sources,
+            root,
+            settings.content_mode,
+            intelligence=self.intelligence,
+            safety_filter=self.safety_filter,
+        )
         self.topic_grower = TopicGrower(
             root=root,
             seeds_path=root / settings.sources.seeds_path,
             gemini=settings.gemini,
             topic_growth=settings.topic_growth,
+            safety_filter=self.safety_filter,
         )
         self.ollama_fallback = OllamaFallbackService(
             ollama_client=self.ollama_client,
@@ -171,6 +215,16 @@ class AgentWorkflow:
         self._feature_rotation_state_path = self.root / "storage" / "state" / "feature_rotation_state.json"
         self._title_fingerprint_path = self.root / "storage" / "logs" / "title_fingerprints.jsonl"
         self._news_title_shape_path = self.root / "storage" / "logs" / "news_title_shapes.jsonl"
+        self._title_pattern_weights_path = self.root / "storage" / "state" / "title_pattern_weights.json"
+        try:
+            self._title_pattern_weights_path.parent.mkdir(parents=True, exist_ok=True)
+            if not self._title_pattern_weights_path.exists():
+                self._title_pattern_weights_path.write_text(
+                    json.dumps({"enabled": False, "weights": {}, "updated_utc": ""}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
         self._news_guard_logged: set[str] = set()
         self._seen_cluster_ids_in_run: set[str] = set()
         self.keyword_assets = KeywordAssetStore(
@@ -246,6 +300,7 @@ class AgentWorkflow:
             self._retry_debounce_seconds = [0, 30, 120, 600]
         self._retry_reset_on_success = bool(getattr(getattr(self.settings, "workflow", None), "retry_reset_on_success", True))
         self._watchdog_state_path = self.root / "storage" / "state" / "watchdog_state.json"
+        self._search_learning_state_path = self.root / "storage" / "state" / "search_learning_state.json"
         self._watchdog_enabled = bool(getattr(getattr(self.settings, "watchdog", None), "enabled", True))
         self._title_diversity_state_path = self.root / "storage" / "state" / "title_pattern_state.json"
         self._title_diversity_enabled = bool(getattr(getattr(self.settings, "title_diversity", None), "enabled", True))
@@ -1273,9 +1328,24 @@ class AgentWorkflow:
             return
 
     def _evaluate_actionability_gate(self, title: str, html: str) -> ActionabilityGateResult:
-        # --- Actionability gate bypassed: always pass ---
-        # World Monitor provides real-time news; duplicate/quality gates are no longer needed.
-        return ActionabilityGateResult(ok=True, score=100, reasons=[], details={"bypassed": True})
+        if is_news_mode(self.settings):
+            result = self.news_actionability_gate.evaluate(title=title, html=html)
+            details = dict(result.details or {})
+            details["gate"] = "editorial_depth_gate"
+            return ActionabilityGateResult(
+                ok=bool(result.ok),
+                score=int(result.score),
+                reasons=list(result.reasons or []),
+                details=details,
+            )
+        gate_settings = getattr(self.settings, "actionability_gate", None)
+        return self.actionability_gate.evaluate(
+            title=title,
+            html=html,
+            min_steps=max(1, int(getattr(gate_settings, "min_steps", 8) or 8)),
+            min_word_count=max(300, int(getattr(gate_settings, "min_word_count", 900) or 900)),
+            max_generic_ratio=float(getattr(gate_settings, "max_generic_ratio", 0.012) or 0.012),
+        )
 
     def _scaled_content_risk(self, title: str, html: str, plan_fp: str = "") -> tuple[bool, list[str]]:
         reasons: list[str] = []
@@ -1504,6 +1574,234 @@ class AgentWorkflow:
         except Exception:
             return
 
+    def _insights_settings_view(self) -> InsightsSettingsView:
+        integrations = getattr(self.settings, "integrations", None)
+        return InsightsSettingsView(
+            enabled=bool(getattr(integrations, "enabled", True)),
+            adsense_enabled=bool(getattr(integrations, "adsense_enabled", True)),
+            analytics_enabled=bool(getattr(integrations, "analytics_enabled", True)),
+            search_console_enabled=bool(getattr(integrations, "search_console_enabled", True)),
+            ga4_property_id=str(getattr(integrations, "ga4_property_id", "") or "").strip(),
+            search_console_site_url=str(getattr(integrations, "search_console_site_url", "") or "").strip(),
+        )
+
+    def _growth_insights_client(self) -> GrowthInsights:
+        token_path = self.root / str(getattr(self.settings.blogger, "credentials_path", "config/blogger_token.json") or "config/blogger_token.json")
+        return GrowthInsights(token_path, self._insights_settings_view())
+
+    def _fetch_search_console_rows(
+        self,
+        start_date: str,
+        end_date: str,
+        dimensions: tuple[str, ...] = ("query", "page"),
+        page_size: int = 25000,
+        max_rows: int = 50000,
+    ) -> list[dict[str, Any]]:
+        client = self._growth_insights_client()
+        rows = client.fetch_search_console_rows(
+            start_date=start_date,
+            end_date=end_date,
+            dimensions=dimensions,
+            page_size=page_size,
+            max_rows=max_rows,
+        )
+        if len(rows) >= int(max_rows):
+            self._append_workflow_perf(
+                "search_console_row_cap_hit",
+                {
+                    "start_date": str(start_date),
+                    "end_date": str(end_date),
+                    "max_rows": int(max_rows),
+                    "rows": int(len(rows)),
+                },
+            )
+        return rows
+
+    def _load_search_learning_state(self) -> dict[str, Any]:
+        try:
+            if not self._search_learning_state_path.exists():
+                return {}
+            payload = json.loads(self._search_learning_state_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            return {}
+        return {}
+
+    def _save_search_learning_state(self, payload: dict[str, Any]) -> None:
+        try:
+            self._search_learning_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._search_learning_state_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            return
+
+    def _refresh_search_learning_if_due(self) -> str:
+        search_learning = getattr(self.settings, "search_learning", None)
+        integrations = getattr(self.settings, "integrations", None)
+        if not bool(getattr(search_learning, "enabled", True)):
+            return "search_learning_disabled"
+        if not bool(getattr(integrations, "search_console_enabled", True)):
+            return "search_learning_disabled:search_console_off"
+        interval_hours = max(1, int(getattr(search_learning, "collection_interval_hours", 24) or 24))
+        state = self._load_search_learning_state()
+        now_utc = datetime.now(timezone.utc)
+        last_run = self._parse_iso_utc(str(state.get("last_run_utc", "") or ""))
+        if last_run is not None:
+            elapsed_hours = (now_utc - last_run).total_seconds() / 3600.0
+            if elapsed_hours < float(interval_hours):
+                return f"search_learning_skipped:interval<{interval_hours}h"
+
+        lookback_days = max(1, int(getattr(search_learning, "lookback_days", 14) or 14))
+        end_date = now_utc.date().isoformat()
+        start_date = (now_utc.date() - timedelta(days=max(0, lookback_days - 1))).isoformat()
+        try:
+            opportunities = self.keyword_discovery.run(start_date=start_date, end_date=end_date)
+            summary = dict(getattr(self.keyword_discovery, "last_run_summary", {}) or {})
+            state.update(
+                {
+                    "last_run_utc": now_utc.isoformat(),
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "rows_fetched": int(summary.get("rows_fetched", 0) or 0),
+                    "opportunities_created": int(summary.get("opportunities_created", 0) or 0),
+                    "note": str(summary.get("note", "") or ""),
+                }
+            )
+            self._save_search_learning_state(state)
+        except Exception as exc:
+            note = f"search_learning_failed:{str(exc)[:160]}"
+            state.update({"last_run_utc": now_utc.isoformat(), "note": note})
+            self._save_search_learning_state(state)
+            return note
+        supporting_count = sum(1 for item in opportunities if str(item.action_type or "") == "supporting_post")
+        if not opportunities:
+            return "keyword_discovery_no_data"
+        return (
+            "keyword_discovery_ok:"
+            f"rows={int(state.get('rows_fetched', 0) or 0)};"
+            f"opportunities={int(state.get('opportunities_created', 0) or 0)};"
+            f"supporting={int(supporting_count)}"
+        )
+
+    def _supporting_discovery_candidates(self, limit: int = 3) -> list[TopicCandidate]:
+        items = self.keyword_discovery.queued_supporting_candidates(limit=max(1, int(limit)))
+        candidates: list[TopicCandidate] = []
+        for item in items:
+            query = re.sub(r"\s+", " ", str(item.query or "")).strip()
+            page = re.sub(r"\s+", " ", str(item.page or "")).strip()
+            if not query or not page:
+                continue
+            cluster_id = self._infer_cluster_id_from_keyword(query)
+            candidates.append(
+                TopicCandidate(
+                    source="search_console",
+                    title=query,
+                    body=(
+                        f"Search Console opportunity for query '{query}' from {page}. "
+                        f"Impressions {int(item.impressions)}, clicks {int(item.clicks)}, "
+                        f"CTR {item.ctr:.4f}, average position {item.position:.1f}."
+                    ),
+                    score=max(60, min(95, int(round(float(item.priority_score or 0.0))))),
+                    url=page,
+                    long_tail_keywords=[query],
+                    meta={
+                        "opportunity_source": True,
+                        "opportunity_action": str(item.action_type or ""),
+                        "search_console_query": query,
+                        "search_console_page": page,
+                        "cluster_id": cluster_id,
+                        "news_category": "search_derived",
+                    },
+                )
+            )
+        return candidates
+
+    def _policy_gate_candidate(
+        self,
+        *,
+        title: str,
+        snippet: str = "",
+        body_excerpt: str = "",
+        category: str = "",
+        route: str,
+        source_url: str = "",
+    ) -> tuple[bool, str, dict[str, Any]]:
+        if not bool(getattr(getattr(self.settings, "policy_gate", None), "enabled", True)):
+            return True, "", {}
+        decision = self.safety_filter.evaluate(
+            title=title,
+            snippet=snippet,
+            body_excerpt=body_excerpt,
+            category=category,
+            route=route,
+            source_url=source_url,
+        )
+        payload = asdict(decision)
+        if decision.allow:
+            return True, "", payload
+        first_reason = str((decision.reason_codes or ["unknown"])[0] or "unknown").strip().lower() or "unknown"
+        return False, f"policy_denied:{first_reason}", payload
+
+    def _build_search_intent_bundle(
+        self,
+        *,
+        candidate: TopicCandidate,
+        category: str,
+    ) -> tuple[IntentBundle, str]:
+        body_excerpt = str(getattr(candidate, "body", "") or "")[:1800]
+        bundle = self.search_intent_generator.generate(
+            headline=str(getattr(candidate, "title", "") or ""),
+            snippet=str((getattr(candidate, "meta", {}) or {}).get("snippet", "") or body_excerpt[:300]),
+            body_excerpt=body_excerpt,
+            category=str(category or ""),
+            source_url=str(getattr(candidate, "url", "") or ""),
+        )
+        source = str(getattr(self.search_intent_generator, "last_source", "rules") or "rules").strip().lower()
+        return bundle, source
+
+    def _pick_outline_plan(
+        self,
+        *,
+        candidate: TopicCandidate,
+        intent_bundle: IntentBundle,
+        category: str,
+        cluster_id: str = "",
+    ) -> OutlinePlan:
+        return self.structure_randomizer.pick_outline(
+            candidate=candidate,
+            intent_bundle=intent_bundle,
+            category=category,
+            cluster_id=cluster_id,
+        )
+
+    def _append_publish_metadata_log(self, payload: dict[str, Any]) -> None:
+        path = self.root / "storage" / "logs" / "publish_metadata.jsonl"
+        row = {"ts_utc": datetime.now(timezone.utc).isoformat()}
+        row.update(dict(payload or {}))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _canonical_news_url(self, url: str) -> str:
+        raw = str(url or "").strip()
+        if not raw:
+            return ""
+        try:
+            parsed = urlparse(raw)
+            host = str(parsed.netloc or "").strip().lower()
+            if host.startswith("www."):
+                host = host[4:]
+            path = re.sub(r"/+$", "", str(parsed.path or "").strip()) or "/"
+            return f"{host}{path}"
+        except Exception:
+            return raw.strip().lower()
+
     def _news_pool_feed_fingerprint(self, feeds: list[str]) -> str:
         merged = "\n".join([str(x or "").strip().lower() for x in (feeds or []) if str(x or "").strip()])
         return hashlib.sha1(merged.encode("utf-8", errors="ignore")).hexdigest()
@@ -1609,7 +1907,8 @@ class AgentWorkflow:
     ) -> str:
         started_mono = time.perf_counter()
         feeds = [str(x or "").strip() for x in (getattr(self.settings.sources, "news_pool_feeds", []) or []) if str(x or "").strip()]
-        if not feeds:
+        worldmonitor_enabled = bool(getattr(getattr(self.settings, "worldmonitor", None), "enabled", True))
+        if not feeds and not worldmonitor_enabled:
             self._last_news_pool_refresh_stats = {
                 "status": "no_feeds",
                 "source": str(source or ""),
@@ -1679,6 +1978,91 @@ class AgentWorkflow:
         rows: list[dict[str, Any]] = []
         per_feed_results: list[dict[str, Any]] = []
         fetched_items = 0
+        seen_news_urls: set[str] = set()
+        worldmonitor_items = 0
+        if worldmonitor_enabled:
+            wm_items = list(self.worldmonitor.fetch_feed_digest() or [])
+            wm_status = self.worldmonitor.last_status.get("feed_digest")
+            wm_ok = bool(wm_status and wm_status.ok)
+            self._append_news_pool_refresh_log(
+                {
+                    "event": "news_pool_worldmonitor_result",
+                    "ok": bool(wm_ok),
+                    "status_code": int(getattr(wm_status, "status_code", 0) or 0),
+                    "auth_mode": str(getattr(wm_status, "auth_mode", "") or ""),
+                    "note": str(getattr(wm_status, "note", "") or "")[:180],
+                    "items": int(len(wm_items)),
+                    "source": str(source or ""),
+                }
+            )
+            for item in wm_items:
+                title = re.sub(r"\s+", " ", str((item or {}).get("title", "") or "")).strip()
+                url = re.sub(r"\s+", " ", str((item or {}).get("url", "") or (item or {}).get("link", "") or "")).strip()
+                snippet = re.sub(
+                    r"\s+",
+                    " ",
+                    str(
+                        (item or {}).get("snippet", "")
+                        or (item or {}).get("summary", "")
+                        or (item or {}).get("description", "")
+                        or ""
+                    ),
+                ).strip()[:380]
+                if not title or not url:
+                    continue
+                canonical = self._canonical_news_url(url)
+                if not canonical or canonical in seen_news_urls:
+                    continue
+                merged = f"{title}\n{snippet}"
+                if has_blocked_keywords(merged, block):
+                    continue
+                if not contains_allow_keywords(merged, allow):
+                    continue
+                source_name = str((item or {}).get("source", "") or (urlparse(url).netloc or "")).strip().lower()
+                published_dt = self._parse_iso_utc(
+                    str(
+                        (item or {}).get("published_at", "")
+                        or (item or {}).get("publishedAt", "")
+                        or (item or {}).get("pubDate", "")
+                        or ""
+                    )
+                )
+                score, category = score_news_item(
+                    title=title,
+                    snippet=snippet,
+                    source=source_name,
+                    published_at=published_dt if isinstance(published_dt, datetime) else None,
+                    source_weights=source_weights,
+                )
+                if score <= 0:
+                    continue
+                allowed, _, _ = self._policy_gate_candidate(
+                    title=title,
+                    snippet=snippet,
+                    body_excerpt="",
+                    category=category,
+                    route="news",
+                    source_url=url,
+                )
+                if not allowed:
+                    continue
+                seen_news_urls.add(canonical)
+                worldmonitor_items += 1
+                rows.append(
+                    {
+                        "url": url,
+                        "title": title[:220],
+                        "source": source_name,
+                        "published_at": (
+                            published_dt.astimezone(timezone.utc).isoformat()
+                            if isinstance(published_dt, datetime)
+                            else ""
+                        ),
+                        "snippet": snippet,
+                        "category": category,
+                        "score": int(score),
+                    }
+                )
         for feed in feed_batch:
             try:
                 detail = fetch_feed_detailed(feed, timeout=20)
@@ -1716,6 +2100,9 @@ class AgentWorkflow:
                 snippet = re.sub(r"\s+", " ", str((item or {}).get("snippet", "") or "")).strip()[:380]
                 if not title or not url:
                     continue
+                canonical = self._canonical_news_url(url)
+                if not canonical or canonical in seen_news_urls:
+                    continue
                 merged = f"{title}\n{snippet}"
                 if has_blocked_keywords(merged, block):
                     continue
@@ -1734,6 +2121,17 @@ class AgentWorkflow:
                 )
                 if score <= 0:
                     continue
+                allowed, _, _ = self._policy_gate_candidate(
+                    title=title,
+                    snippet=snippet,
+                    body_excerpt="",
+                    category=category,
+                    route="news",
+                    source_url=url,
+                )
+                if not allowed:
+                    continue
+                seen_news_urls.add(canonical)
                 rows.append(
                     {
                         "url": url,
@@ -1761,6 +2159,7 @@ class AgentWorkflow:
             {
                 "last_refresh_utc": now_utc.isoformat(),
                 "last_refresh_ok": True,
+                "worldmonitor_items": int(worldmonitor_items),
                 "feeds_count": int(len(feeds)),
                 "feeds_fetched_this_refresh": int(len(feed_batch)),
                 "fetched_items": int(fetched_items),
@@ -1781,6 +2180,7 @@ class AgentWorkflow:
             "feed_limit": int(safe_max_feeds),
             "feed_cursor_before": int(feed_cursor),
             "feed_cursor_after": int(next_cursor),
+            "worldmonitor_items": int(worldmonitor_items),
             "fetched_items": int(fetched_items),
             "upserted": int(upserted),
             "queued_count": int(queued),
@@ -1796,6 +2196,7 @@ class AgentWorkflow:
                 "feeds_fetched": int(len(feed_batch)),
                 "feed_cursor_before": int(feed_cursor),
                 "feed_cursor_after": int(next_cursor),
+                "worldmonitor_items": int(worldmonitor_items),
                 "fetched_items": int(fetched_items),
                 "upserted": int(upserted),
                 "queued": int(queued),
@@ -2607,6 +3008,27 @@ class AgentWorkflow:
                         pass
                     continue
                 attempt_selected = self._news_item_to_candidate(claimed_item)
+                attempt_category = str((attempt_selected.meta or {}).get("news_category", "") or "").strip().lower()
+                allowed_news, deny_reason, _ = self._policy_gate_candidate(
+                    title=str(getattr(attempt_selected, "title", "") or ""),
+                    snippet=str(getattr(attempt_selected, "body", "") or ""),
+                    body_excerpt="",
+                    category=attempt_category,
+                    route="news",
+                    source_url=str(getattr(attempt_selected, "url", "") or ""),
+                )
+                if not allowed_news:
+                    if attempt_claimed_id > 0:
+                        excluded_claim_ids.add(attempt_claimed_id)
+                        try:
+                            self.news_pool_store.mark_used(attempt_claimed_id, deny_reason)
+                        except Exception:
+                            try:
+                                self.news_pool_store.rollback_claim(attempt_claimed_id)
+                            except Exception:
+                                pass
+                    degraded_note = self._append_note(degraded_note, deny_reason)
+                    continue
                 attempt_event_id = str(
                     (attempt_selected.meta or {}).get("event_id", "")
                     or (attempt_selected.meta or {}).get("news_event_id", "")
@@ -2715,6 +3137,49 @@ class AgentWorkflow:
             )
             degraded_note = self._append_note(degraded_note, collect_note)
 
+            self._progress("intent", "검색 의도 해석", 26)
+            intent_bundle, intent_source = self._build_search_intent_bundle(
+                candidate=selected,
+                category=category,
+            )
+            selected_meta = dict(getattr(selected, "meta", {}) or {})
+            selected_meta["intent_bundle"] = asdict(intent_bundle)
+            if intent_source != "ollama":
+                degraded_note = self._append_note(degraded_note, "search_intent_fallback_used")
+            self._progress("outline", "구조 아키타입 선택", 30)
+            try:
+                outline_plan = self._pick_outline_plan(
+                    candidate=selected,
+                    intent_bundle=intent_bundle,
+                    category=category,
+                    cluster_id=cluster_id,
+                )
+            except RuntimeError as exc:
+                hold_reason = str(exc or "template_similarity_too_high")
+                if "template_similarity_too_high" not in hold_reason:
+                    hold_reason = "template_similarity_too_high"
+                if claimed_id:
+                    try:
+                        self.news_pool_store.rollback_claim(claimed_id)
+                        claim_finalized = True
+                    except Exception:
+                        pass
+                self.logs.append_run(
+                    RunRecord(
+                        status="hold",
+                        score=0,
+                        title=str(selected.title or ""),
+                        source_url=str(getattr(selected, "url", "") or ""),
+                        published_url="",
+                        note=self._append_note(hold_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("hold", hold_reason)
+                return WorkflowResult("hold", hold_reason)
+            selected_meta["outline_plan"] = asdict(outline_plan)
+            selected_meta["outline_fingerprint"] = str(outline_plan.fingerprint or "")
+            selected.meta = selected_meta
+
             self._progress("draft", "뉴스 본문 초안 생성", 36)
             api_ready = bool(
                 (self.settings.gemini.api_key or "").strip()
@@ -2769,13 +3234,15 @@ class AgentWorkflow:
                         )
                         selected.meta["expert_hints"] = expert_hints
 
-                    draft = self.brain.generate_news_post(
-                        selected,
-                        self.settings.authority_links,
-                        reference_guidance,
+                    draft = self.brain.generate_post_from_outline(
+                        candidate=selected,
+                        authority_links=self.settings.authority_links,
+                        reference_guidance=reference_guidance,
                         category=category,
+                        intent_bundle=intent_bundle,
+                        outline_plan=outline_plan,
                         plan={
-                            "primary_keyword": selected.title,
+                            "primary_keyword": intent_bundle.primary_query or selected.title,
                             "news_category": category,
                             "event_id": event_id,
                             "run_start_minute": str(run_start_minute or "").strip(),
@@ -2843,11 +3310,30 @@ class AgentWorkflow:
                 )
                 degraded_note = self._append_note(degraded_note, "news_local_fallback_draft")
 
+            intent_keywords = [
+                re.sub(r"\s+", " ", str(x or "")).strip()
+                for x in [intent_bundle.primary_query, *(intent_bundle.supporting_queries or [])]
+                if str(x or "").strip()
+            ]
+            if intent_keywords:
+                merged_long_tail: list[str] = []
+                seen_long_tail: set[str] = set()
+                for item in [*intent_keywords, *(getattr(selected, "long_tail_keywords", []) or [])]:
+                    clean = re.sub(r"\s+", " ", str(item or "")).strip()
+                    key = clean.lower()
+                    if not clean or key in seen_long_tail:
+                        continue
+                    seen_long_tail.add(key)
+                    merged_long_tail.append(clean[:120])
+                    if len(merged_long_tail) >= 8:
+                        break
+                selected.long_tail_keywords = merged_long_tail
+
             draft.title = self._enforce_seo_title(
                 title=draft.title,
                 candidate=selected,
                 global_keywords=global_keywords,
-                preferred_keyword=selected.title,
+                preferred_keyword=intent_bundle.primary_query or selected.title,
             )
             self._ensure_min_long_tail_keywords(
                 candidate=selected,
@@ -3123,7 +3609,8 @@ class AgentWorkflow:
             hold_reason = ""
             actionability = self._evaluate_actionability_gate(draft.title, final_html)
             if not actionability.ok:
-                hold_reason = "actionability_gate_failed:" + ",".join(actionability.reasons[:4])
+                gate_prefix = "editorial_depth_gate_failed" if is_news_mode(self.settings) else "actionability_gate_failed"
+                hold_reason = gate_prefix + ":" + ",".join(actionability.reasons[:4])
                 self.watchdog.register_hard_failure(event_id, hold_reason)
                 can_retry = bool(self._retry_enabled and int(news_retry_depth) < int(self._retry_max_attempts_per_event))
                 abort_now, abort_reason = self.watchdog.should_abort_event(event_id)
@@ -4015,6 +4502,13 @@ class AgentWorkflow:
             )
             self._workflow_perf_finish_run("hold", reason)
             return WorkflowResult("hold", reason)
+        search_learning_note = self._profile_call(
+            "search_learning_refresh",
+            self._refresh_search_learning_if_due,
+            slow_ms=1500,
+        )
+        if search_learning_note and not search_learning_note.startswith("search_learning_skipped"):
+            sync_note = self._append_note(sync_note, search_learning_note)
         preflight_generation_mode = self._generation_mode()
         budget = self.guard.can_run(
             today_posts=(
@@ -5673,6 +6167,19 @@ class AgentWorkflow:
                 ),
             )
         )
+        self._append_publish_metadata_log(
+            {
+                "post_id": str(getattr(published, "post_id", "") or ""),
+                "published_url": str(getattr(published, "url", "") or ""),
+                "title": str(draft.title or ""),
+                "source_url": str(draft.source_url or ""),
+                "intent_primary_query": str(intent_bundle.primary_query or ""),
+                "outline_archetype": str(outline_plan.archetype or ""),
+                "outline_fingerprint": str(outline_plan.fingerprint or ""),
+                "cluster_id": str(cluster_id or ""),
+                "opportunity_source": bool((getattr(selected, "meta", {}) or {}).get("opportunity_source", False)),
+            }
+        )
         self._remember_title_fingerprint(draft.title)
         self._remember_fix_steps_fingerprint(plan_fp, draft.title)
         if manual_trigger and str(getattr(published, "post_id", "")).strip():
@@ -5758,7 +6265,11 @@ class AgentWorkflow:
         last_err = ""
         for attempt in range(1, max(1, int(max_attempts)) + 1):
             try:
-                return self.scout.collect()
+                collected = list(self.scout.collect() or [])
+                supporting = self._supporting_discovery_candidates(limit=3)
+                if supporting:
+                    collected = [*supporting, *collected]
+                return collected
             except Exception as exc:
                 last_err = str(exc)
                 if attempt >= max_attempts or not self._is_retryable_error(last_err):
