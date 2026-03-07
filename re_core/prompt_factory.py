@@ -74,8 +74,6 @@ _GLOBAL_BAN_TOKENS = [
     "seamlessly",
     "it's worth noting",
     "it is important to note",
-    "viral",
-    "shocking",
     "unbelievable",
     "detector-evasion language",
     "hype-first phrasing",
