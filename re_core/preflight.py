@@ -97,16 +97,11 @@ def validate_runtime_settings(root: Path, settings: AppSettings) -> list[str]:
 def validate_runtime_warnings(root: Path, settings: AppSettings) -> list[str]:
     warnings: list[str] = []
 
-    if bool(getattr(getattr(settings, "worldmonitor", None), "enabled", True)):
-        worldmonitor_key = str(getattr(getattr(settings, "worldmonitor", None), "api_key", "") or "").strip()
-        if not worldmonitor_key:
-            warnings.append("WorldMonitor API key is missing. RSS fallback mode will remain active.")
-
     integrations = getattr(settings, "integrations", None)
     if bool(getattr(integrations, "search_console_enabled", False)):
         site_url = str(getattr(integrations, "search_console_site_url", "") or "").strip()
         if not site_url:
-            warnings.append("Search Console site URL is empty. Search learning will stay disabled.")
+            warnings.append("Search Console 사이트 URL이 비어 있습니다. 검색 학습 기능은 비활성 상태로 유지됩니다.")
         token_path = _resolve(root, settings.blogger.credentials_path)
         if token_path.exists():
             try:
@@ -119,10 +114,10 @@ def validate_runtime_warnings(root: Path, settings: AppSettings) -> list[str]:
                         and "https://www.googleapis.com/auth/webmasters" not in scope_values
                     ):
                         warnings.append(
-                            "Search Console OAuth scope is missing. Reconnect Google login with webmasters.readonly."
+                            "Search Console 권한이 없습니다. Google 로그인을 다시 연결하고 webmasters.readonly 범위를 포함하세요."
                         )
             except Exception:
-                warnings.append("Search Console OAuth scopes could not be verified from blogger token.")
+                warnings.append("Search Console 권한 범위를 확인하지 못했습니다. Google 로그인을 다시 연결해 점검해 주세요.")
 
     return warnings
 

@@ -31,7 +31,7 @@ from re_core.news_clustering import NewsClusterEngine, should_skip_same_run
 from re_core.news_rss import fetch_feed_detailed
 from re_core.news_score import contains_allow_keywords, has_blocked_keywords, score_news_item
 from re_core.safety_filter import SafetyFilter
-from re_core.services.worldmonitor_client import WorldMonitorClient
+from re_core.services.news_collector import fetch_trending_topics
 from re_core.services.search_intent import IntentBundle, SearchIntentGenerator
 from re_core.services.keyword_discovery import DiscoveryOpportunity, KeywordDiscovery
 from re_core.services.topic_scoring import TopicScoring
@@ -146,7 +146,7 @@ class AgentWorkflow:
         )
         self.actionability_gate = ActionabilityGate()
         self.news_actionability_gate = NewsActionabilityGate()
-        self.worldmonitor = WorldMonitorClient(settings.worldmonitor)
+        self.news_provider = "gdelt"
         self.search_intent_generator = SearchIntentGenerator(
             settings=settings.search_intent,
             ollama_client=self.ollama_client,
@@ -1907,8 +1907,8 @@ class AgentWorkflow:
     ) -> str:
         started_mono = time.perf_counter()
         feeds = [str(x or "").strip() for x in (getattr(self.settings.sources, "news_pool_feeds", []) or []) if str(x or "").strip()]
-        worldmonitor_enabled = bool(getattr(getattr(self.settings, "worldmonitor", None), "enabled", True))
-        if not feeds and not worldmonitor_enabled:
+        gdelt_enabled = True
+        if not feeds and not gdelt_enabled:
             self._last_news_pool_refresh_stats = {
                 "status": "no_feeds",
                 "source": str(source or ""),
@@ -1979,54 +1979,55 @@ class AgentWorkflow:
         per_feed_results: list[dict[str, Any]] = []
         fetched_items = 0
         seen_news_urls: set[str] = set()
-        worldmonitor_items = 0
-        if worldmonitor_enabled:
-            wm_items = list(self.worldmonitor.fetch_feed_digest() or [])
-            wm_status = self.worldmonitor.last_status.get("feed_digest")
-            wm_ok = bool(wm_status and wm_status.ok)
-            self._append_news_pool_refresh_log(
-                {
-                    "event": "news_pool_worldmonitor_result",
-                    "ok": bool(wm_ok),
-                    "status_code": int(getattr(wm_status, "status_code", 0) or 0),
-                    "auth_mode": str(getattr(wm_status, "auth_mode", "") or ""),
-                    "note": str(getattr(wm_status, "note", "") or "")[:180],
-                    "items": int(len(wm_items)),
-                    "source": str(source or ""),
-                }
-            )
-            for item in wm_items:
+        gdelt_items = 0
+        gdelt_groups: list[dict[str, Any]] = []
+        gdelt_error = ""
+        try:
+            gdelt_groups = list(fetch_trending_topics() or [])
+        except Exception as exc:
+            gdelt_error = str(exc or "")[:180]
+        gdelt_article_count = sum(
+            len(list((group or {}).get("articles", []) or []))
+            for group in gdelt_groups
+            if isinstance(group, dict)
+        )
+        fetched_items += int(gdelt_article_count)
+        self._append_news_pool_refresh_log(
+            {
+                "event": "news_pool_gdelt_result",
+                "ok": bool(not gdelt_error),
+                "topic_groups": int(len(gdelt_groups)),
+                "items": int(gdelt_article_count),
+                "error": gdelt_error,
+                "source": str(source or ""),
+            }
+        )
+        for group in gdelt_groups:
+            if not isinstance(group, dict):
+                continue
+            topic = re.sub(r"\s+", " ", str(group.get("topic", "") or "")).strip()
+            for item in list(group.get("articles", []) or []):
+                if not isinstance(item, dict):
+                    continue
                 title = re.sub(r"\s+", " ", str((item or {}).get("title", "") or "")).strip()
                 url = re.sub(r"\s+", " ", str((item or {}).get("url", "") or (item or {}).get("link", "") or "")).strip()
                 snippet = re.sub(
                     r"\s+",
                     " ",
-                    str(
-                        (item or {}).get("snippet", "")
-                        or (item or {}).get("summary", "")
-                        or (item or {}).get("description", "")
-                        or ""
-                    ),
+                    str((item or {}).get("summary", "") or (item or {}).get("snippet", "") or ""),
                 ).strip()[:380]
                 if not title or not url:
                     continue
                 canonical = self._canonical_news_url(url)
                 if not canonical or canonical in seen_news_urls:
                     continue
-                merged = f"{title}\n{snippet}"
+                merged = f"{topic}\n{title}\n{snippet}"
                 if has_blocked_keywords(merged, block):
                     continue
                 if not contains_allow_keywords(merged, allow):
                     continue
                 source_name = str((item or {}).get("source", "") or (urlparse(url).netloc or "")).strip().lower()
-                published_dt = self._parse_iso_utc(
-                    str(
-                        (item or {}).get("published_at", "")
-                        or (item or {}).get("publishedAt", "")
-                        or (item or {}).get("pubDate", "")
-                        or ""
-                    )
-                )
+                published_dt = self._parse_iso_utc(str((item or {}).get("published_date", "") or ""))
                 score, category = score_news_item(
                     title=title,
                     snippet=snippet,
@@ -2047,12 +2048,15 @@ class AgentWorkflow:
                 if not allowed:
                     continue
                 seen_news_urls.add(canonical)
-                worldmonitor_items += 1
+                gdelt_items += 1
                 rows.append(
                     {
                         "url": url,
                         "title": title[:220],
                         "source": source_name,
+                        "provider": "gdelt",
+                        "topic": topic,
+                        "collected_at": now_utc.isoformat(),
                         "published_at": (
                             published_dt.astimezone(timezone.utc).isoformat()
                             if isinstance(published_dt, datetime)
@@ -2108,14 +2112,14 @@ class AgentWorkflow:
                     continue
                 if not contains_allow_keywords(merged, allow):
                     continue
-                source = str((item or {}).get("source", "") or (urlparse(url).netloc or "")).strip().lower()
+                source_name = str((item or {}).get("source", "") or (urlparse(url).netloc or "")).strip().lower()
                 published_dt = (item or {}).get("published_at")
                 if not isinstance(published_dt, datetime):
                     published_dt = self._parse_iso_utc(str((item or {}).get("published_at", "") or ""))
                 score, category = score_news_item(
                     title=title,
                     snippet=snippet,
-                    source=source,
+                    source=source_name,
                     published_at=published_dt if isinstance(published_dt, datetime) else None,
                     source_weights=source_weights,
                 )
@@ -2136,7 +2140,10 @@ class AgentWorkflow:
                     {
                         "url": url,
                         "title": title[:220],
-                        "source": source,
+                        "source": source_name,
+                        "provider": "rss",
+                        "topic": "",
+                        "collected_at": now_utc.isoformat(),
                         "published_at": (
                             published_dt.astimezone(timezone.utc).isoformat()
                             if isinstance(published_dt, datetime)
@@ -2159,7 +2166,7 @@ class AgentWorkflow:
             {
                 "last_refresh_utc": now_utc.isoformat(),
                 "last_refresh_ok": True,
-                "worldmonitor_items": int(worldmonitor_items),
+                "gdelt_items": int(gdelt_items),
                 "feeds_count": int(len(feeds)),
                 "feeds_fetched_this_refresh": int(len(feed_batch)),
                 "fetched_items": int(fetched_items),
@@ -2180,7 +2187,7 @@ class AgentWorkflow:
             "feed_limit": int(safe_max_feeds),
             "feed_cursor_before": int(feed_cursor),
             "feed_cursor_after": int(next_cursor),
-            "worldmonitor_items": int(worldmonitor_items),
+            "gdelt_items": int(gdelt_items),
             "fetched_items": int(fetched_items),
             "upserted": int(upserted),
             "queued_count": int(queued),
@@ -2196,7 +2203,7 @@ class AgentWorkflow:
                 "feeds_fetched": int(len(feed_batch)),
                 "feed_cursor_before": int(feed_cursor),
                 "feed_cursor_after": int(next_cursor),
-                "worldmonitor_items": int(worldmonitor_items),
+                "gdelt_items": int(gdelt_items),
                 "fetched_items": int(fetched_items),
                 "upserted": int(upserted),
                 "queued": int(queued),
@@ -2446,6 +2453,8 @@ class AgentWorkflow:
         source = re.sub(r"\s+", " ", str((item or {}).get("source", "") or "")).strip().lower()
         url = re.sub(r"\s+", " ", str((item or {}).get("url", "") or "")).strip()
         category = re.sub(r"\s+", " ", str((item or {}).get("category", "") or "platform")).strip().lower()
+        provider = re.sub(r"\s+", " ", str((item or {}).get("provider", "") or "")).strip().lower()
+        topic = re.sub(r"\s+", " ", str((item or {}).get("topic", "") or "")).strip()
         if not category:
             category = classify_category(f"{title} {snippet}")
         long_tail = self._build_news_long_tail_keywords(title, category)
@@ -2461,6 +2470,9 @@ class AgentWorkflow:
                 "news_pool_id": int((item or {}).get("id", 0) or 0),
                 "news_category": category or "platform",
                 "published_at": str((item or {}).get("published_at", "") or ""),
+                "news_provider": provider or "unknown",
+                "news_topic": topic,
+                "collected_at": str((item or {}).get("collected_at", "") or ""),
                 "topic_fp": str((item or {}).get("topic_fp", "") or ""),
             },
         )

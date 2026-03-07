@@ -39,6 +39,9 @@ class NewsPoolItem:
     url: str
     title: str
     source: str
+    provider: str
+    topic: str
+    collected_at: str
     published_at: str
     snippet: str
     category: str
@@ -56,6 +59,9 @@ class NewsPoolItem:
             "url": str(self.url or ""),
             "title": str(self.title or ""),
             "source": str(self.source or ""),
+            "provider": str(self.provider or ""),
+            "topic": str(self.topic or ""),
+            "collected_at": str(self.collected_at or ""),
             "published_at": str(self.published_at or ""),
             "snippet": str(self.snippet or ""),
             "category": str(self.category or ""),
@@ -89,6 +95,9 @@ class NewsPoolStore:
                     url TEXT NOT NULL UNIQUE,
                     title TEXT NOT NULL,
                     source TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT '',
+                    topic TEXT NOT NULL DEFAULT '',
+                    collected_at TEXT NOT NULL DEFAULT '',
                     published_at TEXT NOT NULL DEFAULT '',
                     snippet TEXT NOT NULL DEFAULT '',
                     category TEXT NOT NULL DEFAULT '',
@@ -108,6 +117,12 @@ class NewsPoolStore:
             }
             if "topic_fp" not in cols:
                 conn.execute("ALTER TABLE news_items ADD COLUMN topic_fp TEXT NOT NULL DEFAULT ''")
+            if "provider" not in cols:
+                conn.execute("ALTER TABLE news_items ADD COLUMN provider TEXT NOT NULL DEFAULT ''")
+            if "topic" not in cols:
+                conn.execute("ALTER TABLE news_items ADD COLUMN topic TEXT NOT NULL DEFAULT ''")
+            if "collected_at" not in cols:
+                conn.execute("ALTER TABLE news_items ADD COLUMN collected_at TEXT NOT NULL DEFAULT ''")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_news_status_score ON news_items(status, score DESC, published_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_news_published_at ON news_items(published_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_news_used_at ON news_items(used_at)")
@@ -137,6 +152,9 @@ class NewsPoolStore:
                 if not url or not title:
                     continue
                 source = str((row or {}).get("source", "") or (urlparse(url).netloc or "")).strip().lower()
+                provider = str((row or {}).get("provider", "") or "").strip().lower()
+                topic = str((row or {}).get("topic", "") or "").strip()
+                collected_at = str((row or {}).get("collected_at", "") or "").strip()
                 published_at = str((row or {}).get("published_at", "") or "").strip()
                 snippet = str((row or {}).get("snippet", "") or "").strip()
                 category = str((row or {}).get("category", "") or "").strip().lower()
@@ -162,12 +180,15 @@ class NewsPoolStore:
                 conn.execute(
                     """
                     INSERT INTO news_items (
-                        url, title, source, published_at, snippet, category, status, score, created_at, topic_fp
+                        url, title, source, provider, topic, collected_at, published_at, snippet, category, status, score, created_at, topic_fp
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                     ON CONFLICT(url) DO UPDATE SET
                         title=excluded.title,
                         source=excluded.source,
+                        provider=excluded.provider,
+                        topic=excluded.topic,
+                        collected_at=excluded.collected_at,
                         published_at=excluded.published_at,
                         snippet=excluded.snippet,
                         category=excluded.category,
@@ -175,7 +196,7 @@ class NewsPoolStore:
                         topic_fp=excluded.topic_fp
                     WHERE news_items.status IN ('queued', 'claimed')
                     """,
-                    (url, title, source, published_at, snippet, category, score, now, topic_fp),
+                    (url, title, source, provider, topic, collected_at, published_at, snippet, category, score, now, topic_fp),
                 )
                 added_or_updated += 1
         return int(added_or_updated)
@@ -248,7 +269,7 @@ class NewsPoolStore:
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 sql = """
-                    SELECT id, url, title, source, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at, topic_fp
+                    SELECT id, url, title, source, provider, topic, collected_at, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at, topic_fp
                     FROM news_items
                     WHERE status='queued'
                       AND (published_at='' OR published_at >= ?)
@@ -442,7 +463,7 @@ class NewsPoolStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, url, title, source, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at, topic_fp
+                SELECT id, url, title, source, provider, topic, collected_at, published_at, snippet, category, status, score, claimed_at, used_at, published_url, created_at, topic_fp
                 FROM news_items
                 WHERE id=?
                 LIMIT 1
@@ -456,6 +477,9 @@ class NewsPoolStore:
             url=str(row["url"] or ""),
             title=str(row["title"] or ""),
             source=str(row["source"] or ""),
+            provider=str(row["provider"] or ""),
+            topic=str(row["topic"] or ""),
+            collected_at=str(row["collected_at"] or ""),
             published_at=str(row["published_at"] or ""),
             snippet=str(row["snippet"] or ""),
             category=str(row["category"] or ""),

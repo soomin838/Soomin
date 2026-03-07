@@ -23,6 +23,7 @@ storage/sessions/
 storage/temp_images/
 storage/ui/
 storage/*.sqlite
+storage/*.sqlite3
 storage/*.sqlite-journal
 storage/schedules/
 storage/state/

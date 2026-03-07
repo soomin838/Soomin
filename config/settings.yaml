@@ -301,9 +301,9 @@ integrations:
   ga4_property_id: ''
   search_console_site_url: ''
 worldmonitor:
-  enabled: true
+  enabled: false
   api_key: ''
-  prefer_api: true
+  prefer_api: false
   timeout_sec: 15
 policy_gate:
   enabled: true
