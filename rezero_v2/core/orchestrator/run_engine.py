@@ -128,7 +128,9 @@ class RunEngine:
         intent_result = runtime["intent_stage"].run(context, candidate)
         self._record_stage(context, intent_result, stage_results)
         if intent_result.status != "success" or not intent_result.payload:
-            return self._finalize(context, stage_results, intent_result, selected_title=candidate.title, source_domain=candidate.source_domain)
+            failed_candidate = (intent_result.payload or {}).get("candidate", candidate) if isinstance(intent_result.payload, dict) else candidate
+            return self._finalize(context, stage_results, intent_result, selected_title=failed_candidate.title, source_domain=failed_candidate.source_domain)
+        candidate = intent_result.payload["candidate"]
         intent_bundle = intent_result.payload["intent_bundle"]
 
         cluster = runtime["cluster_builder"].assign_cluster(

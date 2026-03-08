@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 import time
@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from rezero_v2.core.domain.candidate import Candidate
 from rezero_v2.core.domain.stage_result import StageResult
+from rezero_v2.core.services.intent_engine import looks_non_english, normalize_candidate_identity, sanitize_source_headline, sanitize_source_snippet
 
 
 class IngestStage:
@@ -21,9 +22,9 @@ class IngestStage:
         slot = context.allocation.slot_type
         candidates: list[Candidate] = []
         if slot == 'search_derived':
-            candidates.extend(self.candidate_store.get_pending('search_derived', limit=20))
+            candidates.extend(normalize_candidate_identity(candidate) for candidate in self.candidate_store.get_pending('search_derived', limit=20))
         elif slot == 'evergreen':
-            candidates.extend(self.candidate_store.get_pending('evergreen', limit=20))
+            candidates.extend(normalize_candidate_identity(candidate) for candidate in self.candidate_store.get_pending('evergreen', limit=20))
         if not candidates:
             groups = list(self.gdelt_client.fetch_trending_topics() or [])
             for group in groups:
@@ -33,8 +34,9 @@ class IngestStage:
                     url = str((row or {}).get('url', '') or '').strip()
                     if not title or not url:
                         continue
+                    clean_headline = sanitize_source_headline(title)
                     source_domain = (urlparse(url).netloc or str((row or {}).get('source', '') or '')).lower()
-                    source_snippet = str((row or {}).get('summary', '') or '').strip()
+                    source_snippet = sanitize_source_snippet(str((row or {}).get('summary', '') or '').strip())
                     entity_terms = re.findall(r"\b[A-Z][a-zA-Z0-9&.-]{2,}\b", title)
                     topic_terms = [
                         word
@@ -52,24 +54,27 @@ class IngestStage:
                         else:
                             score = self.topic_scorer.score_evergreen(durability=72, usefulness_score=70, cluster_gap=64, search_demand=55, authority_source_availability=60)
                     candidates.append(
-                        Candidate(
+                        normalize_candidate_identity(Candidate(
                             candidate_id=uuid.uuid5(uuid.NAMESPACE_URL, url).hex,
                             content_type=content_type,
                             source_type=source_type,
-                            title=title,
-                            source_title=title,
+                            title=clean_headline,
+                            source_title=clean_headline,
                             source_url=url,
                             source_domain=source_domain,
                             source_snippet=source_snippet,
                             category=topic or 'technology',
                             published_at_utc=str((row or {}).get('published_date', '') or ''),
                             provider='gdelt',
-                            language='en',
+                            language='non_english' if looks_non_english(clean_headline) else 'en',
+                            source_headline=clean_headline,
+                            normalized_source_headline=clean_headline,
+                            derived_primary_query='',
                             entity_terms=entity_terms[:6],
                             topic_terms=topic_terms,
                             tags=[topic] if topic else [],
                             raw_meta={'score': score, 'topic': topic},
-                        )
+                        ))
                     )
                     if len(candidates) >= 20:
                         break

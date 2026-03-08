@@ -18,6 +18,9 @@ class Candidate:
     published_at_utc: str
     provider: str
     language: str
+    source_headline: str = ""
+    normalized_source_headline: str = ""
+    derived_primary_query: str = ""
     entity_terms: list[str] = field(default_factory=list)
     topic_terms: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import time
 
@@ -12,6 +12,16 @@ class DraftStage:
 
     def run(self, context, *, candidate, intent_bundle, grounding_packet, outline_plan) -> StageResult[dict]:
         started = time.perf_counter()
+        if grounding_packet.intent_family != intent_bundle.chosen_intent_family:
+            return StageResult(
+                'draft_stage',
+                'skipped',
+                'intent_stage_contract_mismatch',
+                'draft 단계에서 의도 계약 불일치가 감지되어 건너뜁니다.',
+                int((time.perf_counter() - started) * 1000),
+                {'candidate': candidate, 'grounding_packet': grounding_packet, 'intent_bundle': intent_bundle},
+                {'packet_intent_family': grounding_packet.intent_family, 'bundle_intent_family': intent_bundle.chosen_intent_family},
+            )
         draft = self.draft_engine.generate(
             candidate=candidate,
             intent_bundle=intent_bundle,

@@ -13,8 +13,8 @@ class V2PreDraftSkipTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             settings_path = make_settings_file(root / "config" / "settings.yaml")
-            groups = [{"topic": "chips", "articles": [article(title="Chip project update", summary="Chip project update.", topic="chips")]}]
+            groups = [{"topic": "chips", "articles": [article(title="ai update", summary="Seen by GDELT at 20260308T094500Z", topic="chips")]}]
             engine = RunEngine(root, settings_path, overrides={"gdelt_client": FakeGDELTClient(groups)})
             result = engine.run_once(force_content_type="hot", dry_run=True)
             self.assertEqual(result.summary.result, "skipped")
-            self.assertIn(result.summary.reason_code, {"pre_draft_source_fact_density_too_low", "pre_draft_entity_overlap_too_low", "pre_draft_low_grounding"})
+            self.assertIn(result.summary.reason_code, {"grounding_packet_quality_too_low", "pre_draft_source_fact_density_too_low", "pre_draft_entity_overlap_too_low", "pre_draft_low_grounding"})

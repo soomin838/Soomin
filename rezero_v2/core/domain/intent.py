@@ -6,7 +6,7 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class IntentExpansion:
-    intent_family: Literal["what_changed", "comparison", "pricing", "performance", "should_you", "alternatives", "how_to"]
+    intent_family: Literal["what_changed", "why_it_matters", "comparison", "pricing", "performance", "should_you", "alternatives", "how_to"]
     title: str
     primary_query: str
     supporting_queries: list[str] = field(default_factory=list)
@@ -23,6 +23,12 @@ class IntentBundle:
     title_strategy: str
     source_strategy: str
     image_strategy: str
+    chosen_intent_family: str = "what_changed"
+    normalized_source_headline: str = ""
+    derived_primary_query: str = ""
+    contract_id: str = ""
     expansions: list[IntentExpansion] = field(default_factory=list)
     source_grounded: bool = True
     source_model: Literal["ollama", "rules"] = "rules"
+    source_language: str = "en"
+    normalization_source: Literal["rules", "ollama"] = "rules"
