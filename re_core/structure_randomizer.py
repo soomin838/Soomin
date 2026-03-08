@@ -23,6 +23,7 @@ class OutlinePlan:
     fingerprint: str = ""
     best_similarity: float = 0.0
     heading_signature: str = ""
+    grounding_packet: dict[str, Any] = field(default_factory=dict)
 
 
 class StructureRandomizer:
@@ -52,15 +53,18 @@ class StructureRandomizer:
         intent_bundle: IntentBundle,
         category: str,
         cluster_id: str = "",
+        grounding_packet: dict[str, Any] | None = None,
     ) -> OutlinePlan:
         recent = self._load_recent()
         best_plan: OutlinePlan | None = None
+        packet = dict(grounding_packet or {})
         for attempt in range(self.max_attempts):
             payload, source = self._generate_outline_payload(
                 candidate=candidate,
                 intent_bundle=intent_bundle,
                 category=category,
                 cluster_id=cluster_id,
+                grounding_packet=packet,
                 attempt=attempt,
             )
             plan = self._normalize_outline_payload(
@@ -70,7 +74,9 @@ class StructureRandomizer:
                 category=category,
                 cluster_id=cluster_id,
                 source=source,
+                grounding_packet=packet,
             )
+            grounded, ground_detail = self._outline_grounding_ok(plan, packet)
             similarity = 0.0
             for row in recent:
                 row_similarity = self._hybrid_similarity(
@@ -91,16 +97,37 @@ class StructureRandomizer:
                 fingerprint=plan.fingerprint,
                 best_similarity=float(round(similarity, 4)),
                 heading_signature=plan.heading_signature,
+                grounding_packet=dict(packet),
             )
             best_plan = plan
-            self._log("outline_attempt", plan=plan, attempt=attempt + 1, accepted=bool(similarity < self.similarity_threshold))
-            if similarity < self.similarity_threshold:
+            accepted = bool((similarity < self.similarity_threshold) and grounded)
+            self._log(
+                "outline_attempt",
+                plan=plan,
+                attempt=attempt + 1,
+                accepted=accepted,
+                grounding_ok=bool(grounded),
+                grounding_detail=ground_detail,
+            )
+            if accepted:
                 self._remember(plan)
                 self._log("outline_selected", plan=plan, attempt=attempt + 1, accepted=True)
                 return plan
         if best_plan is not None:
-            self._log("outline_rejected", plan=best_plan, attempt=self.max_attempts, accepted=False, note="template_similarity_too_high")
-        raise RuntimeError("template_similarity_too_high")
+            grounded, ground_detail = self._outline_grounding_ok(best_plan, packet)
+            note = "template_similarity_too_high" if not grounded or best_plan.best_similarity >= self.similarity_threshold else "outline_grounding_too_weak"
+            if not grounded:
+                note = "outline_grounding_too_weak"
+            self._log(
+                "outline_rejected",
+                plan=best_plan,
+                attempt=self.max_attempts,
+                accepted=False,
+                note=note,
+                grounding_detail=ground_detail,
+            )
+            raise RuntimeError(note)
+        raise RuntimeError("outline_grounding_too_weak")
 
     def _generate_outline_payload(
         self,
@@ -109,6 +136,7 @@ class StructureRandomizer:
         intent_bundle: IntentBundle,
         category: str,
         cluster_id: str,
+        grounding_packet: dict[str, Any],
         attempt: int,
     ) -> tuple[dict[str, Any], str]:
         if self.ollama_client is not None:
@@ -119,6 +147,7 @@ class StructureRandomizer:
                         intent_bundle=intent_bundle,
                         category=category,
                         cluster_id=cluster_id,
+                        grounding_packet=grounding_packet,
                         attempt=attempt,
                     ),
                     "ollama",
@@ -131,6 +160,7 @@ class StructureRandomizer:
                 intent_bundle=intent_bundle,
                 category=category,
                 cluster_id=cluster_id,
+                grounding_packet=grounding_packet,
                 attempt=attempt,
             ),
             "rules",
@@ -143,13 +173,17 @@ class StructureRandomizer:
         intent_bundle: IntentBundle,
         category: str,
         cluster_id: str,
+        grounding_packet: dict[str, Any],
         attempt: int,
     ) -> dict[str, Any]:
         system_prompt = (
             "Generate a dynamic article outline for a factual US English explainer. "
             "Return JSON only with keys: section_titles, section_purposes, intro_template, conclusion_template, paragraph_lengths. "
             "Use 4-6 sections total, include Quick Take as the first section and Sources as the last section, "
-            "and make the middle headings topic-specific rather than generic templates."
+            "and make the middle headings topic-specific rather than generic templates. "
+            "The outline must stay tightly grounded to the source packet. "
+            "The first 3 sections must clearly cover the required entities, topic nouns, and source facts. "
+            "Avoid forbidden drift terms unless the source packet explicitly supports them."
         )
         payload = {
             "headline": str(getattr(candidate, "title", "") or "").strip(),
@@ -161,6 +195,7 @@ class StructureRandomizer:
             "negative_angles": list(intent_bundle.negative_angles or [])[:4],
             "content_kind": str(intent_bundle.content_kind or "").strip().lower() or "hot",
             "cluster_id": str(cluster_id or "").strip().lower(),
+            "grounding_packet": dict(grounding_packet or {}),
             "attempt": int(attempt),
         }
         original_timeout = getattr(self.ollama_client, "timeout", None)
@@ -181,17 +216,27 @@ class StructureRandomizer:
         intent_bundle: IntentBundle,
         category: str,
         cluster_id: str,
+        grounding_packet: dict[str, Any],
         attempt: int,
     ) -> dict[str, Any]:
         topic = self._clean_phrase(str(intent_bundle.primary_query or getattr(candidate, "title", "") or "the latest change"))
         questions = [self._clean_phrase(x) for x in (intent_bundle.questions or []) if self._clean_phrase(x)]
         outline_brief = [self._clean_phrase(x) for x in (intent_bundle.outline_brief or []) if self._clean_phrase(x)]
+        entities = [self._headline_case(x) for x in (grounding_packet.get("required_named_entities", []) or []) if self._clean_phrase(x)]
+        nouns = [self._headline_case(x) for x in (grounding_packet.get("required_topic_nouns", []) or []) if self._clean_phrase(x)]
+        facts = [self._clean_phrase(x) for x in (grounding_packet.get("required_source_facts", []) or []) if self._clean_phrase(x)]
         titles = ["Quick Take"]
         purposes = ["event summary"]
 
         dynamic_pairs: list[tuple[str, str]] = []
+        if entities:
+            dynamic_pairs.append((f"What happened to {entities[0]}", "confirmed details"))
+        elif nouns:
+            dynamic_pairs.append((f"What changed around {nouns[0]}", "confirmed details"))
         for item in outline_brief:
             dynamic_pairs.append(self._section_from_brief(item, topic=topic, category=category, attempt=attempt))
+        for fact in facts[:2]:
+            dynamic_pairs.append(self._fact_to_section(fact, topic=topic))
         if not dynamic_pairs:
             dynamic_pairs.extend(self._fallback_dynamic_pairs(topic=topic, category=category, questions=questions))
 
@@ -239,6 +284,7 @@ class StructureRandomizer:
             "conclusion_template": f"Close on the next thing readers should verify about {topic}.",
             "paragraph_lengths": lengths,
             "cluster_id": cluster_id,
+            "grounding_packet": dict(grounding_packet or {}),
         }
 
     def _section_from_brief(self, text: str, *, topic: str, category: str, attempt: int) -> tuple[str, str]:
@@ -296,6 +342,7 @@ class StructureRandomizer:
         category: str,
         cluster_id: str,
         source: str,
+        grounding_packet: dict[str, Any],
     ) -> OutlinePlan:
         titles_raw = payload.get("section_titles", []) if isinstance(payload, dict) else []
         purposes_raw = payload.get("section_purposes", []) if isinstance(payload, dict) else []
@@ -327,6 +374,7 @@ class StructureRandomizer:
             fingerprint=fingerprint,
             best_similarity=0.0,
             heading_signature=heading_signature,
+            grounding_packet=dict(grounding_packet or {}),
         )
 
     def _normalize_titles(
@@ -360,6 +408,42 @@ class StructureRandomizer:
         out = out[:5]
         out.append("Sources")
         return out
+
+    def _fact_to_section(self, fact: str, *, topic: str) -> tuple[str, str]:
+        clean = self._headline_case(self._clean_phrase(fact))
+        if not clean:
+            clean = f"What changed with {topic}"
+        if len(clean.split()) < 3:
+            clean = f"{clean} about {topic}".strip()
+        return clean[:72], "source grounding"
+
+    def _outline_grounding_ok(self, plan: OutlinePlan, grounding_packet: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        packet = dict(grounding_packet or {})
+        required_terms: list[str] = []
+        required_terms.extend([self._normalize(x) for x in (packet.get("required_named_entities", []) or []) if self._normalize(x)])
+        required_terms.extend([self._normalize(x) for x in (packet.get("required_topic_nouns", []) or []) if self._normalize(x)])
+        for fact in (packet.get("required_source_facts", []) or [])[:3]:
+            required_terms.extend(list(self._tokenize(str(fact or "")))[:4])
+        required_terms = [x for x in required_terms if x]
+        required_terms = list(dict.fromkeys(required_terms))[:16]
+        if not required_terms:
+            return True, {"coverage_ratio": 1.0, "matched_terms": []}
+        heading_blob = " ".join(list(plan.section_titles or [])[:4] + list(plan.section_purposes or [])[:4])
+        heading_tokens = self._tokenize(heading_blob)
+        matched = sorted({term for term in required_terms if term in heading_tokens})
+        coverage_ratio = len(matched) / max(1, min(len(required_terms), 8))
+        generic_count = sum(1 for title in (plan.section_titles or []) if self._is_generic_heading(title))
+        detail = {
+            "coverage_ratio": round(float(coverage_ratio), 3),
+            "matched_terms": matched[:8],
+            "required_terms": required_terms[:8],
+            "generic_headings": int(generic_count),
+        }
+        if coverage_ratio < 0.22:
+            return False, detail
+        if generic_count >= max(2, len(list(plan.section_titles or [])) - 2):
+            return False, detail
+        return True, detail
 
     def _normalize_purposes(self, value: Any, *, count: int) -> list[str]:
         raw = value if isinstance(value, list) else []
@@ -515,7 +599,17 @@ class StructureRandomizer:
         except Exception:
             return
 
-    def _log(self, event: str, *, plan: OutlinePlan, attempt: int, accepted: bool, note: str = "") -> None:
+    def _log(
+        self,
+        event: str,
+        *,
+        plan: OutlinePlan,
+        attempt: int,
+        accepted: bool,
+        note: str = "",
+        grounding_ok: bool | None = None,
+        grounding_detail: dict[str, Any] | None = None,
+    ) -> None:
         if self.log_path is None:
             return
         row = {
@@ -526,6 +620,10 @@ class StructureRandomizer:
             "note": str(note or "").strip()[:120],
             "plan": asdict(plan),
         }
+        if grounding_ok is not None:
+            row["grounding_ok"] = bool(grounding_ok)
+        if isinstance(grounding_detail, dict) and grounding_detail:
+            row["grounding_detail"] = dict(grounding_detail)
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a", encoding="utf-8") as fh:

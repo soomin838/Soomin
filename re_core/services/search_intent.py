@@ -177,9 +177,9 @@ class SearchIntentGenerator:
     ) -> IntentBundle:
         topic = self._topic_phrase(headline=headline, snippet=snippet, body_excerpt=body_excerpt)
         archetypes = self._category_archetypes(category)
-        primary_query = self._primary_query(topic, category)
-        supporting = self._supporting_queries(topic, category)
-        questions = self._questions(topic, category)
+        primary_query = self._primary_query(topic, category, conservative=True)
+        supporting = self._supporting_queries(topic, category, conservative=True)
+        questions = self._questions(topic, category, conservative=True)
         return IntentBundle(
             primary_query=primary_query,
             supporting_queries=supporting,
@@ -187,7 +187,7 @@ class SearchIntentGenerator:
             audience="US mainstream readers",
             content_kind="hot",
             recommended_archetypes=archetypes,
-            outline_brief=self._default_outline(topic, category),
+            outline_brief=self._default_outline(topic, category, conservative=True),
             negative_angles=self._negative_angles(category),
         )
 
@@ -199,8 +199,14 @@ class SearchIntentGenerator:
             return "the latest tech change"
         return merged[:110]
 
-    def _primary_query(self, topic: str, category: str) -> str:
+    def _primary_query(self, topic: str, category: str, conservative: bool = False) -> str:
         cat = str(category or "").strip().lower()
+        if conservative:
+            if re.search(r"\bhow to\b", topic, flags=re.IGNORECASE):
+                return topic
+            if cat in {"consumer", "home", "wellness"}:
+                return f"{topic} explained"
+            return f"{topic} what changed"
         if cat in {"security", "policy", "platform"}:
             return f"{topic} what changed and who is affected"
         if cat in {"consumer", "home", "wellness"}:
@@ -209,9 +215,28 @@ class SearchIntentGenerator:
             return f"{topic} what it means in practice"
         return f"{topic} what it means and what to watch"
 
-    def _supporting_queries(self, topic: str, category: str) -> list[str]:
+    def _supporting_queries(self, topic: str, category: str, conservative: bool = False) -> list[str]:
         cat = str(category or "").strip().lower()
         base = re.sub(r"[?]+$", "", topic).strip()
+        if conservative:
+            templates = [
+                f"{base} summary",
+                f"{base} explained",
+                f"{base} key details",
+                f"{base} who is involved",
+                f"{base} what changed",
+                f"{base} what to watch next",
+            ]
+            if cat in {"consumer", "home", "wellness"}:
+                templates = [
+                    f"{base} explained",
+                    f"{base} buyer questions",
+                    f"{base} what changed",
+                    f"{base} key details",
+                    f"{base} what still needs verification",
+                    f"{base} should buyers care",
+                ]
+            return templates[:6]
         templates = [
             f"{base} why it matters now",
             f"{base} who is affected first",
@@ -231,8 +256,23 @@ class SearchIntentGenerator:
             ]
         return templates[:6]
 
-    def _questions(self, topic: str, category: str) -> list[str]:
+    def _questions(self, topic: str, category: str, conservative: bool = False) -> list[str]:
         cat = str(category or "").strip().lower()
+        if conservative:
+            common = [
+                f"What does the source actually say about {topic}?",
+                f"Which named people, groups, or products are directly tied to {topic}?",
+                f"What is confirmed about {topic} and what is still unclear?",
+                f"What should readers verify next around {topic}?",
+            ]
+            if cat in {"consumer", "home", "wellness"}:
+                common = [
+                    f"What exactly changed around {topic}?",
+                    f"What facts about {topic} matter most for buyers?",
+                    f"What does the source still not answer about {topic}?",
+                    f"What should shoppers verify before acting on {topic}?",
+                ]
+            return common[:5]
         common = [
             f"What changed in {topic}?",
             f"Who feels the impact of {topic} first?",
@@ -258,8 +298,24 @@ class SearchIntentGenerator:
             return ["research_practical_takeaways", "news_impact_explainer", "news_timeline_explainer"]
         return ["news_impact_explainer", "news_timeline_explainer", "news_risk_watch"]
 
-    def _default_outline(self, topic: str, category: str) -> list[str]:
+    def _default_outline(self, topic: str, category: str, conservative: bool = False) -> list[str]:
         cat = str(category or "").strip().lower()
+        if conservative:
+            if cat in {"consumer", "home", "wellness"}:
+                return [
+                    f"Open with the direct source claim about {topic}.",
+                    "Lay out the confirmed details without broadening the story.",
+                    "Explain what readers or buyers can actually verify from the source.",
+                    "Separate confirmed facts from open questions.",
+                    "Close with one grounded next-step takeaway.",
+                ]
+            return [
+                f"Open with the direct source event behind {topic}.",
+                "Restate the confirmed facts and named entities clearly.",
+                "Explain why the change matters without drifting into generic platform commentary.",
+                "List what still needs verification or follow-up evidence.",
+                "Close with the next specific thing readers should watch.",
+            ]
         if cat in {"consumer", "home", "wellness"}:
             return [
                 f"Open with the real shopper question behind {topic}.",

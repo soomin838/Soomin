@@ -770,10 +770,12 @@ class AgentController:
                     result = self.workflow.run_once(manual_trigger=is_manual_trigger)
                     self.last_status = result.status
                     self.last_message = result.message
+                    final_ctx = dict(getattr(self.workflow, "_latest_workflow_final_context", {}) or {})
                     if result.status.lower() in {"success", "skipped", "hold"}:
-                        self.phase_key = "idle"
-                        self.phase_message = "다음 예약 대기"
-                        self.phase_percent = 100 if result.status.lower() == "success" else max(self.phase_percent, 85)
+                        self.phase_key = "workflow_final"
+                        self.phase_message = str(final_ctx.get("summary", result.message) or result.message)
+                        self.phase_percent = 100 if result.status.lower() == "success" else 88
+                        self._trace_phase_transition(self.phase_key, self.phase_message, self.phase_percent)
                     elapsed = round(time.time() - run_started, 2)
                     trace_payload = self._finalize_run_trace()
                     self.qa.write(
@@ -789,6 +791,7 @@ class AgentController:
                             "phase_totals_sec": trace_payload.get("phase_totals_sec", {}),
                             "phase_trace_tail": trace_payload.get("phase_trace", []),
                             "run_elapsed_sec_trace": trace_payload.get("run_elapsed_sec_trace", 0.0),
+                            "workflow_final_context": final_ctx,
                         },
                     )
                 backoff_minutes = 1

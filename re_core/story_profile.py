@@ -117,6 +117,11 @@ class TechTopicAssessment:
     off_topic_hits: list[str]
     reason: str
     source_domain: str
+    mixed_domain: bool = False
+    dominant_axis: str = ""
+    explicit_tech_angle: bool = False
+    tech_score: float = 0.0
+    off_topic_score: float = 0.0
 
 
 def _clean(text: str) -> str:
@@ -240,6 +245,20 @@ def _matching_groups(text: str, groups: dict[str, tuple[str, ...]]) -> list[str]
     return hits
 
 
+def _group_token_counts(text: str, groups: dict[str, tuple[str, ...]]) -> dict[str, int]:
+    lower = _lower_blob(text)
+    counts: dict[str, int] = {}
+    for label, tokens in groups.items():
+        hit_count = 0
+        for token in tokens:
+            clean = str(token or "").strip().lower()
+            if clean and clean in lower:
+                hit_count += 1
+        if hit_count > 0:
+            counts[label] = hit_count
+    return counts
+
+
 def _has_software_reference_context(text: str) -> bool:
     lower = _lower_blob(text)
     return any(token in lower for token in _SOFTWARE_REFERENCE_TOKENS)
@@ -259,20 +278,27 @@ def assess_tech_news_topic(
     merged = _lower_blob(clean_title, clean_snippet, category, topic, source_domain)
     tech_hits = _matching_groups(merged, _TECH_NEWS_SIGNAL_GROUPS)
     off_topic_hits = _matching_groups(merged, _OFF_TOPIC_SIGNAL_GROUPS)
+    tech_counts = _group_token_counts(merged, _TECH_NEWS_SIGNAL_GROUPS)
+    off_topic_counts = _group_token_counts(merged, _OFF_TOPIC_SIGNAL_GROUPS)
+    explicit_blob = _lower_blob(clean_title, clean_snippet)
+    explicit_tech_counts = _group_token_counts(explicit_blob, _TECH_NEWS_SIGNAL_GROUPS)
 
     normalized_category = normalize_story_category(category)
     if normalized_category in {"security", "policy", "ai", "chips"} and normalized_category not in tech_hits:
         tech_hits.append(normalized_category)
+        tech_counts[normalized_category] = max(1, int(tech_counts.get(normalized_category, 0) or 0))
     if source_domain and any(
         source_domain == host or source_domain.endswith("." + host)
         for host in _TECH_SOURCE_DOMAINS
     ):
         tech_hits.append("tech_domain")
+        tech_counts["tech_domain"] = max(1, int(tech_counts.get("tech_domain", 0) or 0))
     if source_domain and any(
         source_domain == host or source_domain.endswith("." + host)
         for host in _IRRELEVANT_NEWS_REFERENCE_DOMAINS
     ):
         off_topic_hits.append("pr_wire_domain")
+        off_topic_counts["pr_wire_domain"] = max(1, int(off_topic_counts.get("pr_wire_domain", 0) or 0))
 
     allow_score = float(len(set(tech_hits)))
     if "tech_domain" in tech_hits:
@@ -285,10 +311,31 @@ def assess_tech_news_topic(
         & {"ai", "cybersecurity", "software", "platform", "mobile", "chips", "privacy", "cloud", "security", "policy"}
     )
     off_topic_penalty = float(len(set(off_topic_hits)))
+    tech_score = float(sum(int(v) for v in tech_counts.values()))
+    off_topic_score = float(sum(int(v) for v in off_topic_counts.values()))
+    if "tech_domain" in tech_counts:
+        tech_score += 0.5
+    if topic and _matching_groups(topic, _TECH_NEWS_SIGNAL_GROUPS):
+        tech_score += 0.5
+    explicit_tech_angle = bool(
+        explicit_tech_counts
+        and any(
+            key in explicit_tech_counts
+            for key in {"ai", "cybersecurity", "software", "platform", "mobile", "chips", "privacy", "cloud", "security", "policy"}
+        )
+    )
+    mixed_domain = bool("education" in off_topic_hits and has_direct_tech_angle)
+    dominant_axis = "tech" if tech_score > off_topic_score else ("off_topic" if off_topic_score > tech_score else "mixed")
 
     allow = True
     reason = "ok"
-    if ("education" in off_topic_hits) and allow_score < 2.5:
+    if mixed_domain and not explicit_tech_angle:
+        allow = False
+        reason = "mixed_domain_requires_explicit_tech_angle"
+    elif mixed_domain and tech_score < (off_topic_score + 1.0):
+        allow = False
+        reason = "mixed_domain_education_tech_but_tech_not_dominant"
+    elif ("education" in off_topic_hits) and allow_score < 2.5:
         allow = False
         reason = "off_topic_education_no_explicit_tech_angle"
     elif ({"pr_wire", "pr_wire_domain"} & set(off_topic_hits)) and allow_score < 2.5:
@@ -308,6 +355,11 @@ def assess_tech_news_topic(
         off_topic_hits=sorted(set(off_topic_hits)),
         reason=reason,
         source_domain=source_domain,
+        mixed_domain=bool(mixed_domain),
+        dominant_axis=dominant_axis,
+        explicit_tech_angle=bool(explicit_tech_angle),
+        tech_score=float(round(tech_score, 3)),
+        off_topic_score=float(round(off_topic_score, 3)),
     )
 
 

@@ -1024,6 +1024,27 @@ class GeminiBrain:
             for x in (intent_bundle.negative_angles or [])
             if str(x or "").strip()
         ][:4]
+        grounding_packet = dict(getattr(outline_plan, "grounding_packet", {}) or {})
+        required_entities = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (grounding_packet.get("required_named_entities", []) or [])
+            if str(x or "").strip()
+        ][:6]
+        required_topic_nouns = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (grounding_packet.get("required_topic_nouns", []) or [])
+            if str(x or "").strip()
+        ][:8]
+        required_source_facts = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (grounding_packet.get("required_source_facts", []) or [])
+            if str(x or "").strip()
+        ][:5]
+        forbidden_drift_terms = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (grounding_packet.get("forbidden_generic_drift_terms", []) or [])
+            if str(x or "").strip()
+        ][:10]
         depth_line = f"Target depth: roughly {target_min_words}-{target_max_words} words."
         section_depth_line = (
             "Each major H2 should contain 1-2 concise paragraphs with direct value."
@@ -1078,12 +1099,26 @@ class GeminiBrain:
                 "\nAngles to avoid:\n",
                 "\n".join(f"- {item}" for item in negative_angles),
                 "\n",
+                "Grounding packet for this source (must stay explicit in the intro and first two sections):\n",
+                f"- Canonical source title: {str(grounding_packet.get('canonical_source_title', candidate.title) or candidate.title).strip()}\n",
+                f"- Canonical source snippet: {str(grounding_packet.get('source_snippet', candidate.body[:600]) or candidate.body[:600]).strip()}\n",
+                "Required named entities:\n",
+                "\n".join(f"- {item}" for item in required_entities),
+                "\nRequired topic nouns:\n",
+                "\n".join(f"- {item}" for item in required_topic_nouns),
+                "\nRequired source facts (cover at least 3 explicitly):\n",
+                "\n".join(f"- {item}" for item in required_source_facts),
+                "\nForbidden generic drift terms unless the source explicitly supports them:\n",
+                "\n".join(f"- {item}" for item in forbidden_drift_terms),
+                "\n",
                 "Do not inject standard fallback headings that are not in the dynamic outline.\n",
                 "Quick Take must stay first and Sources must stay last, but all middle sections must follow this run's generated outline.\n",
                 f"{depth_line}\n",
                 f"{section_depth_line}\n",
                 "Under Quick Take, include a 2-3 sentence lede and a 5-bullet key facts list.\n",
                 "In Sources, show publisher-labeled links, not raw URL text.\n",
+                "Title, intro, and the first two sections must clearly restate the actual event and the required source facts.\n",
+                "Do not drift into broad workflow, platform, cost, latency, or vendor analysis unless the source packet directly supports it.\n",
                 (
                     "Sources must use relevant authority links only. Do not invent a placeholder source URL.\n"
                     if source_strategy == "authority_first"
@@ -1142,6 +1177,56 @@ class GeminiBrain:
             source_url=source_link,
             extracted_urls=[str(u) for u in urls if isinstance(u, str)][:8],
         )
+
+    def repair_news_grounding(
+        self,
+        *,
+        title: str,
+        html: str,
+        source_title: str,
+        source_snippet: str,
+        source_url: str,
+        section_titles: list[str],
+        grounding_packet: dict[str, Any] | None = None,
+    ) -> str:
+        packet = dict(grounding_packet or {})
+        required_entities = [str(x or "").strip() for x in (packet.get("required_named_entities", []) or []) if str(x or "").strip()][:6]
+        required_facts = [str(x or "").strip() for x in (packet.get("required_source_facts", []) or []) if str(x or "").strip()][:5]
+        forbidden_terms = [str(x or "").strip() for x in (packet.get("forbidden_generic_drift_terms", []) or []) if str(x or "").strip()][:10]
+        prompt = (
+            "Rewrite this news explainer so it becomes tightly grounded to the source event.\n"
+            "Return strict JSON with keys only: title_draft, content_html, summary.\n"
+            "Rules:\n"
+            "- Preserve the actual named entities from the source.\n"
+            "- Preserve the actual source facts.\n"
+            "- Restate the event clearly in the title, intro, and first two sections.\n"
+            "- Remove generic filler and broad workflow/platform/cost text unless directly supported by the source.\n"
+            "- Keep the same section order where possible.\n"
+            f"Target title: {title}\n"
+            f"Source title: {source_title}\n"
+            f"Source snippet: {source_snippet}\n"
+            f"Source URL: {source_url}\n"
+            f"Section order: {section_titles}\n"
+            f"Required named entities: {required_entities}\n"
+            f"Required source facts: {required_facts}\n"
+            f"Forbidden drift terms: {forbidden_terms}\n"
+            f"HTML Draft:\n{html[:18000]}"
+        )
+        payload = self._extract_json(
+            self._generate_text(
+                prompt,
+                system_instruction=(
+                    "You are a senior US tech news editor. Repair factual grounding without adding hype. "
+                    "Stay concrete, attribution-first, and source-anchored."
+                ),
+            )
+        )
+        rewritten_html = str(payload.get("content_html", payload.get("html", "")) or "").strip()
+        if not rewritten_html:
+            rewritten_html = str(html or "")
+        rewritten_html = self._remove_ai_markers(rewritten_html, domain="tech_news_explainer")
+        rewritten_html = self._enforce_html_minimum(rewritten_html)
+        return rewritten_html
 
     def _load_news_module_rotation(self) -> list[str]:
         try:

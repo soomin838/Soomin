@@ -260,6 +260,8 @@ class AgentWorkflow:
             "target": int(getattr(self.settings.visual, "target_images_per_post", 5) or 5),
             "message": "ready",
         }
+        self._news_runtime_context: dict[str, Any] = {}
+        self._latest_workflow_final_context: dict[str, Any] = {}
         self._local_llm_checked = False
         self._local_llm_ready = False
         self._local_llm_last_reason = "not_checked"
@@ -408,6 +410,88 @@ class AgentWorkflow:
                 self._progress_hook(phase_key, phase_msg, phase_pct)
         except Exception:
             pass
+
+    def _reset_news_runtime_context(self) -> None:
+        self._news_runtime_context = {
+            "selected_title": "",
+            "source_domain": "",
+            "stage": "",
+            "reason": "",
+            "repair_attempted": False,
+            "repair_succeeded": False,
+            "timing_summary": {
+                "news_pool_ms": 0,
+                "intent_ms": 0,
+                "outline_ms": 0,
+                "draft_ms": 0,
+                "repair_ms": 0,
+                "publish_ms": 0,
+            },
+        }
+
+    def _update_news_runtime_context(self, **kwargs: Any) -> None:
+        cur = dict(getattr(self, "_news_runtime_context", {}) or {})
+        timing_summary = dict(cur.get("timing_summary", {}) or {})
+        extra_timing = kwargs.pop("timing_summary", None)
+        if isinstance(extra_timing, dict):
+            for key, value in extra_timing.items():
+                try:
+                    timing_summary[str(key)] = int(max(0, int(value)))
+                except Exception:
+                    continue
+        if timing_summary:
+            cur["timing_summary"] = timing_summary
+        for key, value in kwargs.items():
+            if value is None:
+                continue
+            cur[str(key)] = value
+        self._news_runtime_context = cur
+
+    def _record_news_timing(self, key: str, started_mono: float) -> int:
+        elapsed = int(max(0.0, time.perf_counter() - float(started_mono or 0.0)) * 1000)
+        self._update_news_runtime_context(timing_summary={str(key): int(elapsed)})
+        return int(elapsed)
+
+    def _build_workflow_final_summary(self, *, status: str, reason: str) -> str:
+        ctx = dict(getattr(self, "_news_runtime_context", {}) or {})
+        timing = dict(ctx.get("timing_summary", {}) or {})
+        return (
+            f"result={str(status or '').strip().lower() or 'failed'};"
+            f"reason={str(reason or ctx.get('reason', '') or 'unknown').strip() or 'unknown'};"
+            f"selected_title={str(ctx.get('selected_title', '') or '').strip()[:180] or 'n/a'};"
+            f"source_domain={str(ctx.get('source_domain', '') or '').strip() or 'n/a'};"
+            f"stage={str(ctx.get('stage', '') or '').strip() or 'unknown'};"
+            f"repair_attempted={str(bool(ctx.get('repair_attempted', False))).lower()};"
+            f"repair_succeeded={str(bool(ctx.get('repair_succeeded', False))).lower()};"
+            f"news_pool_ms={int(timing.get('news_pool_ms', 0) or 0)};"
+            f"intent_ms={int(timing.get('intent_ms', 0) or 0)};"
+            f"outline_ms={int(timing.get('outline_ms', 0) or 0)};"
+            f"draft_ms={int(timing.get('draft_ms', 0) or 0)};"
+            f"repair_ms={int(timing.get('repair_ms', 0) or 0)};"
+            f"publish_ms={int(timing.get('publish_ms', 0) or 0)}"
+        )
+
+    def _finalize_news_mode_result(self, result: WorkflowResult) -> WorkflowResult:
+        status = str(getattr(result, "status", "") or "failed").strip().lower() or "failed"
+        reason = str(getattr(result, "message", "") or "").strip() or "unknown"
+        summary = self._build_workflow_final_summary(status=status, reason=reason)
+        self._update_news_runtime_context(result=status, reason=reason)
+        self._latest_workflow_final_context = {
+            **dict(getattr(self, "_news_runtime_context", {}) or {}),
+            "result": status,
+            "summary": summary,
+        }
+        percent = 100 if status == "success" else 88
+        self._progress("workflow_final", summary, percent)
+        self._append_workflow_perf(
+            "workflow_final",
+            {
+                "result": status,
+                "reason": reason,
+                **dict(getattr(self, "_news_runtime_context", {}) or {}),
+            },
+        )
+        return WorkflowResult(status, summary)
 
     def _news_pack_tags_for_candidate(self, candidate: TopicCandidate, category: str) -> list[str]:
         tags: list[str] = []
@@ -1835,6 +1919,141 @@ class AgentWorkflow:
         source = str(getattr(self.search_intent_generator, "last_source", "rules") or "rules").strip().lower()
         return bundle, source
 
+    def _intent_family_from_bundle(self, intent_bundle: IntentBundle) -> str:
+        primary = re.sub(r"\s+", " ", str(intent_bundle.primary_query or "")).strip().lower()
+        if re.search(r"\bhow to\b", primary):
+            return "how_to"
+        if re.search(r"\b(compare|comparison|versus|vs|pricing|performance)\b", primary):
+            return "comparison"
+        if re.search(r"\bshould you\b", primary):
+            return "should_you"
+        if re.search(r"\balternative|alternatives\b", primary):
+            return "alternatives"
+        return "what_changed"
+
+    def _build_news_grounding_packet(
+        self,
+        *,
+        candidate: TopicCandidate,
+        category: str,
+        intent_bundle: IntentBundle,
+        intent_source: str,
+    ) -> dict[str, Any]:
+        source_title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
+        source_snippet = re.sub(r"\s+", " ", str(getattr(candidate, "body", "") or "")).strip()
+        source_url = str(getattr(candidate, "url", "") or "").strip()
+        source_domain = (urlparse(source_url).netloc or "").lower()
+        if source_domain.startswith("www."):
+            source_domain = source_domain[4:]
+        category_norm = str(category or "").strip().lower()
+        named_entities = sorted(self._news_named_terms(f"{source_title} {source_snippet}"))
+        topic_nouns = sorted(self._news_key_terms(f"{source_title} {source_snippet} {category_norm}", limit=14))
+        fact_candidates: list[str] = []
+        for raw in re.split(r"[;:()\-]|(?:\.\s+)", f"{source_title}. {source_snippet}"):
+            clean = re.sub(r"\s+", " ", str(raw or "")).strip(" .,:;-")
+            if len(clean.split()) < 4:
+                continue
+            if clean.lower() in {x.lower() for x in fact_candidates}:
+                continue
+            fact_candidates.append(clean[:180])
+            if len(fact_candidates) >= 5:
+                break
+        if len(fact_candidates) < 3:
+            for entity in named_entities[:3]:
+                fact_candidates.append(f"Named entity mentioned: {entity}")
+                if len(fact_candidates) >= 4:
+                    break
+        tech_assessment = self._assess_tech_news_candidate(
+            title=source_title,
+            snippet=source_snippet,
+            category=category_norm,
+            source_url=source_url,
+            topic=str((getattr(candidate, "meta", {}) or {}).get("news_topic", "") or ""),
+        )
+        forbidden_generic_drift_terms = []
+        generic_candidates = ["workflow", "platform", "latency", "pricing", "vendor", "rollout", "automation", "productivity"]
+        source_blob = f"{source_title} {source_snippet}".lower()
+        for token in generic_candidates:
+            if token not in source_blob:
+                forbidden_generic_drift_terms.append(token)
+        return {
+            "canonical_source_title": source_title,
+            "source_snippet": source_snippet[:600],
+            "source_domain": source_domain,
+            "required_named_entities": named_entities[:6],
+            "required_topic_nouns": topic_nouns[:8],
+            "required_source_facts": fact_candidates[:5],
+            "forbidden_generic_drift_terms": forbidden_generic_drift_terms[:8],
+            "intent_family": self._intent_family_from_bundle(intent_bundle),
+            "intent_source": str(intent_source or "rules").strip().lower() or "rules",
+            "category": category_norm or "platform",
+            "mixed_domain": bool(getattr(tech_assessment, "mixed_domain", False)),
+            "topic_reason": str(getattr(tech_assessment, "reason", "") or ""),
+        }
+
+    def _evaluate_pre_draft_groundability(
+        self,
+        *,
+        candidate: TopicCandidate,
+        category: str,
+        intent_bundle: IntentBundle,
+        intent_source: str,
+        grounding_packet: dict[str, Any],
+    ) -> tuple[bool, str, dict[str, Any]]:
+        source_title = str(grounding_packet.get("canonical_source_title", "") or getattr(candidate, "title", "") or "").strip()
+        source_snippet = str(grounding_packet.get("source_snippet", "") or getattr(candidate, "body", "") or "").strip()
+        source_domain = str(grounding_packet.get("source_domain", "") or "").strip().lower()
+        intent_family = str(grounding_packet.get("intent_family", "") or self._intent_family_from_bundle(intent_bundle)).strip().lower()
+        assessment = self._assess_tech_news_candidate(
+            title=source_title,
+            snippet=source_snippet,
+            category=category,
+            source_url=str(getattr(candidate, "url", "") or ""),
+            topic=str((getattr(candidate, "meta", {}) or {}).get("news_topic", "") or ""),
+        )
+        source_terms = self._news_key_terms(f"{source_title} {source_snippet}", limit=16)
+        intent_terms = self._news_key_terms(
+            " ".join(
+                [
+                    str(intent_bundle.primary_query or ""),
+                    *list(intent_bundle.supporting_queries or [])[:3],
+                    *list(intent_bundle.outline_brief or [])[:3],
+                ]
+            ),
+            limit=16,
+        )
+        source_entities = self._news_named_terms(f"{source_title} {source_snippet}")
+        intent_entities = self._news_named_terms(
+            " ".join([str(intent_bundle.primary_query or ""), *list(intent_bundle.questions or [])[:2]])
+        )
+        entity_overlap = len(source_entities & intent_entities)
+        term_overlap = len(source_terms & intent_terms)
+        fact_density = len(list(grounding_packet.get("required_source_facts", []) or [])) + len(list(grounding_packet.get("required_named_entities", []) or []))
+        detail = {
+            "source_domain": source_domain,
+            "intent_family": intent_family,
+            "intent_source": str(intent_source or "rules"),
+            "source_terms": sorted(source_terms)[:8],
+            "intent_terms": sorted(intent_terms)[:8],
+            "entity_overlap": int(entity_overlap),
+            "term_overlap": int(term_overlap),
+            "fact_density": int(fact_density),
+            "mixed_domain": bool(getattr(assessment, "mixed_domain", False)),
+            "tech_reason": str(getattr(assessment, "reason", "") or ""),
+        }
+        if is_news_mode(self.settings) and not assessment.allow:
+            reason = str(getattr(assessment, "reason", "") or "pre_draft_low_grounding")
+            return False, reason, detail
+        if int(fact_density) < 3:
+            return False, "pre_draft_source_fact_density_too_low", detail
+        if source_entities and entity_overlap <= 0 and len(source_entities) >= 2:
+            return False, "pre_draft_entity_overlap_too_low", detail
+        if term_overlap <= 0 and str(intent_source or "").strip().lower() != "ollama":
+            return False, "pre_draft_intent_source_mismatch", detail
+        if term_overlap <= 1 and int(fact_density) < 4:
+            return False, "pre_draft_low_grounding", detail
+        return True, "", detail
+
     def _pick_outline_plan(
         self,
         *,
@@ -1842,12 +2061,14 @@ class AgentWorkflow:
         intent_bundle: IntentBundle,
         category: str,
         cluster_id: str = "",
+        grounding_packet: dict[str, Any] | None = None,
     ) -> OutlinePlan:
         return self.structure_randomizer.pick_outline(
             candidate=candidate,
             intent_bundle=intent_bundle,
             category=category,
             cluster_id=cluster_id,
+            grounding_packet=grounding_packet,
         )
 
     def _append_publish_metadata_log(self, payload: dict[str, Any]) -> None:
@@ -3699,34 +3920,27 @@ class AgentWorkflow:
         retry_event_id: str = "",
         draft_post_id: str = "",
     ) -> WorkflowResult:
-        if int(news_retry_depth or 0) > 0:
-            return self._run_once_news_mode_impl(
-                manual_trigger=manual_trigger,
-                run_start_minute=run_start_minute,
-                queue_advisory=queue_advisory,
-                sync_note=sync_note,
-                preflight_index_note=preflight_index_note,
-                blog_snapshot=blog_snapshot,
-                today_gemini_before=today_gemini_before,
-                news_retry_depth=news_retry_depth,
-                retry_event_id=retry_event_id,
-                draft_post_id=draft_post_id,
+        self._reset_news_runtime_context()
+
+        def _runner() -> WorkflowResult:
+            return self._finalize_news_mode_result(
+                self._run_once_news_mode_impl(
+                    manual_trigger=manual_trigger,
+                    run_start_minute=run_start_minute,
+                    queue_advisory=queue_advisory,
+                    sync_note=sync_note,
+                    preflight_index_note=preflight_index_note,
+                    blog_snapshot=blog_snapshot,
+                    today_gemini_before=today_gemini_before,
+                    news_retry_depth=news_retry_depth,
+                    retry_event_id=retry_event_id,
+                    draft_post_id=draft_post_id,
+                )
             )
-        return self._run_with_metrics_guard(
-            "news_mode",
-            lambda: self._run_once_news_mode_impl(
-                manual_trigger=manual_trigger,
-                run_start_minute=run_start_minute,
-                queue_advisory=queue_advisory,
-                sync_note=sync_note,
-                preflight_index_note=preflight_index_note,
-                blog_snapshot=blog_snapshot,
-                today_gemini_before=today_gemini_before,
-                news_retry_depth=news_retry_depth,
-                retry_event_id=retry_event_id,
-                draft_post_id=draft_post_id,
-            ),
-        )
+
+        if int(news_retry_depth or 0) > 0:
+            return _runner()
+        return self._run_with_metrics_guard("news_mode", _runner)
 
     def _run_once_news_mode_impl(
         self,
@@ -3743,6 +3957,7 @@ class AgentWorkflow:
         draft_post_id: str = "",
     ) -> WorkflowResult:
         self._progress("news_pool", "Reviewing news candidates and selecting the best fit.", 18)
+        news_pool_started = time.perf_counter()
         working_draft_id = str(draft_post_id or "").strip()
         claimed_item: dict[str, Any] | None = None
         claimed_id = 0
@@ -3853,6 +4068,15 @@ class AgentWorkflow:
             active_policy = dict(selected_meta.get("content_policy", {}) or {})
             self._active_content_policy = active_policy
             category = str((selected.meta or {}).get("news_category", "platform") or "platform").strip().lower() or "platform"
+            source_domain = (urlparse(str(getattr(selected, "url", "") or "")).netloc or "").lower()
+            if source_domain.startswith("www."):
+                source_domain = source_domain[4:]
+            self._update_news_runtime_context(
+                selected_title=str(getattr(selected, "title", "") or "").strip(),
+                source_domain=source_domain,
+                stage="news_pool",
+            )
+            self._record_news_timing("news_pool_ms", news_pool_started)
             global_keywords = list(getattr(selected, "long_tail_keywords", []) or [])[:8]
             reason = (
                 f"content_type={selected_meta.get('content_type', selected_content_type or 'hot')};"
@@ -3879,49 +4103,116 @@ class AgentWorkflow:
             )
             degraded_note = self._append_note(degraded_note, collect_note)
 
-            self._progress("intent", "검색 의도와 핵심 쿼리를 정리합니다.", 26)
+            intent_started = time.perf_counter()
+            self._update_news_runtime_context(stage="intent")
+            self._progress("intent", "?? ??? ?? ??? ?????.", 26)
             intent_bundle, intent_source = self._build_search_intent_bundle(
                 candidate=selected,
                 category=category,
             )
+            self._record_news_timing("intent_ms", intent_started)
             selected_meta["intent_bundle"] = asdict(intent_bundle)
+            selected_meta["intent_family"] = self._intent_family_from_bundle(intent_bundle)
             if intent_source != "ollama":
                 degraded_note = self._append_note(degraded_note, "search_intent_fallback_used")
-            self._progress("outline", "아웃라인과 기사 구조를 고릅니다.", 30)
+            grounding_packet = self._build_news_grounding_packet(
+                candidate=selected,
+                category=category,
+                intent_bundle=intent_bundle,
+                intent_source=intent_source,
+            )
+            selected_meta["grounding_packet"] = dict(grounding_packet)
+            selected.meta = selected_meta
+            pre_draft_ok, pre_draft_reason, pre_draft_detail = self._evaluate_pre_draft_groundability(
+                candidate=selected,
+                category=category,
+                intent_bundle=intent_bundle,
+                intent_source=intent_source,
+                grounding_packet=grounding_packet,
+            )
+            if not pre_draft_ok:
+                skip_reason = str(pre_draft_reason or "pre_draft_low_grounding")
+                self._update_news_runtime_context(
+                    stage="pre_draft_validate",
+                    reason=skip_reason,
+                    repair_attempted=False,
+                    repair_succeeded=False,
+                )
+                degraded_note = self._append_note(
+                    degraded_note,
+                    f"{skip_reason}:{json.dumps(pre_draft_detail, ensure_ascii=False)[:220]}",
+                )
+                if claimed_id:
+                    try:
+                        self.news_pool_store.mark_skipped(claimed_id, skip_reason)
+                        claim_finalized = True
+                    except Exception:
+                        try:
+                            self.news_pool_store.rollback_claim(claimed_id)
+                            claim_finalized = True
+                        except Exception:
+                            pass
+                self.logs.append_run(
+                    RunRecord(
+                        status="skipped",
+                        score=0,
+                        title=str(selected.title or ""),
+                        source_url=str(getattr(selected, "url", "") or ""),
+                        published_url="",
+                        note=self._append_note(skip_reason, degraded_note),
+                    )
+                )
+                self._workflow_perf_finish_run("skipped", skip_reason)
+                return WorkflowResult("skipped", skip_reason)
+            outline_started = time.perf_counter()
+            self._update_news_runtime_context(stage="outline")
+            self._progress("outline", "????? ?? ??? ????.", 30)
             try:
                 outline_plan = self._pick_outline_plan(
                     candidate=selected,
                     intent_bundle=intent_bundle,
                     category=category,
                     cluster_id=cluster_id,
+                    grounding_packet=grounding_packet,
                 )
             except RuntimeError as exc:
-                hold_reason = str(exc or "template_similarity_too_high")
-                if "template_similarity_too_high" not in hold_reason:
-                    hold_reason = "template_similarity_too_high"
+                outline_reason = str(exc or "template_similarity_too_high")
+                status = "skipped" if outline_reason == "outline_grounding_too_weak" else "hold"
+                self._update_news_runtime_context(
+                    stage="outline",
+                    reason=outline_reason,
+                    repair_attempted=False,
+                    repair_succeeded=False,
+                )
                 if claimed_id:
                     try:
-                        self.news_pool_store.rollback_claim(claimed_id)
+                        if status == "skipped":
+                            self.news_pool_store.mark_skipped(claimed_id, outline_reason)
+                        else:
+                            self.news_pool_store.rollback_claim(claimed_id)
                         claim_finalized = True
                     except Exception:
                         pass
                 self.logs.append_run(
                     RunRecord(
-                        status="hold",
+                        status=status,
                         score=0,
                         title=str(selected.title or ""),
                         source_url=str(getattr(selected, "url", "") or ""),
                         published_url="",
-                        note=self._append_note(hold_reason, degraded_note),
+                        note=self._append_note(outline_reason, degraded_note),
                     )
                 )
-                self._workflow_perf_finish_run("hold", hold_reason)
-                return WorkflowResult("hold", hold_reason)
+                self._workflow_perf_finish_run(status, outline_reason)
+                return WorkflowResult(status, outline_reason)
+            self._record_news_timing("outline_ms", outline_started)
             selected_meta["outline_plan"] = asdict(outline_plan)
             selected_meta["outline_fingerprint"] = str(outline_plan.fingerprint or "")
             selected.meta = selected_meta
 
-            self._progress("draft", "초안 생성 중입니다.", 36)
+            draft_started = time.perf_counter()
+            self._update_news_runtime_context(stage="draft")
+            self._progress("draft", "?? ?? ????.", 36)
             api_ready = bool(
                 (self.settings.gemini.api_key or "").strip()
                 and (self.settings.gemini.api_key or "").strip() != "GEMINI_API_KEY"
@@ -4087,6 +4378,7 @@ class AgentWorkflow:
                     facet_context=local_facet_context,
                 )
                 degraded_note = self._append_note(degraded_note, "news_local_fallback_draft")
+            self._record_news_timing("draft_ms", draft_started)
 
             intent_keywords = [
                 re.sub(r"\s+", " ", str(x or "")).strip()
@@ -4137,6 +4429,8 @@ class AgentWorkflow:
                     "news_link_sanitize",
                     {"removed": int(removed_news_links), "domain": current_domain},
                 )
+            self._update_news_runtime_context(stage="post_draft_validate")
+            self._progress("post_draft_validate", "??? ?? ???? ?????.", 48)
             coherence_ok, coherence_reason, coherence_detail = self._evaluate_news_topic_coherence(
                 candidate=selected,
                 html=final_html,
@@ -4144,35 +4438,76 @@ class AgentWorkflow:
                 category=category,
             )
             if not coherence_ok:
-                hold_reason = str(coherence_reason or "topic_mismatch_low_overlap")
+                self._progress("post_draft_repair", "?? ??? ???? ??? ? ?? ?????.", 52)
+                repair_started = time.perf_counter()
+                repaired_html, repair_detail = self._attempt_news_grounding_repair_once(
+                    html=final_html,
+                    draft_title=draft.title,
+                    candidate=selected,
+                    category=category,
+                    grounding_packet=grounding_packet,
+                )
+                self._record_news_timing("repair_ms", repair_started)
+                repaired_ok, repaired_reason, repaired_detail = self._evaluate_news_topic_coherence(
+                    candidate=selected,
+                    html=repaired_html,
+                    title=draft.title,
+                    category=category,
+                )
+                self._update_news_runtime_context(
+                    stage="post_draft_validate",
+                    repair_attempted=True,
+                    repair_succeeded=bool(repaired_ok),
+                )
                 degraded_note = self._append_note(
                     degraded_note,
-                    f"{hold_reason}:{json.dumps(coherence_detail, ensure_ascii=False)[:220]}",
+                    f"post_draft_repair={json.dumps(repair_detail, ensure_ascii=False)[:180]}",
                 )
-                if claimed_id:
-                    try:
-                        self.news_pool_store.mark_skipped(claimed_id, hold_reason)
-                        claim_finalized = True
-                    except Exception:
+                if repaired_ok:
+                    final_html = repaired_html
+                    degraded_note = self._append_note(degraded_note, "post_draft_repair_applied")
+                else:
+                    hold_reason = str(repaired_reason or coherence_reason or "topic_mismatch_low_overlap")
+                    merged_detail = {
+                        "first_pass": coherence_detail,
+                        "repair_pass": repaired_detail,
+                        "repair_detail": repair_detail,
+                    }
+                    self._update_news_runtime_context(
+                        stage="post_draft_validate",
+                        reason=hold_reason,
+                        repair_attempted=True,
+                        repair_succeeded=False,
+                    )
+                    degraded_note = self._append_note(
+                        degraded_note,
+                        f"{hold_reason}:{json.dumps(merged_detail, ensure_ascii=False)[:220]}",
+                    )
+                    self._progress("post_draft_skip", f"repaired_then_skipped: {hold_reason}", 56)
+                    if claimed_id:
                         try:
-                            self.news_pool_store.rollback_claim(claimed_id)
+                            self.news_pool_store.mark_skipped(claimed_id, hold_reason)
                             claim_finalized = True
                         except Exception:
-                            pass
-                self.logs.append_run(
-                    RunRecord(
-                        status="skipped",
-                        score=0,
-                        title=str(draft.title or ""),
-                        source_url=str(getattr(selected, "url", "") or ""),
-                        published_url="",
-                        note=self._append_note(hold_reason, degraded_note),
+                            try:
+                                self.news_pool_store.rollback_claim(claimed_id)
+                                claim_finalized = True
+                            except Exception:
+                                pass
+                    self.logs.append_run(
+                        RunRecord(
+                            status="skipped",
+                            score=0,
+                            title=str(draft.title or ""),
+                            source_url=str(getattr(selected, "url", "") or ""),
+                            published_url="",
+                            note=self._append_note(hold_reason, degraded_note),
+                        )
                     )
-                )
-                self._workflow_perf_finish_run("skipped", hold_reason)
-                return WorkflowResult("skipped", hold_reason)
+                    self._workflow_perf_finish_run("skipped", hold_reason)
+                    return WorkflowResult("skipped", hold_reason)
 
-
+            self._update_news_runtime_context(stage="qa")
             self._progress("qa", "Reviewing factual accuracy and structure.", 56)
             qa_result = self._qa_evaluate(
                 final_html,
@@ -4469,7 +4804,8 @@ class AgentWorkflow:
                 self._workflow_perf_finish_run("hold", hold_reason)
                 return WorkflowResult("hold", hold_reason)
 
-            self._progress("visual", "이미지를 준비하고 배치합니다.", 72)
+            self._update_news_runtime_context(stage="visual")
+            self._progress("visual", "???? ???? ?????.", 72)
             try:
                 visual_diag_pre = diagnose_visual_settings(self.settings, self.root)
                 self._append_workflow_perf(
@@ -4573,6 +4909,8 @@ class AgentWorkflow:
                 preflight_thumb_src=preflight_thumb_src,
                 required_images=min_images_required,
             )
+            self._update_news_runtime_context(stage="publish")
+            publish_started = time.perf_counter()
             if dry_run:
                 gate_preview_html = self._profile_call(
                     "news_gate_preview_html",
@@ -4619,6 +4957,7 @@ class AgentWorkflow:
             )
             if not coherence_ok:
                 hold_reason = str(coherence_reason or "topic_mismatch_low_overlap")
+                self._update_news_runtime_context(stage="post_images_validate", reason=hold_reason)
                 self.logs.append_run(
                     RunRecord(
                         status="hold",
@@ -5077,6 +5416,7 @@ class AgentWorkflow:
             degraded_note = self._append_note(degraded_note, image_note)
 
             if dry_run:
+                self._record_news_timing("publish_ms", publish_started)
                 if claimed_id:
                     self.news_pool_store.rollback_claim(claimed_id)
                     claim_finalized = True
@@ -5276,6 +5616,7 @@ class AgentWorkflow:
             self._cleanup_local_image_files(images)
             self._mark_active_slot("consumed", "publish_success", post_id=str(getattr(published, "post_id", "") or ""))
             self.watchdog.register_success(event_id)
+            self._record_news_timing("publish_ms", publish_started)
             msg = f"{published.url} (scheduled: {publish_at.isoformat()})"
             self._workflow_perf_finish_run("success", msg)
             return WorkflowResult("success", msg)
@@ -5297,6 +5638,10 @@ class AgentWorkflow:
             global_blocked, global_reason = self._watchdog_hold_gate(hold_reason)
             if global_blocked:
                 hold_reason = global_reason
+            self._update_news_runtime_context(
+                stage=str((getattr(self, "_news_runtime_context", {}) or {}).get("stage", "") or "exception"),
+                reason=hold_reason,
+            )
             self.logs.append_run(
                 RunRecord(
                     status="hold",
@@ -7668,6 +8013,104 @@ class AgentWorkflow:
         if len(source_terms) < 4 and not entity_terms:
             return False, "insufficient_grounding_terms"
         return True, ""
+
+    def _rule_based_news_grounding_repair(
+        self,
+        *,
+        html: str,
+        source_title: str,
+        source_snippet: str,
+        grounding_packet: dict[str, Any],
+    ) -> str:
+        src = str(html or "")
+        packet = dict(grounding_packet or {})
+        required_facts = [
+            re.sub(r"\s+", " ", str(x or "")).strip()
+            for x in (packet.get("required_source_facts", []) or [])
+            if str(x or "").strip()
+        ][:4]
+        forbidden_terms = [
+            str(x or "").strip().lower()
+            for x in (packet.get("forbidden_generic_drift_terms", []) or [])
+            if str(x or "").strip()
+        ]
+        required_terms = {
+            x.lower()
+            for x in [
+                *list(packet.get("required_named_entities", []) or []),
+                *list(packet.get("required_topic_nouns", []) or []),
+            ]
+            if str(x or "").strip()
+        }
+
+        def _keep_paragraph(match: re.Match[str]) -> str:
+            para = str(match.group(0) or "")
+            lower = re.sub(r"<[^>]+>", " ", para).lower()
+            drift_hits = sum(1 for token in forbidden_terms if token and token in lower)
+            grounding_hits = sum(1 for token in required_terms if token and token in lower)
+            if drift_hits >= 2 and grounding_hits <= 0:
+                return ""
+            return para
+
+        src = re.sub(r"<p\b[^>]*>.*?</p>", _keep_paragraph, src, flags=re.IGNORECASE | re.DOTALL)
+        facts_html = "".join(f"<li>{escape(item)}</li>" for item in required_facts[:4])
+        grounded_intro = (
+            f"<p>{escape(source_title)}</p>"
+            f"<p>{escape(source_snippet[:320])}</p>"
+            + (f"<ul>{facts_html}</ul>" if facts_html else "")
+        )
+        first_h2 = re.search(r"(<h2\b[^>]*>.*?</h2>)", src, flags=re.IGNORECASE | re.DOTALL)
+        if first_h2:
+            anchor = str(first_h2.group(1) or "")
+            src = src.replace(anchor, anchor + grounded_intro, 1)
+        else:
+            src = grounded_intro + src
+        src = re.sub(r"\n{3,}", "\n\n", src)
+        return src
+
+    def _attempt_news_grounding_repair_once(
+        self,
+        *,
+        html: str,
+        draft_title: str,
+        candidate: TopicCandidate,
+        category: str,
+        grounding_packet: dict[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        source_title = re.sub(r"\s+", " ", str(getattr(candidate, "title", "") or "")).strip()
+        source_snippet = re.sub(r"\s+", " ", str(getattr(candidate, "body", "") or "")).strip()
+        source_url = str(getattr(candidate, "url", "") or "").strip()
+        mode = "rule_based"
+        repaired = str(html or "")
+        api_ready = bool(
+            (self.settings.gemini.api_key or "").strip()
+            and (self.settings.gemini.api_key or "").strip() != "GEMINI_API_KEY"
+        )
+        if api_ready:
+            try:
+                repaired = self.brain.repair_news_grounding(
+                    title=draft_title,
+                    html=repaired,
+                    source_title=source_title,
+                    source_snippet=source_snippet,
+                    source_url=source_url,
+                    section_titles=list(re.findall(r"<h2[^>]*>(.*?)</h2>", repaired, flags=re.IGNORECASE | re.DOTALL))[:6],
+                    grounding_packet=grounding_packet,
+                )
+                mode = "brain"
+            except Exception as exc:
+                mode = f"brain_failed:{str(exc)[:80]}"
+        if mode != "brain":
+            repaired = self._rule_based_news_grounding_repair(
+                html=repaired,
+                source_title=source_title,
+                source_snippet=source_snippet,
+                grounding_packet=grounding_packet,
+            )
+        repaired = self._sanitize_publish_html(repaired, domain=self._news_domain)
+        repaired = self._canonicalize_html_payload(repaired)
+        repaired, removed = self._strip_forbidden_news_links(repaired)
+        return repaired, {"mode": mode, "removed_forbidden_links": int(removed)}
 
     def _current_rotated_device_type(self) -> str:
         default_order = ["windows", "mac", "iphone", "galaxy"]
