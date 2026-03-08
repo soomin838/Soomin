@@ -589,6 +589,46 @@ class ContentLengthsSettings:
     evergreen_max: int = 2200
 
 
+@dataclass
+class RuntimeSettings:
+    default_version: str = "v1"
+    v2_enabled: bool = True
+
+
+@dataclass
+class V2ContentMixSettings:
+    hot: int = 2
+    search_derived: int = 2
+    evergreen: int = 1
+
+
+@dataclass
+class V2ContentLengthsSettings:
+    hot_min: int = 700
+    hot_max: int = 1000
+    search_derived_min: int = 1100
+    search_derived_max: int = 1500
+    evergreen_min: int = 1600
+    evergreen_max: int = 2200
+
+
+@dataclass
+class V2ImagePolicySettings:
+    provider: str = "pollinations"
+    model: str = "flux"
+    allow_inline_optional: bool = True
+    allow_reuse: bool = False
+    allow_library_fallback: bool = False
+    allow_news_pack_fallback: bool = False
+
+
+@dataclass
+class V2Settings:
+    content_mix: V2ContentMixSettings = field(default_factory=V2ContentMixSettings)
+    content_lengths: V2ContentLengthsSettings = field(default_factory=V2ContentLengthsSettings)
+    image_policy: V2ImagePolicySettings = field(default_factory=V2ImagePolicySettings)
+
+
 def is_news_mode(settings: "AppSettings | None") -> bool:
     try:
         mode = str(getattr(getattr(settings, "content_mode", None), "mode", "") or "").strip().lower()
@@ -690,6 +730,7 @@ class SyncSettings:
 @dataclass
 class AppSettings:
     timezone: str = "America/New_York"
+    runtime: RuntimeSettings = field(default_factory=RuntimeSettings)
     workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
     watchdog: WatchdogSettings = field(default_factory=WatchdogSettings)
     schedule: ScheduleSettings = field(default_factory=ScheduleSettings)
@@ -722,6 +763,7 @@ class AppSettings:
     indexing: IndexingSettings = field(default_factory=IndexingSettings)
     content: ContentPolicySettings = field(default_factory=ContentPolicySettings)
     content_lengths: ContentLengthsSettings = field(default_factory=ContentLengthsSettings)
+    v2: V2Settings = field(default_factory=V2Settings)
     content_mode: ContentModeSettings = field(default_factory=ContentModeSettings)
     topics: TopicsPolicySettings = field(default_factory=TopicsPolicySettings)
     llm: LLMPolicySettings = field(default_factory=LLMPolicySettings)
@@ -749,6 +791,7 @@ def _construct_dc(dc_type, data: dict[str, Any] | None):
 def load_settings(path: Path) -> AppSettings:
     raw = _load_yaml(path)
     settings_warnings: list[str] = []
+    runtime_raw = dict(raw.get("runtime", {}) or {})
     quality_raw = dict(raw.get("quality", {}) or {})
     actionability_raw = dict(raw.get("actionability_gate", {}) or {})
     generation_raw = dict(raw.get("generation", {}) or {})
@@ -762,6 +805,10 @@ def load_settings(path: Path) -> AppSettings:
     content_allocation_raw = dict(raw.get("content_allocation", {}) or {})
     content_raw = dict(raw.get("content", {}) or {})
     content_lengths_raw = dict(raw.get("content_lengths", {}) or {})
+    v2_raw = dict(raw.get("v2", {}) or {})
+    v2_content_mix_raw = dict(v2_raw.get("content_mix", {}) or {})
+    v2_content_lengths_raw = dict(v2_raw.get("content_lengths", {}) or {})
+    v2_image_policy_raw = dict(v2_raw.get("image_policy", {}) or {})
     content_mode_raw = dict(raw.get("content_mode", {}) or {})
     topics_raw = dict(raw.get("topics", {}) or {})
     monthly_scheduler_raw = dict(raw.get("monthly_scheduler", {}) or {})
@@ -1016,6 +1063,7 @@ def load_settings(path: Path) -> AppSettings:
 
     return AppSettings(
         timezone=raw.get("timezone", "America/New_York"),
+        runtime=_construct_dc(RuntimeSettings, runtime_raw),
         workflow=_construct_dc(WorkflowSettings, workflow_raw),
         watchdog=_construct_dc(WatchdogSettings, watchdog_raw),
         schedule=_construct_dc(ScheduleSettings, raw.get("schedule", {})),
@@ -1048,6 +1096,11 @@ def load_settings(path: Path) -> AppSettings:
         indexing=_construct_dc(IndexingSettings, raw.get("indexing", {})),
         content=_construct_dc(ContentPolicySettings, content_raw),
         content_lengths=_construct_dc(ContentLengthsSettings, content_lengths_raw),
+        v2=V2Settings(
+            content_mix=_construct_dc(V2ContentMixSettings, v2_content_mix_raw),
+            content_lengths=_construct_dc(V2ContentLengthsSettings, v2_content_lengths_raw),
+            image_policy=_construct_dc(V2ImagePolicySettings, v2_image_policy_raw),
+        ),
         content_mode=_construct_dc(ContentModeSettings, content_mode_raw),
         topics=_construct_dc(TopicsPolicySettings, topics_raw),
         llm=_construct_dc(LLMPolicySettings, llm_raw),

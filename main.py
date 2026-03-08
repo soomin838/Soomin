@@ -212,7 +212,7 @@ class AgentController:
         self.force_run = False
         self.next_run_at = datetime.now(self.tz)
         self.last_status = "Idle"
-        self.last_message = "Ready"
+        self.last_message = "준비 완료"
         self.last_error = ""
         self.thread: threading.Thread | None = None
         self._started = False
@@ -723,7 +723,7 @@ class AgentController:
                     is_manual_trigger = bool(self.force_run)
                     self.force_run = False
                     self.last_status = "Running"
-                    self.last_message = "Agent workflow executing..."
+                    self.last_message = "워크플로우 실행 중"
                     self.phase_key = "run_init"
                     self.phase_message = "워크플로우 시작"
                     self.phase_percent = 1
@@ -802,7 +802,7 @@ class AgentController:
             except Exception as exc:
                 self.last_status = "Error"
                 self.last_error = str(exc)
-                self.last_message = f"Error: {exc}"
+                self.last_message = f"오류: {exc}"
                 self.phase_key = "error"
                 self.phase_message = "오류 대응/재시도 대기"
                 self._trace_phase_transition("error", self.phase_message, max(1, int(self.phase_percent or 1)))
@@ -811,7 +811,7 @@ class AgentController:
                 if quota_wait is not None:
                     sleep_for = quota_wait
                     self.last_status = "QuotaWait"
-                    self.last_message = f"Quota exceeded. Auto-retry in {sleep_for} minutes."
+                    self.last_message = f"쿼터 초과로 {sleep_for}분 뒤 자동 재시도합니다."
                     self.phase_key = "quota_wait"
                     self.phase_message = "쿼터 회복 대기"
                 else:
@@ -1470,9 +1470,44 @@ def _validate_blogger_token_file(path_value: str) -> tuple[bool, str]:
     return True, ""
 
 
-def run_cli(force_once: bool) -> None:
+def _resolve_runtime_version(explicit_runtime: str | None) -> str:
+    try:
+        settings = load_settings(SETTINGS_PATH)
+        default_runtime = str(getattr(getattr(settings, "runtime", None), "default_version", "v1") or "v1").strip().lower()
+        v2_enabled = bool(getattr(getattr(settings, "runtime", None), "v2_enabled", True))
+    except Exception:
+        default_runtime = "v1"
+        v2_enabled = True
+    chosen = str(explicit_runtime or default_runtime or "v1").strip().lower()
+    if chosen not in {"v1", "v2"}:
+        chosen = "v1"
+    if chosen == "v2" and not v2_enabled:
+        return "v1"
+    return chosen
+
+
+def run_cli(force_once: bool, runtime_version: str = "v1") -> None:
     # CLI mode usually wants a console, but we'll log version to QA too.
     version = resolve_running_version()
+    if runtime_version == "v2":
+        from rezero_v2.core.orchestrator.run_engine import RunEngine
+
+        engine = RunEngine(ROOT, SETTINGS_PATH)
+        settings = load_settings(SETTINGS_PATH)
+        interval_seconds = max(60, int(float(getattr(settings.schedule, "interval_hours", 2.4) or 2.4) * 3600))
+        if force_once:
+            result = engine.run_once()
+            print(json.dumps(result.summary.__dict__, ensure_ascii=False, indent=2))
+            return
+        print("RezeroAgent V2 CLI 모드가 시작되었습니다. 종료하려면 Ctrl+C를 누르세요.")
+        try:
+            while True:
+                result = engine.run_once()
+                print(json.dumps(result.summary.__dict__, ensure_ascii=False, indent=2))
+                time.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            return
+
     controller = AgentController()
     controller.qa.write("runtime", "cli_start", {"version": version})
     if force_once:
@@ -1496,7 +1531,7 @@ def run_weekly_refresh_cli() -> int:
     return 0
 
 
-def run_qt(force_once: bool, setup_only: bool) -> int:
+def run_qt(force_once: bool, setup_only: bool, runtime_version: str = "v1") -> int:
     # (Console hiding moved to global scope for immediate effect)
 
     version = resolve_running_version()
@@ -1523,6 +1558,30 @@ def run_qt(force_once: bool, setup_only: bool) -> int:
         print(f"PySide6 import failed: {exc}")
         print("Install with: pip install PySide6")
         return 1
+
+    if runtime_version == "v2":
+        from rezero_v2.app.controllers.publish_controller import V2PublishController
+        from rezero_v2.app.controllers.run_controller import V2RunController
+        from rezero_v2.app.controllers.settings_controller import V2SettingsController
+        from rezero_v2.app.ui.main_window import V2MainWindow
+
+        app = QApplication(sys.argv)
+        run_controller = V2RunController(ROOT, SETTINGS_PATH)
+        settings_controller = V2SettingsController(ROOT, SETTINGS_PATH)
+        publish_controller = V2PublishController(ROOT, SETTINGS_PATH)
+        window = V2MainWindow(
+            run_controller=run_controller,
+            settings_controller=settings_controller,
+            publish_controller=publish_controller,
+        )
+        if setup_only:
+            window.tabs.setCurrentIndex(4)
+        window.show()
+        if force_once and not setup_only:
+            run_controller.run_once_async()
+        if mutex_handle:
+            app.aboutToQuit.connect(lambda: ctypes.windll.kernel32.CloseHandle(mutex_handle))
+        return app.exec()
 
     from ui.dialogs.settings_dialog import SettingsDialog, SettingsDialogContext
     from ui.theme.theme_manager import ThemeManager
@@ -1625,18 +1684,19 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="시작 시 즉시 1회 실행")
     parser.add_argument("--cli", action="store_true", help="터미널 모드 실행")
     parser.add_argument("--weekly-refresh", action="store_true", help="주간 토픽 풀 리필 실행")
+    parser.add_argument("--runtime", choices=["v1", "v2"], help="실행할 런타임 버전 선택")
     args = parser.parse_args()
+    runtime_version = _resolve_runtime_version(args.runtime)
 
     if args.weekly_refresh:
         raise SystemExit(run_weekly_refresh_cli())
 
     if args.cli:
-        run_cli(force_once=args.once)
+        run_cli(force_once=args.once, runtime_version=runtime_version)
         return
 
-    raise SystemExit(run_qt(force_once=args.once, setup_only=args.setup))
+    raise SystemExit(run_qt(force_once=args.once, setup_only=args.setup, runtime_version=runtime_version))
 
 
 if __name__ == "__main__":
     main()
-

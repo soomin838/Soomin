@@ -1,4 +1,26 @@
 timezone: America/New_York
+runtime:
+  default_version: v1
+  v2_enabled: true
+v2:
+  content_mix:
+    hot: 2
+    search_derived: 2
+    evergreen: 1
+  content_lengths:
+    hot_min: 700
+    hot_max: 1000
+    search_derived_min: 1100
+    search_derived_max: 1500
+    evergreen_min: 1600
+    evergreen_max: 2200
+  image_policy:
+    provider: pollinations
+    model: flux
+    allow_inline_optional: true
+    allow_reuse: false
+    allow_library_fallback: false
+    allow_news_pack_fallback: false
 workflow:
   retry_enabled: true
   retry_max_attempts_per_event: 4
