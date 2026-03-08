@@ -106,14 +106,30 @@ class KeywordDiscovery:
         return opportunities
 
     def queued_supporting_candidates(self, limit: int = 5) -> list[DiscoveryOpportunity]:
+        return self.queued_candidates(limit=limit, action_types=("supporting_post",))
+
+    def queued_candidates(
+        self,
+        *,
+        limit: int = 5,
+        action_types: tuple[str, ...] = ("supporting_post",),
+    ) -> list[DiscoveryOpportunity]:
+        normalized_types = [
+            str(item or "").strip()
+            for item in (action_types or ())
+            if str(item or "").strip()
+        ]
+        if not normalized_types:
+            return []
+        placeholders = ",".join("?" for _ in normalized_types)
         query = (
             "SELECT action_type, query, page, clicks, impressions, ctr, position, priority_score "
             "FROM keyword_opportunities "
-            "WHERE status='queued' AND action_type='supporting_post' "
+            f"WHERE status='queued' AND action_type IN ({placeholders}) "
             "ORDER BY priority_score DESC, impressions DESC LIMIT ?"
         )
         with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(query, (max(1, int(limit)),)).fetchall()
+            rows = conn.execute(query, (*normalized_types, max(1, int(limit)))).fetchall()
         return [
             DiscoveryOpportunity(
                 action_type=str(row[0] or ""),

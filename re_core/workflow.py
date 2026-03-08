@@ -35,6 +35,7 @@ from re_core.services.news_collector import fetch_trending_topics
 from re_core.services.search_intent import IntentBundle, SearchIntentCandidateSpec, SearchIntentGenerator
 from re_core.services.keyword_discovery import DiscoveryOpportunity, KeywordDiscovery
 from re_core.services.topic_scoring import TopicScoring
+from re_core.services.topic_clusters import TopicClusterAssignment, TopicClusterBuilder
 from re_core.services.content_allocation import ContentAllocationEngine, ContentPolicy
 from re_core.news_pack_manifest import NewsPackManifest
 from re_core.news_pack_picker import NewsPackPicker
@@ -160,8 +161,13 @@ class AgentWorkflow:
             similarity_threshold=float(getattr(settings.structure_randomization, "similarity_threshold", 0.75) or 0.75),
             fingerprint_ttl_days=int(getattr(settings.structure_randomization, "fingerprint_ttl_days", 30) or 30),
             max_attempts=int(getattr(settings.structure_randomization, "max_attempts", 3) or 3),
+            ollama_client=self.ollama_client,
         )
         self.topic_scoring = TopicScoring(log_path=root / "storage" / "logs" / "topic_scoring.jsonl")
+        self.topic_clusters = TopicClusterBuilder(
+            state_path=root / "storage" / "state" / "topic_clusters.json",
+            log_path=root / "storage" / "logs" / "topic_clusters.jsonl",
+        )
         self.content_allocator = ContentAllocationEngine(
             enabled=bool(getattr(settings.content_allocation, "enabled", False)),
             mix_hot=int(getattr(settings.content_allocation, "mix_hot", 2) or 2),
@@ -1730,7 +1736,10 @@ class AgentWorkflow:
         )
 
     def _supporting_discovery_candidates(self, limit: int = 3) -> list[TopicCandidate]:
-        items = self.keyword_discovery.queued_supporting_candidates(limit=max(1, int(limit)))
+        items = self.keyword_discovery.queued_candidates(
+            limit=max(1, int(limit) * 3),
+            action_types=("supporting_post", "title_rewrite", "intent_fix"),
+        )
         candidates: list[TopicCandidate] = []
         for item in items:
             query = re.sub(r"\s+", " ", str(item.query or "")).strip()
@@ -1738,30 +1747,49 @@ class AgentWorkflow:
             if not query or not page:
                 continue
             cluster_id = self._infer_cluster_id_from_keyword(query)
+            intent_family = self._infer_intent_family(query, content_type="search_derived")
+            action_type = str(item.action_type or "").strip().lower()
+            if action_type == "title_rewrite":
+                body = (
+                    f"Search Console low-CTR opportunity for query '{query}' on {page}. "
+                    f"Impressions {int(item.impressions)}, clicks {int(item.clicks)}, CTR {item.ctr:.4f}, "
+                    f"average position {item.position:.1f}. Build a better-matched article angle that answers the query directly."
+                )
+            elif action_type == "intent_fix":
+                body = (
+                    f"Search Console intent-gap opportunity for query '{query}' on {page}. "
+                    f"The site is earning impressions but no clicks, so create a clearer article that matches search intent and practical reader expectations."
+                )
+            else:
+                body = (
+                    f"Search Console opportunity for query '{query}' from {page}. "
+                    f"Impressions {int(item.impressions)}, clicks {int(item.clicks)}, "
+                    f"CTR {item.ctr:.4f}, average position {item.position:.1f}."
+                )
             candidates.append(
                 TopicCandidate(
                     source="search_console",
                     title=query,
-                    body=(
-                        f"Search Console opportunity for query '{query}' from {page}. "
-                        f"Impressions {int(item.impressions)}, clicks {int(item.clicks)}, "
-                        f"CTR {item.ctr:.4f}, average position {item.position:.1f}."
-                    ),
+                    body=body,
                     score=max(60, min(95, int(round(float(item.priority_score or 0.0))))),
                     url=page,
                     long_tail_keywords=[query],
                     meta={
                         "opportunity_source": True,
-                        "opportunity_action": str(item.action_type or ""),
+                        "opportunity_action": action_type,
                         "search_console_query": query,
                         "search_console_page": page,
                         "ctr_score": max(0.0, min(100.0, float(item.ctr or 0.0) * 100.0)),
                         "position_score": max(0.0, min(100.0, 100.0 - (float(item.position or 100.0) * 4.0))),
                         "cluster_id": cluster_id,
+                        "intent_family": intent_family,
+                        "intent_primary_query": query,
                         "news_category": "search_derived",
                     },
                 )
             )
+            if len(candidates) >= max(1, int(limit)):
+                break
         return candidates
 
     def _policy_gate_candidate(
@@ -1886,6 +1914,12 @@ class AgentWorkflow:
         position = float(meta.get("position_score", 55.0) or 55.0)
         cluster = 68.0 if str(meta.get("cluster_id", "") or "").strip() else 52.0
         relevance = min(100.0, 55.0 + (self._keyword_specificity_score(query) * 8.0))
+        intent_family = str(meta.get("intent_family", "") or self._infer_intent_family(query, content_type="search_derived"))
+        comparison = 88.0 if intent_family == "comparison" else (62.0 if "compare" in query.lower() else 24.0)
+        tutorial = 86.0 if intent_family == "how_to" else (58.0 if "how to" in query.lower() else 22.0)
+        evergreen = 78.0 if intent_family in {"how_to", "alternatives", "comparison"} else 56.0
+        usefulness = min(100.0, relevance + (8.0 if str(meta.get("opportunity_action", "") or "") in {"intent_fix", "title_rewrite"} else 0.0))
+        competition_inverse = max(35.0, min(100.0, (0.65 * position) + (0.35 * max(0.0, 100.0 - ctr))))
         scored = self.topic_scoring.score_for_type(
             query or str(getattr(candidate, "title", "") or ""),
             content_type="search_derived",
@@ -1894,6 +1928,13 @@ class AgentWorkflow:
             position=position,
             cluster=cluster,
             relevance=relevance,
+            freshness=62.0,
+            search_demand=opportunity,
+            usefulness=usefulness,
+            comparison_potential=comparison,
+            tutorial_potential=tutorial,
+            evergreen_potential=evergreen,
+            competition_inverse=competition_inverse,
         )
         return max(60, min(96, int(round(scored.total))))
 
@@ -1904,6 +1945,12 @@ class AgentWorkflow:
         relevance = min(100.0, 58.0 + (self._keyword_specificity_score(query) * 7.0))
         durability = 72.0
         recurring_interest = 68.0 if len(list(getattr(candidate, "long_tail_keywords", []) or [])) >= 2 else 54.0
+        intent_family = str(meta.get("intent_family", "") or self._infer_intent_family(query, content_type="evergreen"))
+        usefulness = min(100.0, relevance + 10.0)
+        comparison = 74.0 if intent_family == "comparison" else 28.0
+        tutorial = 82.0 if intent_family in {"how_to", "guide"} else 26.0
+        evergreen = max(78.0, durability + 10.0)
+        competition_inverse = max(40.0, min(100.0, (0.55 * 55.0) + (0.45 * 48.0)))
         scored = self.topic_scoring.score_for_type(
             query,
             content_type="evergreen",
@@ -1913,6 +1960,13 @@ class AgentWorkflow:
             cluster=cluster,
             relevance=relevance,
             durability=durability,
+            freshness=48.0,
+            search_demand=recurring_interest,
+            usefulness=usefulness,
+            comparison_potential=comparison,
+            tutorial_potential=tutorial,
+            evergreen_potential=evergreen,
+            competition_inverse=competition_inverse,
         )
         return max(62, min(96, int(round(scored.total))))
 
@@ -1922,16 +1976,96 @@ class AgentWorkflow:
         ctr = max(45.0, float((item or {}).get("score", 70) or 70))
         cluster = 64.0 if str((item or {}).get("topic_fp", "") or "").strip() else 50.0
         relevance = min(100.0, 50.0 + (len(build_story_tags(title=title, snippet=snippet, category=category)) * 9.0))
+        usefulness = min(100.0, relevance + 6.0)
+        trend_score = max(freshness, ctr)
+        competition_inverse = max(30.0, min(100.0, (0.50 * cluster) + (0.50 * max(0.0, 100.0 - ctr))))
         scored = self.topic_scoring.score_for_type(
             title or snippet,
             content_type="hot",
             freshness=freshness,
+            trend_score=trend_score,
             search=search,
             ctr=ctr,
             cluster=cluster,
             relevance=relevance,
+            search_demand=search,
+            usefulness=usefulness,
+            competition_inverse=competition_inverse,
         )
         return max(68, min(98, int(round(scored.total))))
+
+    def _infer_intent_family(self, text: str, *, content_type: str = "") -> str:
+        low = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not low:
+            return "guide" if str(content_type or "").strip().lower() == "evergreen" else "news_explainer"
+        if re.search(r"\b(how to|setup|configure|install|use )\b", low):
+            return "how_to"
+        if re.search(r"\b(compare|comparison|versus|vs|pricing|price|performance|benchmark)\b", low):
+            return "comparison"
+        if re.search(r"\b(alternative|alternatives|better than|competitor|replace)\b", low):
+            return "alternatives"
+        if re.search(r"\b(should you|worth it|is it worth|do you need)\b", low):
+            return "should_you"
+        if re.search(r"\b(what changed|new in|release notes|updated|rollout)\b", low):
+            return "what_changed"
+        if str(content_type or "").strip().lower() == "evergreen":
+            return "guide"
+        if str(content_type or "").strip().lower() == "search_derived":
+            return "search_answer"
+        return "news_explainer"
+
+    def _candidate_primary_query(self, candidate: TopicCandidate | None) -> str:
+        if candidate is None:
+            return ""
+        meta = dict(getattr(candidate, "meta", {}) or {})
+        return re.sub(
+            r"\s+",
+            " ",
+            str(
+                meta.get("intent_primary_query", "")
+                or meta.get("search_console_query", "")
+                or getattr(candidate, "title", "")
+                or ""
+            ).strip(),
+        )
+
+    def _apply_topic_intelligence(
+        self,
+        candidate: TopicCandidate,
+        *,
+        requested_type: str = "",
+    ) -> dict[str, Any]:
+        meta = dict(getattr(candidate, "meta", {}) or {})
+        content_type = str(requested_type or meta.get("content_type", "") or self._resolve_candidate_content_type(candidate) or "hot").strip().lower() or "hot"
+        primary_query = self._candidate_primary_query(candidate)
+        intent_family = str(meta.get("intent_family", "") or self._infer_intent_family(primary_query or getattr(candidate, "title", ""), content_type=content_type)).strip().lower().replace("-", "_") or "news_explainer"
+        cluster_id = str(meta.get("cluster_id", "") or self._infer_cluster_id_from_keyword(primary_query or getattr(candidate, "title", ""))).strip().lower() or "general"
+        assignment = self.topic_clusters.preview_assignment(
+            title=str(getattr(candidate, "title", "") or ""),
+            primary_query=primary_query,
+            content_type=content_type,
+            cluster_id=cluster_id,
+            intent_family=intent_family,
+        )
+        meta["content_type"] = content_type
+        meta["intent_primary_query"] = primary_query
+        meta["intent_family"] = assignment.intent_family
+        meta["cluster_id"] = assignment.cluster_id
+        meta["topic_cluster_label"] = assignment.cluster_label
+        meta["cluster_role"] = assignment.cluster_role
+        meta["pillar_title"] = assignment.pillar_title
+        meta["pillar_query"] = assignment.pillar_query
+        main_entity = str(meta.get("main_entity", "") or getattr(candidate, "main_entity", "") or "").strip()
+        if not main_entity:
+            try:
+                main_entity = str(self.scout._extract_main_entity(str(getattr(candidate, "title", "") or "")) or "").strip()  # noqa: SLF001
+            except Exception:
+                main_entity = ""
+        if main_entity:
+            meta["main_entity"] = main_entity
+            candidate.main_entity = main_entity
+        candidate.meta = meta
+        return dict(meta)
 
     def _resolve_candidate_content_type(self, candidate: TopicCandidate | None) -> str:
         if candidate is None:
@@ -1968,7 +2102,7 @@ class AgentWorkflow:
         meta["content_type"] = str(policy.content_type)
         meta["content_policy"] = asdict(policy)
         candidate.meta = meta
-        return dict(meta)
+        return self._apply_topic_intelligence(candidate, requested_type=policy.content_type)
 
     def _news_pool_search_seed_candidates(self, limit: int = 6) -> list[TopicCandidate]:
         seed_rows = self.news_pool_store.recent_items(days=10, limit=max(8, int(limit) * 4), min_score=70, statuses=("queued", "used"))
@@ -2032,6 +2166,8 @@ class AgentWorkflow:
                         "opportunity_source": True,
                         "opportunity_action": str(spec.candidate_kind or "").strip(),
                         "search_console_query": str(spec.primary_query or "").strip(),
+                        "intent_primary_query": str(spec.primary_query or "").strip(),
+                        "intent_family": str(spec.intent_family or "").strip().lower().replace("-", "_"),
                         "seed_headline": title,
                         "seed_source_url": source_url,
                         "cluster_id": cluster_id,
@@ -2102,6 +2238,8 @@ class AgentWorkflow:
                     "seed_from_news_pool": True,
                     "seed_headline": title,
                     "seed_source_url": source_url,
+                    "intent_primary_query": bundle.primary_query,
+                    "intent_family": "guide",
                     "cluster_id": cluster_id,
                     "news_category": category,
                     "news_provider": str((row or {}).get("provider", "") or "").strip().lower(),
@@ -4622,6 +4760,10 @@ class AgentWorkflow:
                     final_html,
                     current_title=draft.title,
                     current_keywords=news_link_keywords,
+                    current_cluster_id=str((selected.meta or {}).get("cluster_id", "") or ""),
+                    current_intent_family=str((selected.meta or {}).get("intent_family", "") or ""),
+                    current_main_entity=str((selected.meta or {}).get("main_entity", "") or ""),
+                    current_content_type=str(active_policy.get("content_type", "hot") or "hot"),
                 )
             except Exception:
                 degraded_note = self._append_note(degraded_note, "internal_links_failed")
@@ -4852,6 +4994,10 @@ class AgentWorkflow:
                                     final_html,
                                     current_title=draft.title,
                                     current_keywords=rewrite_link_keywords,
+                                    current_cluster_id=str((selected.meta or {}).get("cluster_id", "") or ""),
+                                    current_intent_family=str((selected.meta or {}).get("intent_family", "") or ""),
+                                    current_main_entity=str((selected.meta or {}).get("main_entity", "") or ""),
+                                    current_content_type=str(active_policy.get("content_type", "hot") or "hot"),
                                 )
                             except Exception:
                                 degraded_note = self._append_note(degraded_note, "internal_links_failed")
@@ -6472,6 +6618,10 @@ class AgentWorkflow:
                 final_html,
                 current_title=draft.title,
                 current_keywords=seo_keywords_for_links,
+                current_cluster_id=str((selected.meta or {}).get("cluster_id", "") or ""),
+                current_intent_family=str((selected.meta or {}).get("intent_family", "") or ""),
+                current_main_entity=str((selected.meta or {}).get("main_entity", "") or ""),
+                current_content_type=str(active_policy.get("content_type", "hot") or "hot"),
             )
         except Exception:
             generation_degraded_note = self._append_note(generation_degraded_note, "internal_links_failed")
@@ -6906,9 +7056,15 @@ class AgentWorkflow:
                 "title": str(draft.title or ""),
                 "source_url": str(draft.source_url or ""),
                 "intent_primary_query": str(intent_bundle.primary_query or ""),
+                "intent_family": str((getattr(selected, "meta", {}) or {}).get("intent_family", "") or ""),
                 "outline_archetype": str(outline_plan.archetype or ""),
                 "outline_fingerprint": str(outline_plan.fingerprint or ""),
                 "cluster_id": str(cluster_id or ""),
+                "cluster_role": str((getattr(selected, "meta", {}) or {}).get("cluster_role", "") or ""),
+                "pillar_title": str((getattr(selected, "meta", {}) or {}).get("pillar_title", "") or ""),
+                "pillar_query": str((getattr(selected, "meta", {}) or {}).get("pillar_query", "") or ""),
+                "topic_cluster_label": str((getattr(selected, "meta", {}) or {}).get("topic_cluster_label", "") or ""),
+                "main_entity": str((getattr(selected, "meta", {}) or {}).get("main_entity", "") or ""),
                 "opportunity_source": bool((getattr(selected, "meta", {}) or {}).get("opportunity_source", False)),
                 "content_type": str(active_policy.get("content_type", "hot") or "hot"),
                 "target_word_range": [
@@ -6922,6 +7078,21 @@ class AgentWorkflow:
                 "generation_mode_hint": str(active_policy.get("generation_mode_hint", "standard") or "standard"),
             }
         )
+        try:
+            assignment = self.topic_clusters.preview_assignment(
+                title=str(draft.title or ""),
+                primary_query=str((getattr(selected, "meta", {}) or {}).get("intent_primary_query", "") or intent_bundle.primary_query or draft.title),
+                content_type=str(active_policy.get("content_type", "hot") or "hot"),
+                cluster_id=str((getattr(selected, "meta", {}) or {}).get("cluster_id", "") or cluster_id or ""),
+                intent_family=str((getattr(selected, "meta", {}) or {}).get("intent_family", "") or ""),
+            )
+            self.topic_clusters.remember_published(
+                assignment=assignment,
+                title=str(draft.title or ""),
+                url=str(getattr(published, "url", "") or ""),
+            )
+        except Exception:
+            pass
         self._remember_title_fingerprint(draft.title)
         self._remember_fix_steps_fingerprint(plan_fp, draft.title)
         if manual_trigger and str(getattr(published, "post_id", "")).strip():
@@ -11845,6 +12016,56 @@ class AgentWorkflow:
         except Exception:
             return None
 
+    def _load_publish_metadata_map(self) -> dict[str, dict[str, dict[str, Any]]]:
+        path = self.root / "storage" / "logs" / "publish_metadata.jsonl"
+        out: dict[str, dict[str, dict[str, Any]]] = {"by_url": {}, "by_title": {}}
+        if not path.exists():
+            return out
+        try:
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-1200:]
+        except Exception:
+            return out
+        for raw_line in lines:
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            payload = {
+                "cluster_id": str(row.get("cluster_id", "") or "").strip().lower(),
+                "content_type": str(row.get("content_type", "") or "").strip().lower(),
+                "intent_family": str(row.get("intent_family", "") or "").strip().lower(),
+                "cluster_role": str(row.get("cluster_role", "") or "").strip().lower(),
+                "pillar_title": str(row.get("pillar_title", "") or "").strip(),
+                "pillar_query": str(row.get("pillar_query", "") or "").strip(),
+                "topic_cluster_label": str(row.get("topic_cluster_label", "") or "").strip(),
+                "main_entity": str(row.get("main_entity", "") or "").strip(),
+            }
+            url = str(row.get("published_url", "") or "").strip()
+            title = str(row.get("title", "") or "").strip().lower()
+            if url:
+                out["by_url"][url] = payload
+            if title:
+                out["by_title"][title] = payload
+        return out
+
+    def _lookup_publish_metadata(
+        self,
+        metadata_map: dict[str, dict[str, dict[str, Any]]] | None,
+        *,
+        url: str,
+        title: str,
+    ) -> dict[str, Any]:
+        payload = dict((metadata_map or {}).get("by_url", {}).get(str(url or "").strip(), {}) or {})
+        if payload:
+            return payload
+        title_key = str(title or "").strip().lower()
+        return dict((metadata_map or {}).get("by_title", {}).get(title_key, {}) or {})
+
     def _infer_topic_cluster(
         self,
         title: str,
@@ -11891,6 +12112,7 @@ class AgentWorkflow:
         cutoff = now - timedelta(days=180)
         canonical_host = self._canonical_internal_host()
         allowed_topics = {"security", "policy", "platform", "mobile", "ai", "chips", "privacy", "default"}
+        publish_metadata_map = self._load_publish_metadata_map()
         pool_rows: list[dict[str, Any]] = []
 
         # keep existing rows first so manual curation can survive refresh
@@ -12059,6 +12281,7 @@ class AgentWorkflow:
                 tags.insert(0, topic)
             if not tags:
                 tags = ["default"]
+            publish_meta = self._lookup_publish_metadata(publish_metadata_map, url=url, title=title)
             normalized.append(
                 {
                     "url": url,
@@ -12068,6 +12291,13 @@ class AgentWorkflow:
                     "topic": topic,
                     "updated_at_utc": updated.isoformat(),
                     "source": str((row or {}).get("source", "pool") or "pool"),
+                    "cluster_id": str((row or {}).get("cluster_id", "") or publish_meta.get("cluster_id", "") or topic).strip().lower(),
+                    "content_type": str((row or {}).get("content_type", "") or publish_meta.get("content_type", "") or "").strip().lower(),
+                    "intent_family": str((row or {}).get("intent_family", "") or publish_meta.get("intent_family", "") or "").strip().lower(),
+                    "cluster_role": str((row or {}).get("cluster_role", "") or publish_meta.get("cluster_role", "") or "").strip().lower(),
+                    "pillar_title": str((row or {}).get("pillar_title", "") or publish_meta.get("pillar_title", "") or "").strip(),
+                    "pillar_query": str((row or {}).get("pillar_query", "") or publish_meta.get("pillar_query", "") or "").strip(),
+                    "main_entity": str((row or {}).get("main_entity", "") or publish_meta.get("main_entity", "") or "").strip(),
                     "_host": host,
                 }
             )
@@ -12216,6 +12446,10 @@ class AgentWorkflow:
         current_title: str,
         current_keywords: list[str] | None = None,
         current_html: str | None = None,
+        current_cluster_id: str | None = None,
+        current_intent_family: str | None = None,
+        current_main_entity: str | None = None,
+        current_content_type: str | None = None,
     ) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -12226,6 +12460,9 @@ class AgentWorkflow:
             current_kw,
             current_html or "",
         )
+        current_cluster = str(current_cluster_id or self._infer_cluster_id_from_keyword(current_title)).strip().lower() or current_topic
+        current_intent = str(current_intent_family or self._infer_intent_family(" ".join(sorted(current_kw)) or current_title, content_type=str(current_content_type or ""))).strip().lower()
+        current_entity = str(current_main_entity or "").strip().lower()
         canonical_host = self._canonical_internal_host()
 
         for row in self._load_internal_links_pool():
@@ -12248,18 +12485,40 @@ class AgentWorkflow:
                     title,
                     " ".join(str(x or "") for x in (row.get("keywords", []) if isinstance(row.get("keywords", []), list) else [])),
                     " ".join(str(x or "") for x in (row.get("tags", []) if isinstance(row.get("tags", []), list) else [])),
+                    str((row or {}).get("pillar_title", "") or ""),
                 ]
             )
             overlap = self._keyword_overlap(current_kw, self._parse_focus_keywords(token_source))
             row_topic = str((row or {}).get("topic", "") or "").strip().lower() or self._infer_topic_cluster(title, token_source, "")
-            topic_bonus = 0.2 if row_topic == current_topic else 0.0
+            row_cluster = str((row or {}).get("cluster_id", "") or row_topic).strip().lower()
+            row_intent = str((row or {}).get("intent_family", "") or "").strip().lower()
+            row_entity = str((row or {}).get("main_entity", "") or "").strip().lower()
+            row_content_type = str((row or {}).get("content_type", "") or "").strip().lower()
+            row_cluster_role = str((row or {}).get("cluster_role", "") or "").strip().lower()
+            score = float(overlap)
+            if row_topic == current_topic:
+                score += 0.15
+            if row_cluster and row_cluster == current_cluster:
+                score += 0.35
+            if current_intent and row_intent and row_intent == current_intent:
+                score += 0.15
+            if current_entity and row_entity and row_entity == current_entity:
+                score += 0.20
+            if current_content_type and row_content_type and row_content_type == str(current_content_type or "").strip().lower():
+                score += 0.05
+            if row_cluster_role == "pillar":
+                score += 0.05
             candidates.append(
                 {
                     "url": url,
                     "title": title,
                     "topic": row_topic,
-                    "score": float(overlap) + float(topic_bonus),
+                    "score": score,
                     "source": "pool",
+                    "cluster_id": row_cluster,
+                    "intent_family": row_intent,
+                    "main_entity": row_entity,
+                    "content_type": row_content_type,
                 }
             )
             seen.add(url)
@@ -12290,14 +12549,20 @@ class AgentWorkflow:
             )
             overlap = self._keyword_overlap(current_kw, kw)
             row_topic = self._infer_topic_cluster(title, kw, str((row or {}).get("summary", "") or ""))
-            topic_bonus = 0.2 if row_topic == current_topic else 0.0
+            row_cluster = str((row or {}).get("cluster_id", "") or row_topic).strip().lower()
+            score = float(overlap)
+            if row_topic == current_topic:
+                score += 0.15
+            if row_cluster and row_cluster == current_cluster:
+                score += 0.35
             candidates.append(
                 {
                     "url": url,
                     "title": title,
                     "topic": row_topic,
-                    "score": float(overlap) + float(topic_bonus),
+                    "score": score,
                     "source": "posts_index",
+                    "cluster_id": row_cluster,
                 }
             )
             seen.add(url)
@@ -12316,6 +12581,10 @@ class AgentWorkflow:
         html: str,
         current_title: str,
         current_keywords: list[str] | None = None,
+        current_cluster_id: str | None = None,
+        current_intent_family: str | None = None,
+        current_main_entity: str | None = None,
+        current_content_type: str | None = None,
     ) -> str:
         src = str(html or "")
         if not src:
@@ -12337,6 +12606,10 @@ class AgentWorkflow:
             current_title=current_title,
             current_keywords=current_keywords,
             current_html=out,
+            current_cluster_id=current_cluster_id,
+            current_intent_family=current_intent_family,
+            current_main_entity=current_main_entity,
+            current_content_type=current_content_type,
         )
         if not candidates:
             return out
@@ -12419,6 +12692,9 @@ class AgentWorkflow:
         current_keywords: list[str] | None = None,
         current_device_type: str | None = None,
         current_cluster_id: str | None = None,
+        current_intent_family: str | None = None,
+        current_main_entity: str | None = None,
+        current_content_type: str | None = None,
     ) -> str:
         if not bool(getattr(self.settings.internal_links, "enabled", True)):
             return ""
@@ -12432,7 +12708,10 @@ class AgentWorkflow:
         device = str(current_device_type or self._infer_device_type(current_title)).strip().lower() or "windows"
         cluster = str(current_cluster_id or self._infer_cluster_id_from_keyword(current_title)).strip().lower() or "general"
         current_kw = self._parse_focus_keywords(current_keywords or current_title)
+        current_intent = str(current_intent_family or self._infer_intent_family(" ".join(sorted(current_kw)) or current_title, content_type=str(current_content_type or ""))).strip().lower()
+        current_entity = str(current_main_entity or "").strip().lower()
         current_title_l = str(current_title or "").strip().lower()
+        publish_metadata_map = self._load_publish_metadata_map()
 
         rows = self.posts_index.query_recent(
             limit=260,
@@ -12452,10 +12731,25 @@ class AgentWorkflow:
             row_device = str((row or {}).get("device_type", "") or "").strip().lower()
             row_cluster = str((row or {}).get("cluster_id", "") or "").strip().lower()
             row_kw = self._parse_focus_keywords(str((row or {}).get("focus_keywords", "") or ""))
+            title_blob = str((row or {}).get("title", "") or "")
+            meta_payload = self._lookup_publish_metadata(
+                publish_metadata_map,
+                url=url,
+                title=title_blob,
+            )
+            row_intent = str(meta_payload.get("intent_family", "") or self._infer_intent_family(title_blob, content_type=str((row or {}).get("content_type", "") or ""))).strip().lower()
+            row_entity = str(meta_payload.get("main_entity", "") or "").strip().lower()
             if news_mode:
+                ov_news = self._keyword_overlap(current_kw, row_kw)
+                score = ov_news
                 if row_cluster == cluster:
-                    ov_news = self._keyword_overlap(current_kw, row_kw)
-                    secondary.append((max(ov_news, 0.25), row))
+                    score += 0.45
+                if current_intent and row_intent == current_intent:
+                    score += 0.15
+                if current_entity and row_entity and row_entity == current_entity:
+                    score += 0.15
+                if score > 0:
+                    secondary.append((score, row))
                 continue
             if row_device == device and row_cluster == cluster:
                 primary.append(row)

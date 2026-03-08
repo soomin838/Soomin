@@ -24,6 +24,7 @@ class IntentBundle:
 class SearchIntentCandidateSpec:
     content_type: str
     candidate_kind: str
+    intent_family: str
     title: str
     body: str
     primary_query: str
@@ -340,15 +341,20 @@ class SearchIntentGenerator:
         source_url: str = "",
         max_candidates: int = 3,
     ) -> list[SearchIntentCandidateSpec]:
-        query = re.sub(r"\s+", " ", str(bundle.primary_query or headline or "").strip())
-        if not query:
+        topic = self._candidate_topic(bundle=bundle, headline=headline)
+        if not topic:
             return []
         clean_headline = re.sub(r"\s+", " ", str(headline or "").strip())
         cat = str(category or "").strip().lower()
-        candidate_kinds = self._candidate_kinds(bundle, cat)
+        candidate_rows = self._candidate_rows(bundle=bundle, topic=topic, category=cat)
         out: list[SearchIntentCandidateSpec] = []
         seen_titles: set[str] = set()
-        for kind in candidate_kinds:
+        for row in candidate_rows:
+            kind = str(row.get("kind", "") or "").strip().lower()
+            query = re.sub(r"\s+", " ", str(row.get("query", "") or "").strip())
+            family = re.sub(r"[\s\-]+", "_", str(row.get("intent_family", kind) or kind).strip().lower())
+            if not kind or not query:
+                continue
             title = self._candidate_title(kind=kind, query=query, headline=clean_headline, category=cat)
             key = title.lower().strip()
             if not title or key in seen_titles:
@@ -358,6 +364,7 @@ class SearchIntentGenerator:
                 SearchIntentCandidateSpec(
                     content_type="search_derived",
                     candidate_kind=kind,
+                    intent_family=family or kind,
                     title=title[:110],
                     body=self._candidate_body(
                         kind=kind,
@@ -386,17 +393,77 @@ class SearchIntentGenerator:
             out = ["should-you", "comparison", "alternatives", "how-to"]
         return out
 
+    def _candidate_topic(self, *, bundle: IntentBundle, headline: str) -> str:
+        base = re.sub(r"\s+", " ", str(bundle.primary_query or headline or "").strip())
+        if not base:
+            return ""
+        base = re.sub(
+            r"\b(what changed and who is affected|what it means and what to watch|what it means in practice|what changed from before|who is affected first|practical impact for americans)\b",
+            "",
+            base,
+            flags=re.IGNORECASE,
+        )
+        base = re.sub(r"\s+", " ", base).strip(" -:")
+        return base[:120] or re.sub(r"\s+", " ", str(headline or "").strip())[:120]
+
+    def _candidate_rows(self, *, bundle: IntentBundle, topic: str, category: str) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        supporting_blob = " ".join(str(x or "") for x in (bundle.supporting_queries or []))
+        lower_supporting = supporting_blob.lower()
+        kind_order = self._candidate_kinds(bundle, category)
+        query_map = {
+            "what-changed": f"{topic} what changed",
+            "should-you": f"should you care about {topic}",
+            "comparison": f"{topic} comparison",
+            "alternatives": f"{topic} alternatives",
+            "how-to": f"how to use {topic}",
+        }
+        if any(token in lower_supporting for token in ("pricing", "cost", "price")):
+            query_map["comparison"] = f"{topic} pricing comparison"
+        if any(token in lower_supporting for token in ("performance", "benchmark", "speed")):
+            query_map["comparison"] = f"{topic} performance comparison"
+        for kind in kind_order:
+            rows.append(
+                {
+                    "kind": kind,
+                    "query": query_map.get(kind, f"{topic} {kind}".strip()),
+                    "intent_family": kind,
+                }
+            )
+        for query in (bundle.supporting_queries or []):
+            clean = re.sub(r"\s+", " ", str(query or "").strip())
+            if not clean:
+                continue
+            if re.search(r"\b(how to|setup|configure|install|use )\b", clean, flags=re.IGNORECASE):
+                family = "how-to"
+            elif re.search(r"\b(alternative|alternatives|replace|competitor)\b", clean, flags=re.IGNORECASE):
+                family = "alternatives"
+            elif re.search(r"\b(compare|comparison|versus|vs|pricing|performance)\b", clean, flags=re.IGNORECASE):
+                family = "comparison"
+            else:
+                family = "should-you"
+            rows.append({"kind": family, "query": clean[:160], "intent_family": family})
+        return rows
+
     def _candidate_title(self, *, kind: str, query: str, headline: str, category: str) -> str:
         base = re.sub(r"[?]+$", "", query).strip()
         if kind == "how-to":
-            return f"How to make sense of {base}"
+            if re.match(r"^how to\b", base, flags=re.IGNORECASE):
+                return base[:1].upper() + base[1:]
+            return f"How to use {base}"
         if kind == "comparison":
             return f"{base}: what actually matters when you compare it"
         if kind == "what-changed":
+            if re.search(r"\bwhat changed\b", base, flags=re.IGNORECASE):
+                return f"{base}: why it matters now"
             return f"What changed with {base} and why it matters"
         if kind == "should-you":
+            if re.match(r"^should you\b", base, flags=re.IGNORECASE):
+                return base[:1].upper() + base[1:] + ("?" if not base.endswith("?") else "")
             return f"Should you care about {base} right now?"
         if kind == "alternatives":
+            if re.search(r"\balternatives\b", base, flags=re.IGNORECASE):
+                return f"{base}: tradeoffs to consider"
             return f"{base}: better alternatives and tradeoffs to consider"
         return headline or base
 

@@ -1000,6 +1000,10 @@ class GeminiBrain:
             f"{title}={outline_plan.paragraph_lengths[idx] if idx < len(outline_plan.paragraph_lengths) else 'medium'}"
             for idx, title in enumerate(outline_plan.section_titles)
         )
+        section_purpose_plan = "\n".join(
+            f"- {outline_plan.section_titles[idx]}: {outline_plan.section_purposes[idx] if idx < len(outline_plan.section_purposes) else 'reader value'}"
+            for idx in range(len(outline_plan.section_titles))
+        )
         supporting_queries = [
             re.sub(r"\s+", " ", str(x or "")).strip()
             for x in (intent_bundle.supporting_queries or [])
@@ -1058,10 +1062,10 @@ class GeminiBrain:
                 f"Primary search intent: {intent_bundle.primary_query}\n",
                 f"Audience: {intent_bundle.audience}\n",
                 f"Content kind: {intent_bundle.content_kind}\n",
-                f"Recommended archetypes: {list(intent_bundle.recommended_archetypes or [])}\n",
-                f"Selected archetype: {outline_plan.archetype}\n",
-                "H2 section order for this run (follow exactly):\n",
+                "Dynamic section order for this run (follow exactly):\n",
                 f"{section_order_text}\n",
+                "Section purposes for this run:\n",
+                f"{section_purpose_plan}\n",
                 f"Intro pattern: {outline_plan.intro_template}\n",
                 f"Conclusion pattern: {outline_plan.conclusion_template}\n",
                 f"Paragraph rhythm: {paragraph_plan}\n",
@@ -1074,7 +1078,8 @@ class GeminiBrain:
                 "\nAngles to avoid:\n",
                 "\n".join(f"- {item}" for item in negative_angles),
                 "\n",
-                "Required core H2 sections: Quick Take, What Happened, What To Do Now, Sources.\n",
+                "Do not inject standard fallback headings that are not in the dynamic outline.\n",
+                "Quick Take must stay first and Sources must stay last, but all middle sections must follow this run's generated outline.\n",
                 f"{depth_line}\n",
                 f"{section_depth_line}\n",
                 "Under Quick Take, include a 2-3 sentence lede and a 5-bullet key facts list.\n",
@@ -1108,7 +1113,7 @@ class GeminiBrain:
             retry_prompt = (
                 prompt
                 + "\n\nREWRITE REQUIRED: previous output was too short or too generic. "
-                "Regenerate the full article at editorial depth while preserving the exact section order."
+                "Regenerate the full article at editorial depth while preserving the exact dynamic section order and section purposes."
             )
             retry_payload = self._extract_json(
                 self._generate_text(

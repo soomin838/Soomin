@@ -73,10 +73,13 @@ class MixedPublishingRuntimeTests(unittest.TestCase):
             "chip launch",
             content_type="hot",
             freshness=95,
+            trend_score=92,
             search=50,
             ctr=40,
             cluster=60,
             relevance=70,
+            usefulness=72,
+            search_demand=58,
         )
         evergreen = scoring.score_for_type(
             "best password manager",
@@ -86,10 +89,16 @@ class MixedPublishingRuntimeTests(unittest.TestCase):
             cluster=68,
             relevance=82,
             durability=90,
+            freshness=48,
+            search_demand=78,
+            usefulness=86,
+            evergreen_potential=92,
         )
         self.assertEqual(hot.content_type, "hot")
         self.assertEqual(evergreen.content_type, "evergreen")
-        self.assertGreater(evergreen.total, hot.total)
+        self.assertGreater(evergreen.evergreen_potential, hot.evergreen_potential)
+        self.assertGreater(hot.trend, evergreen.freshness)
+        self.assertNotEqual(evergreen.total, hot.total)
 
     def test_news_pool_recent_items_exposes_seed_input(self) -> None:
         fd, raw_path = tempfile.mkstemp(suffix=".sqlite3")

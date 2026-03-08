@@ -56,11 +56,7 @@ class StructureRandomizerTests(unittest.TestCase):
                         "heading_signature": "quick take|how this unfolded|the important details|why readers care|sources",
                     }
                 ],
-            ), patch.object(engine, "_hybrid_similarity", return_value=0.20), patch.object(
-                engine,
-                "_heading_similarity",
-                return_value=0.96,
-            ):
+            ), patch.object(engine, "_hybrid_similarity", return_value=0.96):
                 with self.assertRaisesRegex(RuntimeError, "template_similarity_too_high"):
                     engine.pick_outline(candidate=candidate, intent_bundle=bundle, category="policy", cluster_id="policy")
 
