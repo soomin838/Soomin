@@ -15,10 +15,11 @@ class GateStage:
         started = time.perf_counter()
         accepted = []
         skipped = []
+        mode = self._resolve_mode(context)
         for candidate in candidates:
             story = self.story_guard.evaluate(
                 candidate,
-                mode=str(getattr(context.settings.content_mode, 'mode', 'tech_news_only') or 'tech_news_only'),
+                mode=mode,
             )
             if not story.allow:
                 skipped.append({'title': candidate.title, 'reason': story.reason_code})
@@ -32,14 +33,15 @@ class GateStage:
                 continue
             accepted.append((candidate, story))
         if not accepted:
+            primary_reason = str(skipped[0]['reason'] or 'all_candidates_rejected') if skipped else 'all_candidates_rejected'
             return StageResult(
                 'gate_stage',
                 'skipped',
-                'all_candidates_rejected',
+                primary_reason,
                 '모든 후보가 정책 또는 드리프트 가드에서 제외되었습니다.',
                 int((time.perf_counter() - started) * 1000),
                 [],
-                {'skipped': skipped},
+                {'skipped': skipped, 'primary_reason': primary_reason},
             )
         accepted.sort(key=lambda item: float(item[0].raw_meta.get('score', 0.0) or 0.0), reverse=True)
         payload = [{'candidate': item[0], 'story': item[1]} for item in accepted]
@@ -52,3 +54,9 @@ class GateStage:
             payload,
             {'skipped': skipped},
         )
+
+    def _resolve_mode(self, context) -> str:
+        mode = str(getattr(getattr(context.settings, 'content_mode', None), 'mode', '') or '').strip().lower()
+        if mode in {'', 'news_pool', 'news_interpretation', 'news_interpretation_only'}:
+            return 'tech_news_only'
+        return mode

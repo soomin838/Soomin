@@ -261,7 +261,8 @@ class RunEngine:
             "ingest_stage": self.overrides.get("ingest_stage")
             or IngestStage(gdelt_client=gdelt_client, candidate_store=self.candidate_store, search_console_client=search_console_client, topic_scorer=topic_scorer),
             "gate_stage": self.overrides.get("gate_stage") or GateStage(story_guard=story_guard, support_guard=support_guard, candidate_store=self.candidate_store),
-            "intent_stage": self.overrides.get("intent_stage") or IntentStage(intent_engine=intent_engine, candidate_store=self.candidate_store, topic_scorer=topic_scorer),
+            "intent_stage": self.overrides.get("intent_stage")
+            or IntentStage(intent_engine=intent_engine, candidate_store=self.candidate_store, topic_scorer=topic_scorer, story_guard=story_guard),
             "outline_stage": self.overrides.get("outline_stage") or OutlineStage(grounding_guard=grounding_guard, outline_engine=outline_engine),
             "draft_stage": self.overrides.get("draft_stage") or DraftStage(draft_engine=draft_engine, coherence_guard=coherence_guard),
             "image_stage": self.overrides.get("image_stage") or ImageStage(pollinations_client=pollinations_client, image_guard=image_guard, image_policy=v2_config),

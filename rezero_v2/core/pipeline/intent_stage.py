@@ -6,14 +6,35 @@ from rezero_v2.core.domain.stage_result import StageResult
 
 
 class IntentStage:
-    def __init__(self, *, intent_engine, candidate_store, topic_scorer) -> None:
+    def __init__(self, *, intent_engine, candidate_store, topic_scorer, story_guard=None) -> None:
         self.intent_engine = intent_engine
         self.candidate_store = candidate_store
         self.topic_scorer = topic_scorer
+        self.story_guard = story_guard
 
     def run(self, context, candidate):
         started = time.perf_counter()
         candidate = self.intent_engine.prepare_candidate(candidate, allocation_slot=context.allocation.slot_type)
+        if self.story_guard is not None:
+            story = self.story_guard.evaluate(
+                candidate,
+                mode=self._resolve_mode(context),
+            )
+            if not story.allow:
+                return StageResult(
+                    'intent_stage',
+                    'skipped',
+                    story.reason_code,
+                    '정규화 후 후보를 다시 평가한 결과 기술 기사 기준을 충족하지 못해 건너뜁니다.',
+                    int((time.perf_counter() - started) * 1000),
+                    {'candidate': candidate},
+                    {
+                        'source_headline': candidate.source_headline,
+                        'normalized_source_headline': candidate.normalized_source_headline,
+                        'story_reason': story.reason_code,
+                        'source_language': candidate.raw_meta.get('source_language', ''),
+                    },
+                )
         valid, reason_code, meta = self.intent_engine.validate_selected_candidate(candidate=candidate, allocation_slot=context.allocation.slot_type)
         if not valid:
             return StageResult(
@@ -60,3 +81,9 @@ class IntentStage:
                 'chosen_intent_family': bundle.chosen_intent_family,
             },
         )
+
+    def _resolve_mode(self, context) -> str:
+        mode = str(getattr(getattr(context.settings, 'content_mode', None), 'mode', '') or '').strip().lower()
+        if mode in {'', 'news_pool', 'news_interpretation', 'news_interpretation_only'}:
+            return 'tech_news_only'
+        return mode
